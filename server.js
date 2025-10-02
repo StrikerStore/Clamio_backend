@@ -125,6 +125,27 @@ app.get('/health', (req, res) => {
 });
 
 /**
+ * Environment Check Endpoint (for debugging)
+ */
+app.get('/env-check', (req, res) => {
+  res.json({
+    success: true,
+    message: 'Environment variables check',
+    database: {
+      host: process.env.DB_HOST ? 'Set' : 'Missing',
+      user: process.env.DB_USER ? 'Set' : 'Missing',
+      password: process.env.DB_PASSWORD ? 'Set' : 'Missing',
+      database: process.env.DB_NAME ? 'Set' : 'Missing',
+      port: process.env.DB_PORT ? 'Set' : 'Missing',
+      ssl: process.env.DB_SSL ? 'Set' : 'Missing'
+    },
+    cors: {
+      origin: process.env.CORS_ORIGIN || 'Not set'
+    }
+  });
+});
+
+/**
  * API Routes
  */
 app.use('/api/auth', authRoutes);
