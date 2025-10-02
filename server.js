@@ -125,6 +125,18 @@ app.get('/health', (req, res) => {
 });
 
 /**
+ * Simple Test Endpoint (no database required)
+ */
+app.get('/test', (req, res) => {
+  res.json({
+    success: true,
+    message: 'Simple test endpoint working',
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || 'development'
+  });
+});
+
+/**
  * Environment Check Endpoint (for debugging)
  */
 app.get('/env-check', (req, res) => {
@@ -132,17 +144,58 @@ app.get('/env-check', (req, res) => {
     success: true,
     message: 'Environment variables check',
     database: {
-      host: process.env.DB_HOST ? 'Set' : 'Missing',
-      user: process.env.DB_USER ? 'Set' : 'Missing',
-      password: process.env.DB_PASSWORD ? 'Set' : 'Missing',
-      database: process.env.DB_NAME ? 'Set' : 'Missing',
-      port: process.env.DB_PORT ? 'Set' : 'Missing',
-      ssl: process.env.DB_SSL ? 'Set' : 'Missing'
+      host: process.env.DB_HOST ? process.env.DB_HOST : 'Missing',
+      user: process.env.DB_USER ? process.env.DB_USER : 'Missing',
+      password: process.env.DB_PASSWORD ? process.env.DB_PASSWORD : 'Missing',
+      database: process.env.DB_NAME ? process.env.DB_NAME : 'Missing',
+      port: process.env.DB_PORT ? process.env.DB_PORT : 'Missing',
+      ssl: process.env.DB_SSL ? process.env.DB_SSL : 'Missing'
     },
     cors: {
       origin: process.env.CORS_ORIGIN || 'Not set'
     }
   });
+});
+
+/**
+ * Database Connection Test Endpoint
+ */
+app.get('/db-test', async (req, res) => {
+  try {
+    const database = require('./config/database');
+    const isConnected = database.isMySQLAvailable();
+    
+    if (isConnected) {
+      // Try a simple query
+      const users = await database.getAllUsers();
+      res.json({
+        success: true,
+        message: 'Database connection successful',
+        data: {
+          connected: true,
+          userCount: users.length,
+          sampleUser: users[0] || null
+        }
+      });
+    } else {
+      res.json({
+        success: false,
+        message: 'Database not connected',
+        data: {
+          connected: false
+        }
+      });
+    }
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Database connection failed',
+      error: error.message,
+      data: {
+        connected: false
+      }
+    });
+  }
 });
 
 /**
