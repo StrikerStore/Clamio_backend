@@ -68,46 +68,78 @@ class Database {
         throw new Error('Missing required database environment variables: DB_HOST, DB_USER, DB_PASSWORD, DB_NAME');
       }
 
-      // First try to connect without database to create it if needed
-      let connection = await mysql.createConnection({
+      // Railway-specific connection configuration
+      const isRailway = dbConfig.host?.includes('railway') || dbConfig.host?.includes('rlwy');
+      const connectionConfig = {
         host: dbConfig.host,
         user: dbConfig.user,
         password: dbConfig.password,
         port: dbConfig.port,
-        ssl: process.env.NODE_ENV === 'production' || process.env.DB_HOST?.includes('railway') || process.env.DB_HOST?.includes('rlwy') ? { rejectUnauthorized: false } : false,
-        connectTimeout: 60000,
-        acquireTimeout: 60000,
-        timeout: 60000
-      });
-
-      // Create database if it doesn't exist
-      await connection.execute(`CREATE DATABASE IF NOT EXISTS ${dbConfig.database}`);
-      await connection.end();
-
-      // Now connect to the specific database
-      this.mysqlConnection = await mysql.createConnection({
-        host: dbConfig.host,
-        user: dbConfig.user,
-        password: dbConfig.password,
         database: dbConfig.database,
-        port: dbConfig.port,
-        ssl: process.env.NODE_ENV === 'production' || process.env.DB_HOST?.includes('railway') || process.env.DB_HOST?.includes('rlwy') ? { rejectUnauthorized: false } : false,
-        connectTimeout: 60000,
-        acquireTimeout: 60000,
-        timeout: 60000
+        ssl: isRailway ? { rejectUnauthorized: false } : false,
+        connectTimeout: 30000, // Reduced timeout for serverless
+        acquireTimeout: 30000,
+        timeout: 30000,
+        reconnect: true,
+        keepAliveInitialDelay: 0,
+        enableKeepAlive: true,
+        // Railway-specific settings
+        ...(isRailway && {
+          charset: 'utf8mb4',
+          timezone: '+00:00',
+          multipleStatements: false,
+          flags: ['-FOUND_ROWS']
+        })
+      };
+
+      // Connect with retry logic for Railway
+      let retries = 3;
+      let lastError;
+      
+      while (retries > 0) {
+        try {
+          console.log(`🔄 Attempting database connection (${4 - retries}/3)...`);
+          this.mysqlConnection = await mysql.createConnection(connectionConfig);
+          
+          // Test the connection
+          await this.mysqlConnection.execute('SELECT 1');
+          console.log('✅ MySQL connection established');
+          
+          // Create tables
+          await this.createCarriersTable();
+          await this.createProductsTable();
+          await this.createUsersTable();
+          await this.createSettlementsTable();
+          await this.createTransactionsTable();
+          await this.createOrdersTable();
+          await this.createClaimsTable();
+          
+          this.mysqlInitialized = true;
+          return; // Success, exit retry loop
+          
+        } catch (error) {
+          lastError = error;
+          retries--;
+          console.error(`❌ Connection attempt failed (${retries} retries left):`, error.message);
+          
+          if (retries > 0) {
+            console.log('⏳ Waiting 2 seconds before retry...');
+            await new Promise(resolve => setTimeout(resolve, 2000));
+          }
+        }
+      }
+      
+      // All retries failed
+      throw lastError;
+      
+    } catch (error) {
+      console.error('❌ MySQL connection failed after all retries:', error.message);
+      console.error('🔍 Error details:', {
+        code: error.code,
+        errno: error.errno,
+        sqlState: error.sqlState
       });
       
-      console.log('✅ MySQL connection established');
-      await this.createCarriersTable();
-      await this.createProductsTable();
-      await this.createUsersTable();
-      await this.createSettlementsTable();
-      await this.createTransactionsTable();
-      await this.createOrdersTable();
-      await this.createClaimsTable();
-      this.mysqlInitialized = true;
-    } catch (error) {
-      console.error('❌ MySQL connection failed:', error.message);
       // MySQL connection failed - application will not function without database
       this.mysqlConnection = null;
       this.mysqlInitialized = true; // Mark as initialized even if failed
@@ -2472,6 +2504,43 @@ class Database {
    */
   isMySQLAvailable() {
     return this.mysqlConnection !== null;
+  }
+
+  /**
+   * Test database connection health
+   * @returns {Promise<boolean>} True if connection is healthy
+   */
+  async testConnection() {
+    if (!this.mysqlConnection) {
+      return false;
+    }
+
+    try {
+      await this.mysqlConnection.execute('SELECT 1');
+      return true;
+    } catch (error) {
+      console.error('Database connection test failed:', error.message);
+      return false;
+    }
+  }
+
+  /**
+   * Reconnect to database if connection is lost
+   * @returns {Promise<boolean>} True if reconnection successful
+   */
+  async reconnect() {
+    try {
+      if (this.mysqlConnection) {
+        await this.mysqlConnection.end();
+      }
+      
+      // Reinitialize connection
+      await this.initializeMySQL();
+      return true;
+    } catch (error) {
+      console.error('Database reconnection failed:', error.message);
+      return false;
+    }
   }
 
   /**

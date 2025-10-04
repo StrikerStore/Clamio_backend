@@ -163,9 +163,11 @@ app.get('/env-check', (req, res) => {
 app.get('/db-test', async (req, res) => {
   try {
     const database = require('./config/database');
-    const isConnected = database.isMySQLAvailable();
     
-    if (isConnected) {
+    // Test connection health
+    const isHealthy = await database.testConnection();
+    
+    if (isHealthy) {
       // Try a simple query
       const users = await database.getAllUsers();
       res.json({
@@ -173,26 +175,49 @@ app.get('/db-test', async (req, res) => {
         message: 'Database connection successful',
         data: {
           connected: true,
+          healthy: true,
           userCount: users.length,
           sampleUser: users[0] || null
         }
       });
     } else {
-      res.json({
-        success: false,
-        message: 'Database not connected',
-        data: {
-          connected: false
-        }
-      });
+      // Try to reconnect
+      console.log('🔄 Attempting to reconnect to database...');
+      const reconnected = await database.reconnect();
+      
+      if (reconnected) {
+        const users = await database.getAllUsers();
+        res.json({
+          success: true,
+          message: 'Database reconnected successfully',
+          data: {
+            connected: true,
+            healthy: true,
+            reconnected: true,
+            userCount: users.length,
+            sampleUser: users[0] || null
+          }
+        });
+      } else {
+        res.json({
+          success: false,
+          message: 'Database connection failed and reconnection unsuccessful',
+          data: {
+            connected: false,
+            healthy: false,
+            reconnected: false
+          }
+        });
+      }
     }
   } catch (error) {
     res.status(500).json({
       success: false,
-      message: 'Database connection failed',
+      message: 'Database connection test failed',
       error: error.message,
       data: {
-        connected: false
+        connected: false,
+        healthy: false
       }
     });
   }
