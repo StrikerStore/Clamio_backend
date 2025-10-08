@@ -13,7 +13,7 @@ const shipwayRoutes = require('./routes/shipway');
 const ordersRoutes = require('./routes/orders');
 const settlementRoutes = require('./routes/settlements');
 
-// Import database to initialize it
+// Import database (will be initialized lazily)
 const database = require('./config/database');
 const { fetchAndSaveShopifyProducts } = require('./services/shopifyProductFetcher');
 const shipwayService = require('./services/shipwayService');
@@ -112,6 +112,49 @@ if (process.env.NODE_ENV === 'development') {
 }
 
 /**
+ * Database Connection Middleware
+ * Ensures database is connected before handling requests
+ * Automatically handles stale connections after idle periods
+ */
+app.use(async (req, res, next) => {
+  // Skip database check for health and test endpoints
+  if (req.path === '/health' || req.path === '/test' || req.path === '/env-check') {
+    return next();
+  }
+
+  try {
+    // Check if database is available
+    if (!database.isMySQLAvailable()) {
+      console.log('🔄 Database not available, attempting to initialize...');
+      await database.initializeMySQL();
+    }
+
+    // Test connection health (pool will auto-refresh stale connections)
+    const isHealthy = await database.testConnection();
+    if (!isHealthy) {
+      console.log('🔄 Database connection unhealthy, attempting to reconnect...');
+      await database.reconnect();
+    }
+
+    next();
+  } catch (error) {
+    console.error('❌ Database connection failed in middleware:', error.message);
+    
+    // For API routes, return error
+    if (req.path.startsWith('/api/')) {
+      return res.status(503).json({
+        success: false,
+        message: 'Database temporarily unavailable',
+        error: 'Service temporarily unavailable. Please try again in a moment.'
+      });
+    }
+    
+    // For other routes, continue (might be static files)
+    next();
+  }
+});
+
+/**
  * Health Check Endpoint
  */
 app.get('/health', (req, res) => {
@@ -137,6 +180,49 @@ app.get('/test', (req, res) => {
 });
 
 /**
+ * Auth Test Endpoint (tests database connection in auth context)
+ */
+app.get('/auth-test', async (req, res) => {
+  try {
+    const database = require('./config/database');
+    
+    // Test if database is available
+    const isAvailable = database.isMySQLAvailable();
+    if (!isAvailable) {
+      return res.status(500).json({
+        success: false,
+        message: 'Database not available',
+        data: { available: false }
+      });
+    }
+
+    // Test a simple user query (like auth does)
+    const users = await database.getAllUsers();
+    
+    res.json({
+      success: true,
+      message: 'Auth context database test successful',
+      data: {
+        available: true,
+        userCount: users.length,
+        sampleUser: users[0] ? {
+          id: users[0].id,
+          email: users[0].email,
+          role: users[0].role
+        } : null
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Auth context database test failed',
+      error: error.message,
+      data: { available: false }
+    });
+  }
+});
+
+/**
  * Environment Check Endpoint (for debugging)
  */
 app.get('/env-check', (req, res) => {
@@ -154,6 +240,20 @@ app.get('/env-check', (req, res) => {
     cors: {
       origin: process.env.CORS_ORIGIN || 'Not set'
     }
+  });
+});
+
+/**
+ * Connection Pool Statistics Endpoint
+ */
+app.get('/pool-stats', (req, res) => {
+  const database = require('./config/database');
+  const stats = database.getPoolStats();
+  
+  res.json({
+    success: true,
+    message: 'Connection pool statistics',
+    data: stats
   });
 });
 
@@ -231,6 +331,15 @@ app.use('/api/users', userRoutes);
 app.use('/api/shipway', shipwayRoutes);
 app.use('/api/orders', ordersRoutes);
 app.use('/api/settlements', settlementRoutes);
+
+/**
+ * Legacy Routes (without /api prefix) - for backward compatibility
+ */
+app.use('/auth', authRoutes);
+app.use('/users', userRoutes);
+app.use('/shipway', shipwayRoutes);
+app.use('/orders', ordersRoutes);
+app.use('/settlements', settlementRoutes);
 
 
 /**

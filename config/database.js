@@ -8,15 +8,35 @@ const mysql = require('mysql2/promise');
  */
 class Database {
   constructor() {
-    this.mysqlConnection = null;
+    this.mysqlConnection = null; // Keep for backward compatibility
+    this.mysqlPool = null; // Connection pool
     this.mysqlInitialized = false;
+    this.initializing = false;
+    // Don't auto-initialize in serverless environment
+    if (process.env.NODE_ENV !== 'production' || process.env.FORCE_DB_INIT === 'true') {
     this.initializeMySQL();
+    }
   }
 
   /**
    * Initialize MySQL connection
    */
   async initializeMySQL() {
+    // Prevent multiple simultaneous initializations
+    if (this.initializing) {
+      console.log('⏳ Database initialization already in progress, waiting...');
+      while (this.initializing) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      return;
+    }
+
+    if (this.mysqlInitialized && this.mysqlConnection) {
+      console.log('✅ Database already initialized');
+      return;
+    }
+
+    this.initializing = true;
     try {
       // Get database configuration from environment variables
       // Support both standard DB_* and MYSQL_* variable formats, plus URL parsing
@@ -70,57 +90,88 @@ class Database {
 
       // Railway-specific connection configuration
       const isRailway = dbConfig.host?.includes('railway') || dbConfig.host?.includes('rlwy');
-      const connectionConfig = {
+      
+      // Connection Pool Configuration (Better for serverless!)
+      const poolConfig = {
         host: dbConfig.host,
         user: dbConfig.user,
         password: dbConfig.password,
         port: dbConfig.port,
         database: dbConfig.database,
         ssl: isRailway ? { rejectUnauthorized: false } : false,
-        connectTimeout: 30000, // Reduced timeout for serverless
+        
+        // Connection Pool Settings
+        connectionLimit: 5, // Max 5 connections in pool
+        queueLimit: 0, // Unlimited queue
+        waitForConnections: true,
+        
+        // Timeouts
+        connectTimeout: 30000,
         acquireTimeout: 30000,
-        timeout: 30000,
-        reconnect: true,
-        keepAliveInitialDelay: 0,
+        
+        // Keep connections alive (NO auto-close)
         enableKeepAlive: true,
+        keepAliveInitialDelay: 10000, // Send keepalive every 10s to prevent timeout
+        
         // Railway-specific settings
         ...(isRailway && {
           charset: 'utf8mb4',
           timezone: '+00:00',
-          multipleStatements: false,
-          flags: ['-FOUND_ROWS']
+          multipleStatements: false
         })
       };
 
-      // Connect with retry logic for Railway
+      // Create connection pool with retry logic
       let retries = 3;
       let lastError;
       
       while (retries > 0) {
         try {
-          console.log(`🔄 Attempting database connection (${4 - retries}/3)...`);
-          this.mysqlConnection = await mysql.createConnection(connectionConfig);
+          console.log(`🔄 Creating connection pool (${4 - retries}/3)...`);
           
-          // Test the connection
-          await this.mysqlConnection.execute('SELECT 1');
-          console.log('✅ MySQL connection established');
+          // Create connection pool
+          this.mysqlPool = mysql.createPool(poolConfig);
+          
+          // Add connection error handlers
+          this.mysqlPool.on('connection', (connection) => {
+            console.log('🔌 New connection established in pool');
+            
+            // Handle connection errors
+            connection.on('error', (err) => {
+              console.error('❌ Connection error in pool:', err.message);
+              if (err.code === 'PROTOCOL_CONNECTION_LOST' || err.code === 'ECONNRESET') {
+                console.log('🔄 Connection lost, pool will create new one automatically');
+              }
+            });
+          });
+          
+          // Test the pool by getting a connection
+          const connection = await this.mysqlPool.getConnection();
+          await connection.execute('SELECT 1');
+          connection.release();
+          
+          console.log('✅ MySQL connection pool established');
+          
+          // For backward compatibility, keep a reference
+          this.mysqlConnection = this.mysqlPool;
           
           // Create tables
-          await this.createCarriersTable();
-          await this.createProductsTable();
-          await this.createUsersTable();
-          await this.createSettlementsTable();
-          await this.createTransactionsTable();
-          await this.createOrdersTable();
-          await this.createClaimsTable();
+      await this.createCarriersTable();
+      await this.createProductsTable();
+      await this.createUsersTable();
+      await this.createSettlementsTable();
+      await this.createTransactionsTable();
+      await this.createOrdersTable();
+      await this.createClaimsTable();
           
-          this.mysqlInitialized = true;
+      this.mysqlInitialized = true;
+          this.initializing = false;
           return; // Success, exit retry loop
           
-        } catch (error) {
+    } catch (error) {
           lastError = error;
           retries--;
-          console.error(`❌ Connection attempt failed (${retries} retries left):`, error.message);
+          console.error(`❌ Connection pool creation failed (${retries} retries left):`, error.message);
           
           if (retries > 0) {
             console.log('⏳ Waiting 2 seconds before retry...');
@@ -130,6 +181,7 @@ class Database {
       }
       
       // All retries failed
+      this.initializing = false;
       throw lastError;
       
     } catch (error) {
@@ -143,6 +195,7 @@ class Database {
       // MySQL connection failed - application will not function without database
       this.mysqlConnection = null;
       this.mysqlInitialized = true; // Mark as initialized even if failed
+      this.initializing = false;
       throw new Error(`Database initialization failed: ${error.message}`);
     }
   }
@@ -2511,11 +2564,35 @@ class Database {
    * @returns {Promise<boolean>} True if connection is healthy
    */
   async testConnection() {
-    if (!this.mysqlConnection) {
+    if (!this.mysqlPool && !this.mysqlConnection) {
       return false;
     }
 
     try {
+      // Use pool if available
+      if (this.mysqlPool) {
+        const connection = await this.mysqlPool.getConnection();
+        
+        try {
+          await connection.execute('SELECT 1');
+          connection.release();
+          return true;
+        } catch (queryError) {
+          // Release connection even on error
+          connection.release();
+          
+          // If connection is lost, pool will automatically create new one
+          if (queryError.code === 'PROTOCOL_CONNECTION_LOST' || 
+              queryError.code === 'ECONNRESET' ||
+              queryError.code === 'ETIMEDOUT') {
+            console.log('🔄 Stale connection detected, pool will refresh automatically');
+            return false;
+          }
+          throw queryError;
+        }
+      }
+      
+      // Fallback to direct connection
       await this.mysqlConnection.execute('SELECT 1');
       return true;
     } catch (error) {
@@ -2530,17 +2607,41 @@ class Database {
    */
   async reconnect() {
     try {
-      if (this.mysqlConnection) {
+      // Close existing pool/connection
+      if (this.mysqlPool) {
+        await this.mysqlPool.end();
+        this.mysqlPool = null;
+      } else if (this.mysqlConnection) {
         await this.mysqlConnection.end();
       }
       
-      // Reinitialize connection
+      this.mysqlConnection = null;
+      this.mysqlInitialized = false;
+      
+      // Reinitialize with connection pool
       await this.initializeMySQL();
       return true;
     } catch (error) {
       console.error('Database reconnection failed:', error.message);
       return false;
     }
+  }
+
+  /**
+   * Get connection pool statistics
+   * @returns {Object} Pool statistics
+   */
+  getPoolStats() {
+    if (!this.mysqlPool) {
+      return { available: false };
+    }
+
+    return {
+      available: true,
+      totalConnections: this.mysqlPool._allConnections?.length || 0,
+      freeConnections: this.mysqlPool._freeConnections?.length || 0,
+      queuedRequests: this.mysqlPool._connectionQueue?.length || 0
+    };
   }
 
   /**
