@@ -575,7 +575,22 @@ router.post('/carriers/:carrierId/move', authenticateBasicAuth, requireAdminOrSu
       return res.status(400).json({ success: false, message: 'direction must be "up" or "down"' });
     }
     const shipwayCarrierService = require('../services/shipwayCarrierService');
-    const result = shipwayCarrierService.moveCarrier(carrierId, direction);
+    const result = await shipwayCarrierService.moveCarrier(carrierId, direction);
+    res.json({ success: true, message: result.message });
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+/**
+ * @route   POST /api/shipway/carriers/normalize-priorities
+ * @desc    Normalize carrier priorities to be sequential (1, 2, 3, ...)
+ * @access  Admin/Superadmin only
+ */
+router.post('/carriers/normalize-priorities', authenticateBasicAuth, requireAdminOrSuperadmin, async (req, res) => {
+  try {
+    const shipwayCarrierService = require('../services/shipwayCarrierService');
+    const result = await shipwayCarrierService.normalizeCarrierPriorities();
     res.json({ success: true, message: result.message });
   } catch (error) {
     res.status(400).json({ success: false, message: error.message });

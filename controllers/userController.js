@@ -16,6 +16,11 @@ class UserController {
    */
   async createUser(req, res) {
     try {
+      console.log('🔍 Backend: Creating user with request body:', {
+        ...req.body,
+        password: '***hidden***'
+      });
+
       const {
         name,
         email,
@@ -26,6 +31,16 @@ class UserController {
         warehouseId,
         contactNumber
       } = req.body;
+
+      console.log('📋 Backend: Extracted user data:', {
+        name,
+        email,
+        phone,
+        role,
+        status,
+        warehouseId,
+        contactNumber: contactNumber ? '***provided***' : 'not provided'
+      });
 
       // Validate role-specific requirements
       if (role === 'vendor' && !warehouseId) {
@@ -44,22 +59,39 @@ class UserController {
 
       if (role === 'vendor' && warehouseId) {
         try {
+          console.log('🔍 Creating vendor with warehouse ID:', warehouseId);
+
           if (!shipwayService.validateWarehouseId(warehouseId)) {
+            console.log('❌ Invalid warehouse ID format:', warehouseId);
             return res.status(400).json({
               success: false,
               message: 'Invalid warehouse ID format'
             });
           }
 
+          console.log('✅ Warehouse ID format is valid, validating with Shipway API...');
           const warehouseData = await shipwayService.getWarehouseById(warehouseId);
+          
+          console.log('📦 Shipway API response for user creation:', {
+            success: warehouseData.success,
+            hasData: !!warehouseData.data
+          });
+
           if (!warehouseData.success) {
+            console.log('❌ Warehouse not found in Shipway system:', warehouseId);
             return res.status(400).json({
               success: false,
-              message: 'Invalid warehouse ID or warehouse not found'
+              message: 'Invalid warehouse ID or warehouse not found in Shipway system'
             });
           }
 
           const formattedWarehouse = shipwayService.formatWarehouseData(warehouseData.data);
+          console.log('✅ Warehouse validated, creating user with address:', {
+            address: formattedWarehouse.address,
+            city: formattedWarehouse.city,
+            pincode: formattedWarehouse.pincode
+          });
+
           const hashedPassword = await hashPassword(password);
 
           // Save address, city, pincode as top-level fields
@@ -77,7 +109,15 @@ class UserController {
             contactNumber
           };
 
+          console.log('💾 Creating user in database...');
           const newUser = await database.createUser(userData);
+
+          console.log('✅ User created successfully:', {
+            id: newUser.id,
+            name: newUser.name,
+            role: newUser.role,
+            warehouseId: newUser.warehouseId
+          });
 
           res.status(201).json({
             success: true,
@@ -86,7 +126,42 @@ class UserController {
           });
 
         } catch (shipwayError) {
-          console.error('Shipway API error:', shipwayError);
+          console.error('❌ Shipway API error during user creation:', shipwayError);
+          console.error('Error details:', {
+            message: shipwayError.message,
+            stack: shipwayError.stack,
+            warehouseId
+          });
+
+          // Handle specific error cases
+          if (shipwayError.message.includes('Warehouse not found') || 
+              shipwayError.message.includes('not found') ||
+              shipwayError.message.includes('Invalid warehouse ID')) {
+            return res.status(400).json({
+              success: false,
+              message: 'Invalid warehouse ID or warehouse not found in Shipway system'
+            });
+          }
+
+          if (shipwayError.message.includes('API key') || 
+              shipwayError.message.includes('credentials') ||
+              shipwayError.message.includes('configuration')) {
+            return res.status(500).json({
+              success: false,
+              message: 'Shipway API configuration error. Please contact administrator.'
+            });
+          }
+
+          if (shipwayError.message.includes('connect') || 
+              shipwayError.message.includes('timeout') ||
+              shipwayError.message.includes('ECONNREFUSED') ||
+              shipwayError.message.includes('ENOTFOUND')) {
+            return res.status(503).json({
+              success: false,
+              message: 'Shipway API is currently unavailable. Please try again later.'
+            });
+          }
+
           return res.status(400).json({
             success: false,
             message: `Failed to validate warehouse: ${shipwayError.message}`
@@ -250,7 +325,50 @@ class UserController {
           message: 'User not found'
         });
       }
-      if (updateData.warehouseId && existingUser.role === 'vendor') {
+      // Handle role changes and warehouse ID requirements
+      if (updateData.role === 'vendor') {
+        // If changing to vendor role, warehouse ID is required
+        if (!updateData.warehouseId) {
+          return res.status(400).json({
+            success: false,
+            message: 'Warehouse ID is required for vendor role'
+          });
+        }
+        
+        // Validate warehouse ID for vendor role
+        try {
+          if (!shipwayService.validateWarehouseId(updateData.warehouseId)) {
+            return res.status(400).json({
+              success: false,
+              message: 'Invalid warehouse ID format'
+            });
+          }
+          const warehouseData = await shipwayService.getWarehouseById(updateData.warehouseId);
+          if (!warehouseData.success) {
+            return res.status(400).json({
+              success: false,
+              message: 'Invalid warehouse ID or warehouse not found'
+            });
+          }
+          const formattedWarehouse = shipwayService.formatWarehouseData(warehouseData.data);
+          updateData.address = formattedWarehouse.address;
+          updateData.city = formattedWarehouse.city;
+          updateData.pincode = formattedWarehouse.pincode;
+        } catch (shipwayError) {
+          console.error('Shipway API error:', shipwayError);
+          return res.status(400).json({
+            success: false,
+            message: `Failed to validate warehouse: ${shipwayError.message}`
+          });
+        }
+      } else if (updateData.role === 'admin') {
+        // If changing to admin role, clear warehouse-related fields
+        updateData.warehouseId = null;
+        updateData.address = null;
+        updateData.city = null;
+        updateData.pincode = null;
+      } else if (updateData.warehouseId && existingUser.role === 'vendor') {
+        // If updating warehouse ID for existing vendor
         try {
           if (!shipwayService.validateWarehouseId(updateData.warehouseId)) {
             return res.status(400).json({
@@ -353,11 +471,13 @@ class UserController {
         });
       }
 
-      // Prevent deletion of superadmin
+      // SAFEGUARD: Prevent deletion of superadmin users
+      // This is a security measure to prevent accidental system lockout
+      // Superadmin can delete vendors and admins, but not other superadmins
       if (user.role === 'superadmin') {
         return res.status(403).json({
           success: false,
-          message: 'Cannot delete superadmin user'
+          message: 'Cannot delete superadmin user. This is a security safeguard to prevent system lockout.'
         });
       }
 

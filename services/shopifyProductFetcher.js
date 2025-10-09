@@ -128,7 +128,7 @@ async function fetchAndSaveShopifyProducts(shopifyGraphqlUrl, headers, forceNew 
 
     // Use Bulk Operations API to fetch all products
     const body = {
-      query: `mutation { bulkOperationRunQuery( query: """ { products { edges { node { id title images(first: 1) { edges { node { src altText } } } } } } } """ ) { bulkOperation { id status } userErrors { field message } } }`
+      query: `mutation { bulkOperationRunQuery( query: """ { products { edges { node { id title variants(first: 1) { edges { node { sku } } } images(first: 1) { edges { node { src altText } } } } } } } """ ) { bulkOperation { id status } userErrors { field message } } }`
     };
 
     console.log('[Shopify] Sending bulk operation request to Shopify...');
@@ -281,14 +281,52 @@ async function saveToDatabase(products) {
       throw new Error('MySQL connection not available');
     }
 
+    // Function to clean SKU ID
+    function cleanSkuId(skuId) {
+      if (!skuId) return skuId;
+      
+      // Remove size information from the end
+      let cleanedSku = skuId
+        // Remove size codes (S, M, L, XL, etc.) at the end
+        .replace(/[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$/i, '')
+        // Remove age ranges (24-26, 25-26, etc.) at the end
+        .replace(/[-_][0-9]+-[0-9]+$/, '')
+        // Remove single numbers at the end (size numbers like 32, 34, etc.)
+        .replace(/[-_][0-9]+$/, '')
+        // Clean up any double dashes or underscores (IMPORTANT: do this BEFORE trimming)
+        .replace(/[-_]{2,}/g, '-')
+        // Remove trailing dashes/underscores
+        .replace(/[-_]+$/, '')
+        // Remove leading dashes/underscores
+        .replace(/^[-_]+/, '')
+        .trim();
+        
+      return cleanedSku;
+    }
+
     // Convert products to database format
-    const dbProducts = products.map(product => ({
-      id: product.id,
-      name: product.name,
-      image: product.images.length > 0 ? product.images[0].src : null,
-      altText: product.images.length > 0 ? product.images[0].altText : null,
-      totalImages: product.images.length
-    }));
+    const dbProducts = products.map(product => {
+      const hasSku = product.variants && product.variants.length > 0 && product.variants[0].sku;
+      const rawSku = hasSku ? product.variants[0].sku : null;
+      const cleanedSku = rawSku ? cleanSkuId(rawSku) : null;
+      
+      // Debug log for first 3 products
+      if (products.indexOf(product) < 3) {
+        console.log(`[Shopify] Product #${products.indexOf(product) + 1}:`, product.name);
+        console.log(`  - Has variants: ${product.variants ? product.variants.length : 0}`);
+        console.log(`  - Raw SKU: ${rawSku || 'NULL'}`);
+        console.log(`  - Cleaned SKU: ${cleanedSku || 'NULL'}`);
+      }
+      
+      return {
+        id: product.id,
+        name: product.name,
+        image: product.images.length > 0 ? product.images[0].src : null,
+        altText: product.images.length > 0 ? product.images[0].altText : null,
+        totalImages: product.images.length,
+        sku_id: cleanedSku
+      };
+    });
 
     // Bulk upsert products
     const result = await database.bulkUpsertProducts(dbProducts);
@@ -311,6 +349,10 @@ function parseShopifyBulkData(jsonlData) {
   const products = new Map(); // Use Map to group products by ID
   
   console.log(`[Shopify] Parsing ${lines.length} lines of JSONL data...`);
+  
+  let variantCount = 0;
+  let imageCount = 0;
+  let productCount = 0;
 
   lines.forEach((line, index) => {
     try {
@@ -319,14 +361,30 @@ function parseShopifyBulkData(jsonlData) {
       if (data.id && data.title) {
         // This is a product line
         const productId = data.id;
+        productCount++;
         products.set(productId, {
           id: productId,
           name: data.title,
-          images: []
+          images: [],
+          variants: []
         });
+      } else if (data.sku && data.__parentId) {
+        // This is a variant line with SKU
+        const productId = data.__parentId;
+        variantCount++;
+        if (products.has(productId)) {
+          products.get(productId).variants.push({
+            sku: data.sku
+          });
+        }
+        // Debug: Log first 3 variants
+        if (variantCount <= 3) {
+          console.log(`[Shopify] Variant #${variantCount}: SKU="${data.sku}", Parent="${data.__parentId}"`);
+        }
       } else if (data.src && data.__parentId) {
         // This is an image line
         const productId = data.__parentId;
+        imageCount++;
         if (products.has(productId)) {
           products.get(productId).images.push({
             src: data.src,
@@ -340,6 +398,7 @@ function parseShopifyBulkData(jsonlData) {
   });
 
   console.log(`[Shopify] Parsed ${products.size} products from bulk data`);
+  console.log(`[Shopify] Stats: ${productCount} products, ${variantCount} variants, ${imageCount} images`);
   return Array.from(products.values());
 }
 

@@ -18,7 +18,22 @@ const {
 /**
  * User Management Routes
  * Handles CRUD operations for users (admin/vendor)
- * All routes require superadmin authentication
+ * 
+ * PERMISSION STRUCTURE:
+ * =====================
+ * 
+ * SUPERADMIN (Full Master Access):
+ * - Can CREATE, UPDATE, DELETE both VENDORS and ADMINS
+ * - Uses general routes: POST /users, PUT /users/:id, DELETE /users/:id
+ * - Cannot delete other superadmin users (safeguard in controller)
+ * 
+ * ADMIN (Limited Access - if implemented):
+ * - Can CREATE, UPDATE, DELETE VENDORS ONLY (not other admins or superadmins)
+ * - Uses vendor-specific routes: POST /users/vendor, PUT /users/vendor/:id, DELETE /users/vendor/:id
+ * 
+ * VENDOR:
+ * - Can only view their own information
+ * - Uses: GET /users/vendor/address
  */
 
 // Apply authentication and authorization to all routes
@@ -115,19 +130,19 @@ router.get('/vendors-report', requireAdminOrSuperadmin, async (req, res) => {
 });
 
 // Admin or Superadmin can update vendor via vendor-specific route
-router.put('/vendor/:id', requireAdminOrSuperadmin, validateUserId, (req, res, next) => {
+router.put('/vendor/:id', requireAdminOrSuperadmin, validateUserId, async (req, res, next) => {
   try {
     const id = req.params.id;
-    const user = database.getUserById(id);
+    const user = await database.getUserById(id);
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
     if (user.role !== 'vendor') {
-      return res.status(403).json({ success: false, message: 'Only vendor updates allowed' });
+      return res.status(403).json({ success: false, message: 'Only vendor updates allowed via this endpoint' });
     }
     // Prevent changing role via this endpoint
     if (req.body && req.body.role && req.body.role !== 'vendor') {
-      return res.status(400).json({ success: false, message: 'Role cannot be changed' });
+      return res.status(400).json({ success: false, message: 'Cannot change role via vendor endpoint' });
     }
     next();
   } catch (err) {
@@ -136,15 +151,15 @@ router.put('/vendor/:id', requireAdminOrSuperadmin, validateUserId, (req, res, n
 }, validateUserUpdate, userController.updateUser);
 
 // Admin or Superadmin can delete vendor via vendor-specific route
-router.delete('/vendor/:id', requireAdminOrSuperadmin, validateUserId, (req, res, next) => {
+router.delete('/vendor/:id', requireAdminOrSuperadmin, validateUserId, async (req, res, next) => {
   try {
     const id = req.params.id;
-    const user = database.getUserById(id);
+    const user = await database.getUserById(id);
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
     if (user.role !== 'vendor') {
-      return res.status(403).json({ success: false, message: 'Only vendor deletion allowed' });
+      return res.status(403).json({ success: false, message: 'Only vendor deletion allowed via this endpoint' });
     }
     next();
   } catch (err) {
