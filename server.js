@@ -112,6 +112,59 @@ if (process.env.NODE_ENV === 'development') {
 }
 
 /**
+ * Database Connection Health Middleware
+ * Automatically reconnects if connection is lost after idle periods
+ */
+app.use(async (req, res, next) => {
+  // Skip database check for health and test endpoints
+  if (req.path === '/health' || req.path === '/test' || req.path === '/env-check') {
+    return next();
+  }
+
+  try {
+    // Check if database is available
+    if (!database.isMySQLAvailable()) {
+      console.log('🔄 Database not available, attempting to initialize...');
+      await database.initializeMySQL();
+    }
+
+    // Test connection health (detects stale connections)
+    const isHealthy = await database.testConnection();
+    if (!isHealthy) {
+      console.log('🔄 Database connection unhealthy, attempting to reconnect...');
+      const reconnected = await database.reconnect();
+      
+      if (!reconnected) {
+        // Reconnection failed, return error
+        return res.status(503).json({
+          success: false,
+          message: 'Database temporarily unavailable',
+          error: 'Unable to establish database connection. Please try again in a moment.'
+        });
+      }
+    }
+
+    next();
+  } catch (error) {
+    console.error('❌ Database connection failed in middleware:', error.message);
+    
+    // For API routes, return error
+    if (req.path.startsWith('/api/') || req.path.startsWith('/auth') || 
+        req.path.startsWith('/users') || req.path.startsWith('/orders') || 
+        req.path.startsWith('/settlements') || req.path.startsWith('/shipway')) {
+      return res.status(503).json({
+        success: false,
+        message: 'Database temporarily unavailable',
+        error: 'Service temporarily unavailable. Please try again in a moment.'
+      });
+    }
+    
+    // For other routes, continue
+    next();
+  }
+});
+
+/**
  * Health Check Endpoint
  */
 app.get('/health', (req, res) => {
@@ -368,6 +421,26 @@ app.listen(PORT, async () => {
   
   // Log database initialization
   console.log('📁 Database initialized successfully');
+
+  // Start periodic database health check (every 15 minutes)
+  setInterval(async () => {
+    try {
+      const isHealthy = await database.testConnection();
+      if (!isHealthy) {
+        console.log('⚠️ Database connection unhealthy, attempting to reconnect...');
+        const reconnected = await database.reconnect();
+        if (reconnected) {
+          console.log('✅ Database reconnected successfully via health check');
+        } else {
+          console.error('❌ Database reconnection failed via health check');
+        }
+      } else {
+        console.log('✅ Database health check passed');
+      }
+    } catch (error) {
+      console.error('❌ Database health check failed:', error.message);
+    }
+  }, 15 * 60 * 1000); // Every 15 minutes
   
   // Initialize user sessions (run once on startup)
   const userSessionService = require('./services/userSessionService');

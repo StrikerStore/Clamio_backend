@@ -2029,6 +2029,7 @@ class Database {
           pincode, is_in_new_order
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE
+          customer_name = VALUES(customer_name),
           order_date = VALUES(order_date),
           product_name = VALUES(product_name),
           product_code = VALUES(product_code),
@@ -2689,6 +2690,65 @@ class Database {
    */
   isMySQLAvailable() {
     return this.mysqlConnection !== null;
+  }
+
+  /**
+   * Test database connection health
+   * @returns {Promise<boolean>} True if connection is healthy
+   */
+  async testConnection() {
+    if (!this.mysqlConnection) {
+      return false;
+    }
+
+    try {
+      await this.mysqlConnection.execute('SELECT 1');
+      return true;
+    } catch (error) {
+      console.error('❌ Database connection test failed:', error.message);
+      
+      // Check if it's a connection lost error
+      if (error.code === 'PROTOCOL_CONNECTION_LOST' || 
+          error.code === 'ECONNRESET' ||
+          error.code === 'ETIMEDOUT' ||
+          error.code === 'ENOTFOUND') {
+        console.log('🔄 Stale connection detected');
+      }
+      
+      return false;
+    }
+  }
+
+  /**
+   * Reconnect to database if connection is lost
+   * @returns {Promise<boolean>} True if reconnection successful
+   */
+  async reconnect() {
+    try {
+      console.log('🔄 Attempting to reconnect to database...');
+      
+      // Close existing connection
+      if (this.mysqlConnection) {
+        try {
+          await this.mysqlConnection.end();
+        } catch (error) {
+          console.log('ℹ️ Error closing old connection (expected if connection was lost):', error.message);
+        }
+      }
+      
+      // Reset state
+      this.mysqlConnection = null;
+      this.mysqlInitialized = false;
+      
+      // Reinitialize connection
+      await this.initializeMySQL();
+      
+      console.log('✅ Database reconnected successfully');
+      return true;
+    } catch (error) {
+      console.error('❌ Database reconnection failed:', error.message);
+      return false;
+    }
   }
 
   /**

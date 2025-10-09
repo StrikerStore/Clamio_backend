@@ -869,8 +869,8 @@ class ShipwayService {
           is_cloned_row: existingClaim ? existingClaim.is_cloned_row : false,
           label_downloaded: existingClaim ? existingClaim.label_downloaded : false,
           handover_at: existingClaim ? existingClaim.handover_at : '',
-          // Preserve custom columns or use empty defaults for new orders
-          customer_name: existingClaim ? existingClaim.customer_name : '',
+          // Get customer name from Shipway API data (s_firstname + s_lastname)
+          customer_name: existingClaim ? existingClaim.customer_name : `${order.s_firstname || ''} ${order.s_lastname || ''}`.trim() || 'N/A',
           // Add priority_carrier column (empty for new orders, preserve existing)
           priority_carrier: existingClaim ? existingClaim.priority_carrier : ''
         };
