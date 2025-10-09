@@ -130,9 +130,6 @@ uploads/
 *.xlsx
 *.xls
 
-# JSON data files (if they contain sensitive data)
-data/raw_*.json
-
 
 
 # Railway deployment files
