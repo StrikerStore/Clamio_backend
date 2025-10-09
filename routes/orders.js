@@ -737,6 +737,8 @@ router.get('/admin/all', authenticateBasicAuth, requireAdminOrSuperadmin, async 
         customer_name: order.customer_name || order.customer || 'N/A',
         vendor_name: vendorName,
         product_name: order.product_name || order.product || 'N/A',
+        product_code: order.product_code || order.sku || 'N/A',
+        quantity: order.quantity || '1',
         status,
         value: order.value || order.price || order.selling_price || '0',
         priority: order.priority || 'medium',
