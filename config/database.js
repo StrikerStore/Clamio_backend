@@ -19,127 +19,49 @@ class Database {
   async initializeMySQL() {
     try {
       // Get database configuration from environment variables
-      // Support both standard DB_* and MYSQL_* variable formats, plus URL parsing
-      let dbConfig = {
-        host: process.env.DB_HOST || process.env.MYSQL_HOST || process.env.MYSQLHOST,
-        user: process.env.DB_USER || process.env.MYSQL_USER || process.env.MYSQLUSER,
-        password: process.env.DB_PASSWORD || process.env.MYSQL_PASSWORD || process.env.MYSQLPASSWORD,
-        database: process.env.DB_NAME || process.env.MYSQL_DATABASE || process.env.MYSQLDATABASE,
-        port: process.env.DB_PORT || process.env.MYSQL_PORT || process.env.MYSQLPORT || 3306
+      const dbConfig = {
+        host: process.env.DB_HOST,
+        user: process.env.DB_USER,
+        password: process.env.DB_PASSWORD,
+        database: process.env.DB_NAME
       };
-
-      // If MYSQL_URL is provided, parse it and override individual settings
-      if (process.env.MYSQL_URL) {
-        try {
-          const url = new URL(process.env.MYSQL_URL);
-          dbConfig.host = url.hostname;
-          dbConfig.port = url.port || 3306;
-          dbConfig.user = url.username;
-          dbConfig.password = url.password;
-          dbConfig.database = url.pathname.substring(1); // Remove leading slash
-          console.log('✅ Parsed database configuration from MYSQL_URL');
-          console.log('🔍 Connection details:', {
-            host: dbConfig.host,
-            port: dbConfig.port,
-            user: dbConfig.user,
-            database: dbConfig.database,
-            hasPassword: !!dbConfig.password
-          });
-        } catch (error) {
-          console.error('❌ Error parsing MYSQL_URL:', error.message);
-          throw new Error('Invalid MYSQL_URL format');
-        }
-      }
-
-      // Log connection details for debugging
-      const sslConfig = process.env.NODE_ENV === 'production' || process.env.DB_HOST?.includes('railway') || process.env.DB_HOST?.includes('rlwy') ? { rejectUnauthorized: false } : false;
-      console.log('🔍 Attempting to connect with:', {
-        host: dbConfig.host,
-        port: dbConfig.port,
-        user: dbConfig.user,
-        database: dbConfig.database,
-        hasPassword: !!dbConfig.password,
-        ssl: sslConfig,
-        isRailway: dbConfig.host?.includes('railway') || dbConfig.host?.includes('rlwy')
-      });
 
       // Validate required environment variables
       if (!dbConfig.host || !dbConfig.user || !dbConfig.password || !dbConfig.database) {
         throw new Error('Missing required database environment variables: DB_HOST, DB_USER, DB_PASSWORD, DB_NAME');
       }
 
-      // Railway-specific connection configuration
-      const isRailway = dbConfig.host?.includes('railway') || dbConfig.host?.includes('rlwy');
-      const connectionConfig = {
+      // First try to connect without database to create it if needed
+      let connection = await mysql.createConnection({
+        host: dbConfig.host,
+        user: dbConfig.user,
+        password: dbConfig.password
+      });
+
+      // Create database if it doesn't exist
+      await connection.execute(`CREATE DATABASE IF NOT EXISTS ${dbConfig.database}`);
+      await connection.end();
+
+      // Now connect to the specific database
+      this.mysqlConnection = await mysql.createConnection({
         host: dbConfig.host,
         user: dbConfig.user,
         password: dbConfig.password,
-        port: dbConfig.port,
-        database: dbConfig.database,
-        ssl: isRailway ? { rejectUnauthorized: false } : false,
-        connectTimeout: 30000, // Reduced timeout for serverless
-        acquireTimeout: 30000,
-        timeout: 30000,
-        reconnect: true,
-        keepAliveInitialDelay: 0,
-        enableKeepAlive: true,
-        // Railway-specific settings
-        ...(isRailway && {
-          charset: 'utf8mb4',
-          timezone: '+00:00',
-          multipleStatements: false,
-          flags: ['-FOUND_ROWS']
-        })
-      };
-
-      // Connect with retry logic for Railway
-      let retries = 3;
-      let lastError;
-      
-      while (retries > 0) {
-        try {
-          console.log(`🔄 Attempting database connection (${4 - retries}/3)...`);
-          this.mysqlConnection = await mysql.createConnection(connectionConfig);
-          
-          // Test the connection
-          await this.mysqlConnection.execute('SELECT 1');
-          console.log('✅ MySQL connection established');
-          
-          // Create tables
-          await this.createCarriersTable();
-          await this.createProductsTable();
-          await this.createUsersTable();
-          await this.createSettlementsTable();
-          await this.createTransactionsTable();
-          await this.createOrdersTable();
-          await this.createClaimsTable();
-          
-          this.mysqlInitialized = true;
-          return; // Success, exit retry loop
-          
-        } catch (error) {
-          lastError = error;
-          retries--;
-          console.error(`❌ Connection attempt failed (${retries} retries left):`, error.message);
-          
-          if (retries > 0) {
-            console.log('⏳ Waiting 2 seconds before retry...');
-            await new Promise(resolve => setTimeout(resolve, 2000));
-          }
-        }
-      }
-      
-      // All retries failed
-      throw lastError;
-      
-    } catch (error) {
-      console.error('❌ MySQL connection failed after all retries:', error.message);
-      console.error('🔍 Error details:', {
-        code: error.code,
-        errno: error.errno,
-        sqlState: error.sqlState
+        database: dbConfig.database
       });
       
+      console.log('✅ MySQL connection established');
+      await this.createCarriersTable();
+      await this.createProductsTable();
+      await this.createUsersTable();
+      await this.createSettlementsTable();
+      await this.createTransactionsTable();
+      await this.createOrdersTable();
+      await this.createClaimsTable();
+      await this.createNotificationsTable();
+      this.mysqlInitialized = true;
+    } catch (error) {
+      console.error('❌ MySQL connection failed:', error.message);
       // MySQL connection failed - application will not function without database
       this.mysqlConnection = null;
       this.mysqlInitialized = true; // Mark as initialized even if failed
@@ -335,13 +257,11 @@ class Database {
     if (!this.mysqlConnection) return;
 
     try {
-      // Drop existing orders table to recreate with clean structure
-      console.log('🔄 Dropping existing orders table and creating fresh one...');
-      await this.mysqlConnection.execute('DROP TABLE IF EXISTS orders');
-      console.log('✅ Old orders table dropped');
+      // Create orders table if it doesn't exist (preserve existing data)
+      console.log('🔄 Creating orders table if it doesn\'t exist...');
 
       const createTableQuery = `
-        CREATE TABLE orders (
+        CREATE TABLE IF NOT EXISTS orders (
           id VARCHAR(50) PRIMARY KEY,
           unique_id VARCHAR(100) UNIQUE,
           order_id VARCHAR(100),
@@ -349,6 +269,8 @@ class Database {
           order_date DATETIME,
           product_name VARCHAR(500),
           product_code VARCHAR(100),
+          size VARCHAR(20),
+          quantity INT,
           selling_price DECIMAL(10,2),
           order_total DECIMAL(10,2),
           payment_type VARCHAR(50),
@@ -361,17 +283,90 @@ class Database {
           INDEX idx_unique_id (unique_id),
           INDEX idx_order_id (order_id),
           INDEX idx_pincode (pincode),
-          INDEX idx_order_date (order_date)
+          INDEX idx_order_date (order_date),
+          INDEX idx_size (size)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `;
       
       await this.mysqlConnection.execute(createTableQuery);
       console.log('✅ Fresh orders table created with clean structure');
 
+      // Add size column to existing tables if it doesn't exist (migration)
+      await this.addSizeColumnIfNotExists();
+
       // Create labels table for caching label URLs
       await this.createLabelsTable();
     } catch (error) {
       console.error('❌ Error creating orders table:', error.message);
+    }
+  }
+
+  /**
+   * Add size column to existing orders table if it doesn't exist (migration)
+   */
+  async addSizeColumnIfNotExists() {
+    if (!this.mysqlConnection) return;
+
+    try {
+      // Check if size column exists
+      const [columns] = await this.mysqlConnection.execute(
+        `SHOW COLUMNS FROM orders LIKE 'size'`
+      );
+
+      if (columns.length === 0) {
+        console.log('🔄 Adding size column to existing orders table...');
+        
+        // Add size column
+        await this.mysqlConnection.execute(
+          `ALTER TABLE orders ADD COLUMN size VARCHAR(20) AFTER product_code`
+        );
+        
+        // Add index for size column
+        await this.mysqlConnection.execute(
+          `ALTER TABLE orders ADD INDEX idx_size (size)`
+        );
+        
+        console.log('✅ Size column added to orders table');
+        
+        // Update existing orders with extracted size
+        await this.updateExistingOrdersWithSize();
+      } else {
+        console.log('✅ Size column already exists in orders table');
+      }
+    } catch (error) {
+      console.error('❌ Error adding size column:', error.message);
+    }
+  }
+
+  /**
+   * Update existing orders with extracted size information
+   */
+  async updateExistingOrdersWithSize() {
+    if (!this.mysqlConnection) return;
+
+    try {
+      console.log('🔄 Updating existing orders with size information...');
+      
+      // Get all orders that don't have size information
+      const [orders] = await this.mysqlConnection.execute(
+        `SELECT unique_id, product_code FROM orders WHERE size IS NULL AND product_code IS NOT NULL`
+      );
+
+      let updatedCount = 0;
+      for (const order of orders) {
+        const extractedSize = this.extractSizeFromSku(order.product_code);
+        if (extractedSize) {
+          await this.mysqlConnection.execute(
+            `UPDATE orders SET size = ? WHERE unique_id = ?`,
+            [extractedSize, order.unique_id]
+          );
+          updatedCount++;
+        }
+      }
+
+      console.log(`✅ Updated ${updatedCount} orders with size information`);
+    } catch (error) {
+      console.error('❌ Error updating existing orders with size:', error.message);
     }
   }
 
@@ -534,6 +529,77 @@ class Database {
 
     } catch (error) {
       console.error('❌ Error migrating claims data:', error.message);
+    }
+  }
+
+  /**
+   * Create notifications table for tracking system alerts
+   */
+  async createNotificationsTable() {
+    if (!this.mysqlConnection) return;
+
+    try {
+      const createNotificationsTableQuery = `
+        CREATE TABLE IF NOT EXISTS notifications (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          
+          -- Notification Core Info
+          type ENUM(
+            'reverse_order_failure',
+            'shipment_assignment_error',
+            'carrier_unavailable',
+            'low_balance',
+            'warehouse_issue',
+            'payment_failed',
+            'order_stuck',
+            'other'
+          ) NOT NULL,
+          severity ENUM('low', 'medium', 'high', 'critical') DEFAULT 'medium',
+          title VARCHAR(255) NOT NULL,
+          message TEXT NOT NULL,
+          
+          -- Related Entity Info
+          order_id VARCHAR(100),
+          vendor_id VARCHAR(50),
+          vendor_name VARCHAR(255),
+          vendor_warehouse_id VARCHAR(50),
+          
+          -- Additional Context
+          metadata JSON,
+          error_details TEXT,
+          
+          -- Status Tracking
+          status ENUM('pending', 'in_progress', 'resolved', 'dismissed') DEFAULT 'pending',
+          
+          -- Resolution Info
+          resolved_by VARCHAR(50),
+          resolved_by_name VARCHAR(255),
+          resolved_at DATETIME,
+          resolution_notes TEXT,
+          
+          -- Timestamps
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          
+          -- Indexes for performance
+          INDEX idx_type (type),
+          INDEX idx_status (status),
+          INDEX idx_vendor (vendor_id),
+          INDEX idx_order (order_id),
+          INDEX idx_created_at (created_at),
+          INDEX idx_severity (severity),
+          
+          -- Foreign key constraints
+          FOREIGN KEY (vendor_id) REFERENCES users(id) ON DELETE SET NULL,
+          FOREIGN KEY (resolved_by) REFERENCES users(id) ON DELETE SET NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+      `;
+      
+      await this.mysqlConnection.execute(createNotificationsTableQuery);
+      console.log('✅ Notifications table created/verified');
+
+    } catch (error) {
+      console.error('❌ Error creating notifications tables:', error.message);
     }
   }
 
@@ -700,6 +766,72 @@ class Database {
   }
 
   /**
+   * Swap carrier priorities atomically using a transaction
+   * @param {string} carrierId1 - First carrier ID
+   * @param {string} carrierId2 - Second carrier ID
+   * @param {number} priority1 - First carrier's priority
+   * @param {number} priority2 - Second carrier's priority
+   * @returns {Promise<void>}
+   */
+  async swapCarrierPriorities(carrierId1, carrierId2, priority1, priority2) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      await this.mysqlConnection.beginTransaction();
+
+      // Update both carriers in a single transaction
+      await this.mysqlConnection.execute(
+        'UPDATE carriers SET priority = ? WHERE carrier_id = ?',
+        [priority2, carrierId1]
+      );
+
+      await this.mysqlConnection.execute(
+        'UPDATE carriers SET priority = ? WHERE carrier_id = ?',
+        [priority1, carrierId2]
+      );
+
+      await this.mysqlConnection.commit();
+    } catch (error) {
+      await this.mysqlConnection.rollback();
+      console.error('Error swapping carrier priorities:', error);
+      throw new Error('Failed to swap carrier priorities');
+    }
+  }
+
+  /**
+   * Reorder carrier priorities sequentially (1, 2, 3, ...)
+   * @param {Array} carriers - Array of carriers in the desired order
+   * @returns {Promise<void>}
+   */
+  async reorderCarrierPriorities(carriers) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      await this.mysqlConnection.beginTransaction();
+
+      // Update priorities sequentially starting from 1
+      for (let i = 0; i < carriers.length; i++) {
+        const newPriority = i + 1;
+        await this.mysqlConnection.execute(
+          'UPDATE carriers SET priority = ? WHERE carrier_id = ?',
+          [newPriority, carriers[i].carrier_id]
+        );
+      }
+
+      await this.mysqlConnection.commit();
+      console.log(`✅ Reordered ${carriers.length} carrier priorities sequentially`);
+    } catch (error) {
+      await this.mysqlConnection.rollback();
+      console.error('Error reordering carrier priorities:', error);
+      throw new Error('Failed to reorder carrier priorities');
+    }
+  }
+
+  /**
    * Delete carrier
    * @param {string} carrierId - Carrier ID
    * @returns {Promise<boolean>} True if deleted, false if not found
@@ -837,11 +969,11 @@ class Database {
     }
 
     try {
-      const { id, name, image, altText, totalImages } = productData;
+      const { id, name, image, altText, totalImages, sku_id } = productData;
       
       const [result] = await this.mysqlConnection.execute(
-        'INSERT INTO products (id, name, image, altText, totalImages) VALUES (?, ?, ?, ?, ?)',
-        [id, name, image || null, altText || null, totalImages || 0]
+        'INSERT INTO products (id, name, image, altText, totalImages, sku_id) VALUES (?, ?, ?, ?, ?, ?)',
+        [id, name, image || null, altText || null, totalImages || 0, sku_id || null]
       );
 
       return {
@@ -890,6 +1022,10 @@ class Database {
       if (updateData.totalImages !== undefined) {
         fields.push('totalImages = ?');
         values.push(updateData.totalImages);
+      }
+      if (updateData.sku_id !== undefined) {
+        fields.push('sku_id = ?');
+        values.push(updateData.sku_id);
       }
 
       if (fields.length === 0) {
@@ -1146,13 +1282,16 @@ class Database {
         address, city, pincode 
       } = userData;
       
+      // Generate ID if not provided
+      const userId = id || `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      
       const [result] = await this.mysqlConnection.execute(
         'INSERT INTO users (id, name, email, phone, password, role, status, token, active_session, contactNumber, warehouseId, address, city, pincode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        [id, name, email, phone || null, password || null, role, status || 'active', token || null, active_session || null, contactNumber || null, warehouseId || null, address || null, city || null, pincode || null]
+        [userId, name, email, phone || null, password || null, role, status || 'active', token || null, active_session || null, contactNumber || null, warehouseId || null, address || null, city || null, pincode || null]
       );
 
       return {
-        id,
+        id: userId,
         name,
         email,
         phone,
@@ -1878,17 +2017,23 @@ class Database {
     }
 
     try {
+      // Extract size from product_code
+      const extractedSize = this.extractSizeFromSku(orderData.product_code);
+
       // Use INSERT ... ON DUPLICATE KEY UPDATE for orders table
       await this.mysqlConnection.execute(
         `INSERT INTO orders (
           id, unique_id, order_id, customer_name, order_date,
-          product_name, product_code, selling_price, order_total, payment_type,
+          product_name, product_code, size, quantity, selling_price, order_total, payment_type,
           prepaid_amount, order_total_ratio, order_total_split, collectable_amount,
           pincode, is_in_new_order
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE
           order_date = VALUES(order_date),
           product_name = VALUES(product_name),
+          product_code = VALUES(product_code),
+          size = VALUES(size),
+          quantity = VALUES(quantity),
           selling_price = VALUES(selling_price),
           order_total = VALUES(order_total),
           payment_type = VALUES(payment_type),
@@ -1906,6 +2051,8 @@ class Database {
           orderData.order_date || null,
           orderData.product_name || null,
           orderData.product_code || null,
+          extractedSize || null,
+          orderData.quantity || null,
           orderData.selling_price || null,
           orderData.order_total || null,
           orderData.payment_type || null,
@@ -1952,7 +2099,8 @@ class Database {
         [
           orderData.order_id || null,
           orderData.handover_at || null,
-          orderData.priority_carrier || null
+          orderData.priority_carrier || null,
+          orderData.is_in_new_order !== undefined ? orderData.is_in_new_order : true
         ]
       );
 
@@ -2004,6 +2152,60 @@ class Database {
   }
 
   /**
+   * Remove size information from SKU for matching
+   * @param {string} skuId - SKU with size
+   * @returns {string} SKU without size
+   */
+  cleanSkuId(skuId) {
+    if (!skuId) return skuId;
+    
+    // Remove size information from the end
+    let cleanedSku = skuId
+      // Remove size codes (S, M, L, XL, etc.) at the end
+      .replace(/[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$/i, '')
+      // Remove age ranges (24-26, 25-26, etc.) at the end
+      .replace(/[-_][0-9]+-[0-9]+$/, '')
+      // Remove single numbers at the end (size numbers like 32, 34, etc.)
+      .replace(/[-_][0-9]+$/, '')
+      // Clean up any double dashes or underscores
+      .replace(/[-_]{2,}/g, '-')
+      // Remove trailing dashes/underscores
+      .replace(/[-_]+$/, '')
+      .trim();
+      
+    return cleanedSku;
+  }
+
+  /**
+   * Extract size information from SKU ID
+   * @param {string} skuId - SKU with size
+   * @returns {string} Extracted size or null if no size found
+   */
+  extractSizeFromSku(skuId) {
+    if (!skuId) return null;
+    
+    // Try to extract size codes (S, M, L, XL, etc.) at the end
+    const sizeMatch = skuId.match(/[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$/i);
+    if (sizeMatch) {
+      return sizeMatch[1].toUpperCase();
+    }
+    
+    // Try to extract age ranges (24-26, 25-26, etc.) at the end
+    const ageRangeMatch = skuId.match(/[-_]([0-9]+-[0-9]+)$/);
+    if (ageRangeMatch) {
+      return ageRangeMatch[1];
+    }
+    
+    // Try to extract single numbers at the end (size numbers like 32, 34, etc.)
+    const numberMatch = skuId.match(/[-_]([0-9]+)$/);
+    if (numberMatch) {
+      return numberMatch[1];
+    }
+    
+    return null;
+  }
+
+  /**
    * Get order by unique_id from MySQL
    * @param {string} unique_id - Order unique ID
    * @returns {Object|null} Order data or null if not found
@@ -2035,14 +2237,11 @@ class Database {
           l.priority_carrier,
           l.is_manifest
         FROM orders o
-        LEFT JOIN products p ON TRIM(
-          CASE 
-            WHEN LOWER(o.product_name) LIKE '%kids%' THEN 
-              REGEXP_REPLACE(o.product_name, ' - [0-9]+-[0-9]+$', '')
-            ELSE 
-              REGEXP_REPLACE(o.product_name, ' - (XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')
-          END
-        ) = p.name
+        LEFT JOIN products p ON (
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id
+        )
         LEFT JOIN claims c ON o.unique_id = c.order_unique_id
         LEFT JOIN labels l ON o.order_id = l.order_id
         WHERE o.unique_id = ?
@@ -2087,14 +2286,11 @@ class Database {
           l.priority_carrier,
           l.is_manifest
         FROM orders o
-        LEFT JOIN products p ON TRIM(
-          CASE 
-            WHEN LOWER(o.product_name) LIKE '%kids%' THEN 
-              REGEXP_REPLACE(o.product_name, ' - [0-9]+-[0-9]+$', '')
-            ELSE 
-              REGEXP_REPLACE(o.product_name, ' - (XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')
-          END
-        ) = p.name
+        LEFT JOIN products p ON (
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id
+        )
         LEFT JOIN claims c ON o.unique_id = c.order_unique_id
         LEFT JOIN labels l ON o.order_id = l.order_id
         WHERE o.order_id = ? 
@@ -2139,14 +2335,11 @@ class Database {
           l.priority_carrier,
           l.is_manifest
         FROM orders o
-        LEFT JOIN products p ON TRIM(
-          CASE 
-            WHEN LOWER(o.product_name) LIKE '%kids%' THEN 
-              REGEXP_REPLACE(o.product_name, ' - [0-9]+-[0-9]+$', '')
-            ELSE 
-              REGEXP_REPLACE(o.product_name, ' - (XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')
-          END
-        ) = p.name
+        LEFT JOIN products p ON (
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id
+        )
         LEFT JOIN claims c ON o.unique_id = c.order_unique_id
         LEFT JOIN labels l ON o.order_id = l.order_id
         WHERE (o.is_in_new_order = 1 OR c.label_downloaded = 1) 
@@ -2192,14 +2385,11 @@ class Database {
           l.priority_carrier,
           l.is_manifest
         FROM orders o
-        LEFT JOIN products p ON TRIM(
-          CASE 
-            WHEN LOWER(o.product_name) LIKE '%kids%' THEN 
-              REGEXP_REPLACE(o.product_name, ' - [0-9]+-[0-9]+$', '')
-            ELSE 
-              REGEXP_REPLACE(o.product_name, ' - (XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')
-          END
-        ) = p.name
+        LEFT JOIN products p ON (
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id
+        )
         LEFT JOIN claims c ON o.unique_id = c.order_unique_id
         LEFT JOIN labels l ON o.order_id = l.order_id
         WHERE c.claimed_by = ? AND (o.is_in_new_order = 1 OR c.label_downloaded = 1) 
@@ -2246,14 +2436,11 @@ class Database {
           l.priority_carrier,
           l.is_manifest
         FROM orders o
-        LEFT JOIN products p ON TRIM(
-          CASE 
-            WHEN LOWER(o.product_name) LIKE '%kids%' THEN 
-              REGEXP_REPLACE(o.product_name, ' - [0-9]+-[0-9]+$', '')
-            ELSE 
-              REGEXP_REPLACE(o.product_name, ' - (XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')
-          END
-        ) = p.name
+        LEFT JOIN products p ON (
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id
+        )
         LEFT JOIN claims c ON o.unique_id = c.order_unique_id
         LEFT JOIN labels l ON o.order_id = l.order_id
         WHERE c.claimed_by = ? 
@@ -2339,9 +2526,10 @@ class Database {
           orderValues
         );
         
-        if (orderResult.affectedRows === 0) {
-        return null;
-        }
+        // Don't return early - we still need to update claims and labels tables
+        // if (orderResult.affectedRows === 0) {
+        //   return null;
+        // }
       }
 
       // Update claims table if there are claim fields to update
@@ -2461,14 +2649,11 @@ class Database {
       const [rows] = await this.mysqlConnection.execute(
         `SELECT o.*, p.image as product_image
          FROM orders o
-         LEFT JOIN products p ON TRIM(
-          CASE 
-            WHEN LOWER(o.product_name) LIKE '%kids%' THEN 
-              REGEXP_REPLACE(o.product_name, ' - [0-9]+-[0-9]+$', '')
-            ELSE 
-              REGEXP_REPLACE(o.product_name, ' - (XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')
-          END
-        ) = p.name
+         LEFT JOIN products p ON (
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id
+        )
          LEFT JOIN claims c ON o.unique_id = c.order_unique_id
          WHERE (o.order_id LIKE ? OR o.customer_name LIKE ? OR o.product_name LIKE ? 
          OR o.product_code LIKE ? OR o.pincode LIKE ?)
@@ -2504,43 +2689,6 @@ class Database {
    */
   isMySQLAvailable() {
     return this.mysqlConnection !== null;
-  }
-
-  /**
-   * Test database connection health
-   * @returns {Promise<boolean>} True if connection is healthy
-   */
-  async testConnection() {
-    if (!this.mysqlConnection) {
-      return false;
-    }
-
-    try {
-      await this.mysqlConnection.execute('SELECT 1');
-      return true;
-    } catch (error) {
-      console.error('Database connection test failed:', error.message);
-      return false;
-    }
-  }
-
-  /**
-   * Reconnect to database if connection is lost
-   * @returns {Promise<boolean>} True if reconnection successful
-   */
-  async reconnect() {
-    try {
-      if (this.mysqlConnection) {
-        await this.mysqlConnection.end();
-      }
-      
-      // Reinitialize connection
-      await this.initializeMySQL();
-      return true;
-    } catch (error) {
-      console.error('Database reconnection failed:', error.message);
-      return false;
-    }
   }
 
   /**
@@ -2665,6 +2813,26 @@ class Database {
     } catch (error) {
       console.error('Error getting all labels:', error);
       throw new Error('Failed to get labels from database');
+    }
+  }
+
+  /**
+   * Generic query method for executing SQL queries
+   * @param {string} sql - SQL query string
+   * @param {Array} params - Query parameters
+   * @returns {Promise<Array>} Array of result rows
+   */
+  async query(sql, params = []) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      const [rows] = await this.mysqlConnection.execute(sql, params);
+      return rows;
+    } catch (error) {
+      console.error('Error executing query:', error);
+      throw error;
     }
   }
 }

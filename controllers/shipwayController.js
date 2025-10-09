@@ -148,6 +148,8 @@ class ShipwayController {
     try {
       const { warehouseId } = req.body;
 
+      console.log('🔍 Validating warehouse for user:', warehouseId);
+
       if (!warehouseId) {
         return res.status(400).json({
           success: false,
@@ -157,16 +159,25 @@ class ShipwayController {
 
       // Validate warehouse ID format
       if (!shipwayService.validateWarehouseId(warehouseId)) {
+        console.log('❌ Invalid warehouse ID format:', warehouseId);
         return res.status(400).json({
           success: false,
           message: 'Invalid warehouse ID format. Must be a positive number.'
         });
       }
 
+      console.log('✅ Warehouse ID format is valid, fetching from Shipway API...');
+
       // Fetch warehouse data from Shipway API
       const warehouseData = await shipwayService.getWarehouseById(warehouseId);
 
+      console.log('📦 Shipway API response:', {
+        success: warehouseData.success,
+        hasData: !!warehouseData.data
+      });
+
       if (!warehouseData.success) {
+        console.log('❌ Warehouse not found in Shipway system:', warehouseId);
         return res.status(400).json({
           success: false,
           message: 'Invalid warehouse ID or warehouse not found in Shipway system'
@@ -175,6 +186,13 @@ class ShipwayController {
 
       // Format the warehouse data
       const formattedWarehouse = shipwayService.formatWarehouseData(warehouseData.data);
+
+      console.log('✅ Warehouse validated successfully:', {
+        warehouseId,
+        address: formattedWarehouse.address,
+        city: formattedWarehouse.city,
+        pincode: formattedWarehouse.pincode
+      });
 
       res.json({
         success: true,
@@ -187,24 +205,41 @@ class ShipwayController {
       });
 
     } catch (error) {
-      console.error('Validate warehouse for user error:', error);
-      
-      // Handle specific error cases
-      if (error.message.includes('Warehouse not found')) {
+      // Handle expected validation failures (warehouse not found) without logging as errors
+      if (error.message.includes('Warehouse not found') || 
+          error.message.includes('not found') ||
+          error.message.includes('Invalid warehouse ID')) {
+        console.log('⚠️ Warehouse validation failed (expected):', {
+          warehouseId: req.body.warehouseId,
+          reason: error.message
+        });
         return res.status(400).json({
           success: false,
           message: 'Invalid warehouse ID or warehouse not found in Shipway system'
         });
       }
 
-      if (error.message.includes('API key')) {
+      // Log actual system errors
+      console.error('❌ Validate warehouse for user error:', error);
+      console.error('Error details:', {
+        message: error.message,
+        stack: error.stack,
+        warehouseId: req.body.warehouseId
+      });
+
+      if (error.message.includes('API key') || 
+          error.message.includes('credentials') ||
+          error.message.includes('configuration')) {
         return res.status(500).json({
           success: false,
           message: 'Shipway API configuration error. Please contact administrator.'
         });
       }
 
-      if (error.message.includes('connect') || error.message.includes('timeout')) {
+      if (error.message.includes('connect') || 
+          error.message.includes('timeout') ||
+          error.message.includes('ECONNREFUSED') ||
+          error.message.includes('ENOTFOUND')) {
         return res.status(503).json({
           success: false,
           message: 'Shipway API is currently unavailable. Please try again later.'
@@ -213,7 +248,7 @@ class ShipwayController {
 
       res.status(500).json({
         success: false,
-        message: 'Failed to validate warehouse'
+        message: `Failed to validate warehouse: ${error.message}`
       });
     }
   }
