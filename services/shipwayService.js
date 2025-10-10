@@ -774,14 +774,42 @@ class ShipwayService {
       // Extract order-level financial information and convert to number
       const orderTotal = parseFloat(order.order_total) || 0;
       
-      // Determine payment type based on order_tags
+      // NEW LOGIC: Determine payment type and is_partial_paid based on payment_id and order_tags
+      const paymentId = order.payment_id ? parseInt(order.payment_id) : null;
       const orderTags = Array.isArray(order.order_tags) ? order.order_tags : [];
-      const paymentType = orderTags.includes('PPCOD') ? 'C' : 'P';
+      const hasPPCODTag = orderTags.includes('PPCOD');
       
-      // Calculate total prepaid amount for the entire order based on payment type
-      const totalPrepaidAmount = paymentType === 'P' 
-        ? parseFloat(orderTotal.toFixed(2)) 
-        : parseFloat((orderTotal * 0.1).toFixed(2));
+      let paymentType = 'P'; // Default to prepaid
+      let isPartialPaid = false;
+      
+      if (paymentId === 6) {
+        // COD payment
+        paymentType = 'C';
+        if (hasPPCODTag) {
+          // CASE 1: COD with partial prepayment (PPCOD)
+          isPartialPaid = true;
+        } else {
+          // CASE 2: Pure COD (no prepayment)
+          isPartialPaid = false;
+        }
+      } else if (paymentId === 12) {
+        // CASE 3: Fully prepaid
+        paymentType = 'P';
+        isPartialPaid = false;
+      }
+      
+      // Calculate total prepaid amount for the entire order based on payment type and is_partial_paid
+      let totalPrepaidAmount = 0;
+      if (paymentType === 'P') {
+        // Fully prepaid: 100% of order total
+        totalPrepaidAmount = parseFloat(orderTotal.toFixed(2));
+      } else if (paymentType === 'C' && isPartialPaid) {
+        // Partial prepaid COD: 10% of order total
+        totalPrepaidAmount = parseFloat((orderTotal * 0.1).toFixed(2));
+      } else {
+        // Pure COD: 0% prepaid
+        totalPrepaidAmount = 0;
+      }
       
       // Calculate total selling price for all products in this order for ratio calculation
       const totalSellingPriceInOrder = order.products.reduce((sum, prod) => {
@@ -835,23 +863,32 @@ class ShipwayService {
           ? parseFloat(((orderTotalRatio / totalRatios) * totalPrepaidAmount).toFixed(2))
           : parseFloat((totalPrepaidAmount / order.products.length).toFixed(2)); // Equal split if no ratios
         
-        // Calculate collectable amount: 0 for prepaid, order_total_split - prepaid_amount for COD
-        const collectableAmount = paymentType === 'P' 
-          ? 0 
-          : parseFloat((orderTotalSplit - prepaidAmount).toFixed(2));
+        // NEW LOGIC: Calculate collectable amount based on payment type and is_partial_paid
+        let collectableAmount = 0;
+        if (paymentType === 'P') {
+          // Fully prepaid: nothing to collect
+          collectableAmount = 0;
+        } else if (paymentType === 'C' && isPartialPaid) {
+          // Partial prepaid COD: collect 90%
+          collectableAmount = parseFloat((orderTotalSplit - prepaidAmount).toFixed(2));
+        } else if (paymentType === 'C' && !isPartialPaid) {
+          // Pure COD: collect 100%
+          collectableAmount = parseFloat(orderTotalSplit.toFixed(2));
+        }
         
         const orderRow = {
           id: `${order.order_id}_${product.product_code}_${Date.now()}`,
           unique_id: existingClaim ? existingClaim.unique_id : generateStableUniqueId(order.order_id, product.product_code, i),
           order_id: order.order_id,
-          order_date: order.order_date,
+          order_date: order.order_date, // Shipway sends IST time; MySQL connection is configured with IST timezone
           product_name: product.product,
           product_code: product.product_code,
           quantity: parseInt(product.amount) || 1,
-          // The 7 additional columns with correct logic
+          // Financial columns with updated logic
           selling_price: sellingPrice,
           order_total: orderTotal,
           payment_type: paymentType,
+          is_partial_paid: isPartialPaid,
           prepaid_amount: prepaidAmount,
           order_total_ratio: orderTotalRatio,
           order_total_split: orderTotalSplit,
@@ -869,8 +906,8 @@ class ShipwayService {
           is_cloned_row: existingClaim ? existingClaim.is_cloned_row : false,
           label_downloaded: existingClaim ? existingClaim.label_downloaded : false,
           handover_at: existingClaim ? existingClaim.handover_at : '',
-          // Get customer name from Shipway API data (s_firstname + s_lastname)
-          customer_name: existingClaim ? existingClaim.customer_name : `${order.s_firstname || ''} ${order.s_lastname || ''}`.trim() || 'N/A',
+          // Preserve custom columns or use empty defaults for new orders
+          customer_name: existingClaim ? existingClaim.customer_name : '',
           // Add priority_carrier column (empty for new orders, preserve existing)
           priority_carrier: existingClaim ? existingClaim.priority_carrier : ''
         };
@@ -925,6 +962,7 @@ class ShipwayService {
               parseFloat(existingOrder.selling_price || 0) !== parseFloat(orderRow.selling_price || 0) ||
               parseFloat(existingOrder.order_total || 0) !== parseFloat(orderRow.order_total || 0) ||
               existingOrder.payment_type !== orderRow.payment_type ||
+              Boolean(existingOrder.is_partial_paid) !== Boolean(orderRow.is_partial_paid) ||
               parseFloat(existingOrder.prepaid_amount || 0) !== parseFloat(orderRow.prepaid_amount || 0) ||
               parseFloat(existingOrder.order_total_ratio || 0) !== parseFloat(orderRow.order_total_ratio || 0) ||
               parseFloat(existingOrder.order_total_split || 0) !== parseFloat(orderRow.order_total_split || 0) ||
@@ -940,6 +978,7 @@ class ShipwayService {
                 selling_price: orderRow.selling_price,
                 order_total: orderRow.order_total,
                 payment_type: orderRow.payment_type,
+                is_partial_paid: orderRow.is_partial_paid,
                 prepaid_amount: orderRow.prepaid_amount,
                 order_total_ratio: orderRow.order_total_ratio,
                 order_total_split: orderRow.order_total_split,
@@ -1014,7 +1053,7 @@ class ShipwayService {
           type: 'mysql-write-with-new-columns', 
           rows: flatOrders.length, 
           preservedClaims: existingClaimData.size,
-          newColumns: ['quantity', 'selling_price', 'order_total', 'payment_type', 'prepaid_amount', 'order_total_ratio', 'order_total_split', 'collectable_amount', 'customer_name', 'priority_carrier', 'pincode', 'is_in_new_order']
+          newColumns: ['quantity', 'selling_price', 'order_total', 'payment_type', 'is_partial_paid', 'prepaid_amount', 'order_total_ratio', 'order_total_split', 'collectable_amount', 'customer_name', 'priority_carrier', 'pincode', 'is_in_new_order']
         });
 
         // Automatically enhance orders with customer names and product images

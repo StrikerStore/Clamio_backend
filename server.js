@@ -46,6 +46,7 @@ app.use(cors({
     if (!origin) return callback(null, true);
     
     const allowedOrigins = [
+      'clamio_frontend.railway.internal',
       'https://clamio-frontend-nu.vercel.app',
       'http://localhost:3000',
       'http://localhost:3001',

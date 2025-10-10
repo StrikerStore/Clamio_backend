@@ -42,15 +42,16 @@ class Database {
       await connection.execute(`CREATE DATABASE IF NOT EXISTS ${dbConfig.database}`);
       await connection.end();
 
-      // Now connect to the specific database
+      // Now connect to the specific database with IST timezone
       this.mysqlConnection = await mysql.createConnection({
         host: dbConfig.host,
         user: dbConfig.user,
         password: dbConfig.password,
-        database: dbConfig.database
+        database: dbConfig.database,
+        timezone: '+05:30' // Set to IST (Indian Standard Time)
       });
       
-      console.log('✅ MySQL connection established');
+      console.log('✅ MySQL connection established with IST timezone (+05:30)');
       await this.createCarriersTable();
       await this.createProductsTable();
       await this.createUsersTable();
@@ -274,6 +275,7 @@ class Database {
           selling_price DECIMAL(10,2),
           order_total DECIMAL(10,2),
           payment_type VARCHAR(50),
+          is_partial_paid BOOLEAN DEFAULT 0,
           prepaid_amount DECIMAL(10,2),
           order_total_ratio DECIMAL(10,2),
           order_total_split DECIMAL(10,2),
@@ -490,6 +492,7 @@ class Database {
           cloned_order_id VARCHAR(100),
           is_cloned_row BOOLEAN DEFAULT FALSE,
           label_downloaded BOOLEAN DEFAULT FALSE,
+          priority_carrier TEXT,
           INDEX idx_order_unique_id (order_unique_id),
           INDEX idx_order_id (order_id),
           INDEX idx_claimed_by (claimed_by),
@@ -499,6 +502,9 @@ class Database {
       
       await this.mysqlConnection.execute(createClaimsTableQuery);
       console.log('✅ Claims table created/verified');
+      
+      // Add priority_carrier column if it doesn't exist (migration for existing tables)
+      await this.addPriorityCarrierColumnToClaims();
       
       // Migrate existing claims data from orders table if claims table is empty
       await this.migrateClaimsData();
@@ -529,6 +535,35 @@ class Database {
 
     } catch (error) {
       console.error('❌ Error migrating claims data:', error.message);
+    }
+  }
+
+  /**
+   * Add priority_carrier column to existing claims table if it doesn't exist (migration)
+   */
+  async addPriorityCarrierColumnToClaims() {
+    if (!this.mysqlConnection) return;
+
+    try {
+      // Check if priority_carrier column exists
+      const [columns] = await this.mysqlConnection.execute(
+        `SHOW COLUMNS FROM claims LIKE 'priority_carrier'`
+      );
+
+      if (columns.length === 0) {
+        console.log('🔄 Adding priority_carrier column to existing claims table...');
+        
+        // Add priority_carrier column
+        await this.mysqlConnection.execute(
+          `ALTER TABLE claims ADD COLUMN priority_carrier TEXT AFTER label_downloaded`
+        );
+        
+        console.log('✅ priority_carrier column added to claims table');
+      } else {
+        console.log('✅ priority_carrier column already exists in claims table');
+      }
+    } catch (error) {
+      console.error('❌ Error adding priority_carrier column to claims:', error.message);
     }
   }
 
@@ -2025,11 +2060,10 @@ class Database {
         `INSERT INTO orders (
           id, unique_id, order_id, customer_name, order_date,
           product_name, product_code, size, quantity, selling_price, order_total, payment_type,
-          prepaid_amount, order_total_ratio, order_total_split, collectable_amount,
+          is_partial_paid, prepaid_amount, order_total_ratio, order_total_split, collectable_amount,
           pincode, is_in_new_order
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE
-          customer_name = VALUES(customer_name),
           order_date = VALUES(order_date),
           product_name = VALUES(product_name),
           product_code = VALUES(product_code),
@@ -2038,6 +2072,7 @@ class Database {
           selling_price = VALUES(selling_price),
           order_total = VALUES(order_total),
           payment_type = VALUES(payment_type),
+          is_partial_paid = VALUES(is_partial_paid),
           prepaid_amount = VALUES(prepaid_amount),
           order_total_ratio = VALUES(order_total_ratio),
           order_total_split = VALUES(order_total_split),
@@ -2057,6 +2092,7 @@ class Database {
           orderData.selling_price || null,
           orderData.order_total || null,
           orderData.payment_type || null,
+          orderData.is_partial_paid !== undefined ? orderData.is_partial_paid : false,
           orderData.prepaid_amount || null,
           orderData.order_total_ratio || null,
           orderData.order_total_split || null,
@@ -2235,7 +2271,7 @@ class Database {
           l.carrier_id,
           l.carrier_name,
           l.handover_at,
-          l.priority_carrier,
+          c.priority_carrier,
           l.is_manifest
         FROM orders o
         LEFT JOIN products p ON (
@@ -2284,7 +2320,7 @@ class Database {
           l.carrier_id,
           l.carrier_name,
           l.handover_at,
-          l.priority_carrier,
+          c.priority_carrier,
           l.is_manifest
         FROM orders o
         LEFT JOIN products p ON (
@@ -2333,7 +2369,7 @@ class Database {
           l.carrier_id,
           l.carrier_name,
           l.handover_at,
-          l.priority_carrier,
+          c.priority_carrier,
           l.is_manifest
         FROM orders o
         LEFT JOIN products p ON (
@@ -2383,7 +2419,7 @@ class Database {
           l.carrier_id,
           l.carrier_name,
           l.handover_at,
-          l.priority_carrier,
+          c.priority_carrier,
           l.is_manifest
         FROM orders o
         LEFT JOIN products p ON (
@@ -2434,7 +2470,7 @@ class Database {
           l.carrier_id,
           l.carrier_name,
           l.handover_at,
-          l.priority_carrier,
+          c.priority_carrier,
           l.is_manifest
         FROM orders o
         LEFT JOIN products p ON (
@@ -2482,19 +2518,19 @@ class Database {
       const allowedOrderFields = [
         'order_id', 'customer_name', 'order_date',
         'product_name', 'product_code', 'selling_price', 'order_total',
-        'payment_type', 'prepaid_amount', 'order_total_ratio', 'order_total_split',
+        'payment_type', 'is_partial_paid', 'prepaid_amount', 'order_total_ratio', 'order_total_split',
         'collectable_amount', 'pincode', 'is_in_new_order'
       ];
 
       // Claims table fields
       const allowedClaimFields = [
         'order_id', 'status', 'claimed_by', 'claimed_at', 'last_claimed_by', 'last_claimed_at',
-        'clone_status', 'cloned_order_id', 'is_cloned_row', 'label_downloaded'
+        'clone_status', 'cloned_order_id', 'is_cloned_row', 'label_downloaded', 'priority_carrier'
       ];
 
       // Labels table fields
       const allowedLabelFields = [
-        'label_url', 'awb', 'carrier_name', 'handover_at', 'priority_carrier'
+        'label_url', 'awb', 'carrier_name', 'handover_at'
       ];
 
       // Separate the fields

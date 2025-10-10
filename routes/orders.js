@@ -317,8 +317,18 @@ router.post('/claim', async (req, res) => {
       last_claimed_at: now
     };
     
-    // Carrier assignment moved to label download process
-    console.log('ℹ️ Carrier assignment will happen during label download');
+    // Assign top 3 priority carriers during claim
+    console.log('🚚 ASSIGNING TOP 3 PRIORITY CARRIERS...');
+    let priorityCarrier = '';
+    try {
+      priorityCarrier = await carrierServiceabilityService.getTop3PriorityCarriers(order);
+      console.log(`✅ Top 3 carriers assigned: ${priorityCarrier}`);
+      updatedOrder.priority_carrier = priorityCarrier;
+    } catch (carrierError) {
+      console.log(`⚠️ Carrier assignment failed: ${carrierError.message}`);
+      console.log('  - Order will be claimed without priority carriers');
+      updatedOrder.priority_carrier = '';
+    }
     
     // Now save everything to MySQL in one go
     console.log('💾 SAVING TO MYSQL');
@@ -327,7 +337,8 @@ router.post('/claim', async (req, res) => {
       claimed_by: updatedOrder.claimed_by,
       claimed_at: updatedOrder.claimed_at,
       last_claimed_by: updatedOrder.last_claimed_by,
-      last_claimed_at: updatedOrder.last_claimed_at
+      last_claimed_at: updatedOrder.last_claimed_at,
+      priority_carrier: updatedOrder.priority_carrier
     });
     
     if (!finalUpdatedOrder) {
@@ -433,8 +444,18 @@ router.post('/bulk-claim', async (req, res) => {
         last_claimed_at: now
       };
       
-      // Carrier assignment moved to label download process
-      console.log(`ℹ️ Carrier assignment for order ${order.order_id} will happen during label download`);
+      // Assign top 3 priority carriers during claim
+      console.log(`🚚 ASSIGNING TOP 3 PRIORITY CARRIERS for ${order.order_id}...`);
+      let priorityCarrier = '';
+      try {
+        priorityCarrier = await carrierServiceabilityService.getTop3PriorityCarriers(order);
+        console.log(`✅ Top 3 carriers assigned: ${priorityCarrier}`);
+        updatedOrder.priority_carrier = priorityCarrier;
+      } catch (carrierError) {
+        console.log(`⚠️ Carrier assignment failed: ${carrierError.message}`);
+        console.log('  - Order will be claimed without priority carriers');
+        updatedOrder.priority_carrier = '';
+      }
       
       // Now save everything to MySQL in one go
       const finalUpdatedOrder = await database.updateOrder(unique_id, {
@@ -442,7 +463,8 @@ router.post('/bulk-claim', async (req, res) => {
         claimed_by: updatedOrder.claimed_by,
         claimed_at: updatedOrder.claimed_at,
         last_claimed_by: updatedOrder.last_claimed_by,
-        last_claimed_at: updatedOrder.last_claimed_at
+        last_claimed_at: updatedOrder.last_claimed_at,
+        priority_carrier: updatedOrder.priority_carrier
       });
       
       if (finalUpdatedOrder) {
@@ -984,7 +1006,8 @@ router.post('/admin/bulk-unassign', authenticateBasicAuth, requireAdminOrSuperad
           const result = await database.updateOrder(uid, {
             status: 'unclaimed',
             claimed_by: '',
-            claimed_at: null
+            claimed_at: null,
+            priority_carrier: ''
           });
           
           if (result.success) {
@@ -1056,7 +1079,8 @@ router.post('/admin/unassign', authenticateBasicAuth, requireAdminOrSuperadmin, 
     const updatedOrder = await database.updateOrder(unique_id, {
       status: 'unclaimed',
       claimed_by: '',
-      claimed_at: null
+      claimed_at: null,
+      priority_carrier: ''
       // Keep last_claimed_by and last_claimed_at for history
     });
     
@@ -1369,8 +1393,7 @@ router.post('/download-label', async (req, res) => {
             label_url: labelResponse.data.shipping_url,
             awb: labelResponse.data.awb,
             carrier_id: labelResponse.data.carrier_id,
-            carrier_name: labelResponse.data.carrier_name,
-            priority_carrier: labelResponse.data.carrier_id
+            carrier_name: labelResponse.data.carrier_name
           };
           
           console.log(`📦 Storing label data for direct download:`, labelDataToStore);
@@ -1460,53 +1483,127 @@ async function generateLabelForOrder(orderId, products, vendor, format = 'therma
       throw new Error(`Original order not found in raw_shipway_orders.json for order ID: ${originalOrderId}`);
     }
 
-    // STEP 1: Assign carrier for the current order_id (original or clone)
-    console.log(`🚚 ASSIGNING PRIORITY CARRIER for order ${orderId}...`);
-    let assignedCarrier = null;
-    try {
-      // Get the first product to determine payment type and status
-      const firstProduct = products[0];
-      
-      // Create a complete order object for carrier assignment
-      const tempOrder = {
-        order_id: orderId,
-        pincode: originalOrder.s_zipcode,
-        payment_type: firstProduct.payment_type,
-        status: 'claimed',  // Required for carrier assignment
-        claimed_by: vendor.warehouseId  // Required for carrier assignment
-      };
-      
-      console.log(`  - Order details for carrier assignment:`, {
-        order_id: tempOrder.order_id,
-        pincode: tempOrder.pincode,
-        payment_type: tempOrder.payment_type,
-        status: tempOrder.status,
-        claimed_by: tempOrder.claimed_by
-      });
-      
-      console.log(`  - Products for carrier assignment:`, products.map(p => ({
-        unique_id: p.unique_id,
-        product_code: p.product_code,
-        payment_type: p.payment_type
-      })));
-      
-      const carrierServiceabilityService = require('../services/carrierServiceabilityService');
-      const carrierResult = await carrierServiceabilityService.assignPriorityCarrierToOrderInMemory(tempOrder);
-      assignedCarrier = {
-        carrier_id: carrierResult.data.carrier_id,
-        carrier_name: carrierResult.data.carrier_name
-      };
-      console.log(`✅ Carrier assigned for ${orderId}: ${assignedCarrier.carrier_id} (${assignedCarrier.carrier_name})`);
-    } catch (carrierError) {
-      console.log(`⚠️ Carrier assignment failed for ${orderId}: ${carrierError.message}`);
-      assignedCarrier = { carrier_id: '', carrier_name: '' };
-    }
-
-    // Prepare request body for PUSH Order with Label Generation API
-    const requestBody = prepareShipwayRequestBody(orderId, products, originalOrder, vendor, true); // true for label generation
+    // STEP 1: Get top 3 priority carriers from the first product
+    console.log(`🚚 RETRIEVING TOP 3 PRIORITY CARRIERS for order ${orderId}...`);
+    const firstProduct = products[0];
+    const priorityCarrierStr = firstProduct.priority_carrier || '[]';
     
-    // Call Shipway API
-    const response = await callShipwayPushOrderAPI(requestBody, true); // true for label generation
+    console.log(`  - Priority carrier string: ${priorityCarrierStr}`);
+    
+    let priorityCarriers = [];
+    try {
+      priorityCarriers = JSON.parse(priorityCarrierStr);
+      if (!Array.isArray(priorityCarriers)) {
+        priorityCarriers = [];
+      }
+    } catch (parseError) {
+      console.log(`⚠️ Failed to parse priority_carrier: ${parseError.message}`);
+      priorityCarriers = [];
+    }
+    
+    console.log(`  - Parsed carriers: ${JSON.stringify(priorityCarriers)}`);
+    
+    if (priorityCarriers.length === 0) {
+      console.log(`❌ No priority carriers available for order ${orderId}`);
+      throw new Error('No priority carriers assigned to this order. Please contact admin.');
+    }
+    
+    // Get carrier details from database for name lookup
+    const database = require('../config/database');
+    const carrierServiceabilityService = require('../services/carrierServiceabilityService');
+    const allCarriers = await carrierServiceabilityService.readCarriersFromDatabase();
+    const carrierMap = new Map(allCarriers.map(c => [c.carrier_id, c]));
+    
+    // STEP 2: Try each carrier in sequence with fallback logic
+    console.log(`🔄 Attempting label generation with ${priorityCarriers.length} carriers...`);
+    
+    let assignedCarrier = null;
+    let response = null;
+    let lastError = null;
+    
+    for (let i = 0; i < priorityCarriers.length; i++) {
+      const carrierId = priorityCarriers[i];
+      const carrierInfo = carrierMap.get(carrierId);
+      const carrierName = carrierInfo ? carrierInfo.carrier_name : `Carrier ${carrierId}`;
+      
+      console.log(`\n🔹 ATTEMPT ${i + 1}/${priorityCarriers.length}: Trying carrier ${carrierId} (${carrierName})`);
+      
+      try {
+        // Create a modified products array with this specific carrier
+        const modifiedProducts = products.map(p => ({
+          ...p,
+          priority_carrier: carrierId
+        }));
+        
+        // Prepare request body with this carrier
+        const requestBody = prepareShipwayRequestBody(orderId, modifiedProducts, originalOrder, vendor, true);
+        
+        console.log(`  - Calling Shipway API with carrier ${carrierId}...`);
+        
+        // Call Shipway API
+        response = await callShipwayPushOrderAPI(requestBody, true);
+        
+        // If we reach here, API call succeeded
+        assignedCarrier = {
+          carrier_id: carrierId,
+          carrier_name: carrierName
+        };
+        
+        console.log(`✅ SUCCESS: Label generated with carrier ${carrierId} (${carrierName})`);
+        break; // Exit loop on success
+        
+      } catch (error) {
+        lastError = error;
+        const errorMessage = error.message || '';
+        
+        console.log(`  ❌ FAILED with carrier ${carrierId}: ${errorMessage}`);
+        
+        // Check if error is "Delivery pincode is not serviceable"
+        if (errorMessage.toLowerCase().includes('delivery pincode is not serviceable') || 
+            errorMessage.toLowerCase().includes('pincode is not serviceable') ||
+            errorMessage.toLowerCase().includes('pincode not serviceable')) {
+          
+          console.log(`  ⚠️ Pincode not serviceable with carrier ${carrierId}, trying next carrier...`);
+          
+          // Continue to next carrier
+          if (i < priorityCarriers.length - 1) {
+            continue;
+          } else {
+            console.log(`  ❌ All carriers exhausted for pincode serviceability`);
+            // Create notification for admin
+            try {
+              await createLabelGenerationNotification(
+                `All ${priorityCarriers.length} priority carriers failed for order ${orderId} due to pincode not serviceable`,
+                orderId,
+                vendor
+              );
+            } catch (notifError) {
+              console.log(`⚠️ Failed to create notification: ${notifError.message}`);
+            }
+            throw new Error('Unable to perform action. Kindly contact Admin');
+          }
+        } else {
+          // Different error - stop trying and throw
+          console.log(`  ❌ Non-serviceable error encountered, stopping attempts`);
+          console.log(`  - Error details: ${errorMessage}`);
+          
+          // Create notification for admin
+          try {
+            await createLabelGenerationNotification(errorMessage, orderId, vendor);
+          } catch (notifError) {
+            console.log(`⚠️ Failed to create notification: ${notifError.message}`);
+          }
+          
+          throw new Error('Unable to perform action. Kindly contact Admin');
+        }
+      }
+    }
+    
+    // If we exhausted all carriers without success
+    if (!assignedCarrier || !response) {
+      console.log(`❌ All ${priorityCarriers.length} carriers failed for order ${orderId}`);
+      throw new Error('Unable to perform action. Kindly contact Admin');
+    }
     
     console.log('🔍 Shipway API Response Structure:');
     console.log('  - Full response:', JSON.stringify(response, null, 2));
@@ -2147,8 +2244,7 @@ async function markLabelAsDownloaded(inputData, labelResponse) {
       label_url: labelResponse.data.shipping_url,
       awb: labelResponse.data.awb,
       carrier_id: labelResponse.data.carrier_id,
-      carrier_name: labelResponse.data.carrier_name,
-      priority_carrier: labelResponse.data.carrier_id
+      carrier_name: labelResponse.data.carrier_name
     };
     
     console.log(`📦 Storing label data for clone order:`, labelDataToStore);
@@ -2399,8 +2495,32 @@ async function callShipwayPushOrderAPI(requestBody, generateLabel = false) {
       throw new Error(errorMessage);
     }
     
+    // If label generation was requested, check if AWB response is successful
+    if (generateLabel && data.awb_response) {
+      if (data.awb_response.success === false) {
+        console.log('❌ Label generation failed (AWB response unsuccessful)');
+        console.log('  - AWB Response:', JSON.stringify(data.awb_response, null, 2));
+        
+        // Extract error message from awb_response
+        let errorMessage = 'Label generation failed';
+        if (data.awb_response.error) {
+          if (Array.isArray(data.awb_response.error)) {
+            errorMessage = data.awb_response.error.join(', ');
+          } else if (typeof data.awb_response.error === 'string') {
+            errorMessage = data.awb_response.error;
+          }
+        } else if (data.awb_response.message) {
+          errorMessage = data.awb_response.message;
+        }
+        
+        console.log('  - Error message:', errorMessage);
+        throw new Error(errorMessage);
+      }
+    }
+    
     console.log('✅ Shipway API call successful');
-    console.log('  - Label URL:', data.data?.label_url || 'N/A');
+    console.log('  - Label URL:', data.awb_response?.shipping_url || data.data?.label_url || 'N/A');
+    console.log('  - AWB:', data.awb_response?.AWB || 'N/A');
     console.log('  - Shipway Order ID:', data.data?.shipway_order_id || 'N/A');
     return data;
     
@@ -2543,8 +2663,7 @@ router.post('/bulk-download-labels', async (req, res) => {
               label_url: labelResponse.data.shipping_url,
               awb: labelResponse.data.awb,
               carrier_id: labelResponse.data.carrier_id,
-              carrier_name: labelResponse.data.carrier_name,
-              priority_carrier: labelResponse.data.carrier_id
+              carrier_name: labelResponse.data.carrier_name
             });
             console.log(`✅ BULK: Stored label data for clone order ${orderId}`);
             
@@ -2568,8 +2687,7 @@ router.post('/bulk-download-labels', async (req, res) => {
               label_url: labelResponse.data.shipping_url,
               awb: labelResponse.data.awb,
               carrier_id: labelResponse.data.carrier_id,
-              carrier_name: labelResponse.data.carrier_name,
-              priority_carrier: labelResponse.data.carrier_id
+              carrier_name: labelResponse.data.carrier_name
             });
             console.log(`✅ BULK: Stored label data for direct download ${orderId}`);
             
@@ -3566,7 +3684,8 @@ router.post('/reverse', async (req, res) => {
         last_claimed_by = NULL, 
         last_claimed_at = NULL, 
         status = 'unclaimed',
-        label_downloaded = 0
+        label_downloaded = 0,
+        priority_carrier = NULL
       WHERE order_unique_id = ?`,
       [unique_id]
     );
@@ -3780,7 +3899,8 @@ router.post('/reverse-grouped', async (req, res) => {
               last_claimed_by = NULL, 
               last_claimed_at = NULL, 
               status = 'unclaimed',
-              label_downloaded = 0
+              label_downloaded = 0,
+              priority_carrier = NULL
             WHERE order_unique_id = ?`,
             [unique_id]
           );
