@@ -13,6 +13,7 @@ const shipwayRoutes = require('./routes/shipway');
 const ordersRoutes = require('./routes/orders');
 const settlementRoutes = require('./routes/settlements');
 const notificationRoutes = require('./routes/notifications');
+const inventoryRoutes = require('./routes/inventory');
 
 // Import database to initialize it
 const database = require('./config/database');
@@ -288,6 +289,7 @@ app.use('/api/shipway', shipwayRoutes);
 app.use('/api/orders', ordersRoutes);
 app.use('/api/settlements', settlementRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/admin/inventory', inventoryRoutes);
 
 
 /**
