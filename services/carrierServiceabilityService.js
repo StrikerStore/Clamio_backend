@@ -581,6 +581,97 @@ class CarrierServiceabilityService {
   }
 
   /**
+   * Get top 3 priority carriers for a specific order based on serviceability
+   * @param {Object} order - Order object with pincode and payment_type
+   * @returns {Promise<string>} JSON string of top 3 carrier IDs: "[12121, 23232, 34333]"
+   */
+  async getTop3PriorityCarriers(order) {
+    try {
+      console.log(`🔵 GET TOP 3 CARRIERS: Starting for order ${order.order_id || order.unique_id}...`);
+      console.log(`  - Pincode: ${order.pincode}`);
+      console.log(`  - Payment Type: ${order.payment_type}`);
+      
+      // Validate input
+      if (!order.pincode || !order.payment_type) {
+        throw new Error('Order must have pincode and payment_type');
+      }
+      
+      // Get carriers from database
+      const carriers = await this.readCarriersFromDatabase();
+      
+      if (carriers.length === 0) {
+        throw new Error('No carriers found in database');
+      }
+      
+      // Check serviceability for the pincode
+      console.log(`🔍 Checking serviceability for pincode: ${order.pincode}`);
+      const serviceableCarriers = await this.checkServiceability(order.pincode);
+      
+      if (serviceableCarriers.length === 0) {
+        console.log(`⚠️ No serviceable carriers found for pincode ${order.pincode}`);
+        return JSON.stringify([]);
+      }
+      
+      console.log(`  - Found ${serviceableCarriers.length} serviceable carriers`);
+      
+      // Create a map of carrier data for quick lookup
+      const carrierMap = new Map(carriers.map(carrier => [carrier.carrier_id, carrier]));
+      
+      // Filter serviceable carriers by payment type
+      const matchingCarriers = serviceableCarriers.filter(carrier => 
+        carrier.payment_type === order.payment_type
+      );
+      
+      console.log(`  - Carriers matching payment type ${order.payment_type}: ${matchingCarriers.length}`);
+      
+      if (matchingCarriers.length === 0) {
+        console.log(`⚠️ No carriers found with payment type ${order.payment_type}`);
+        return JSON.stringify([]);
+      }
+      
+      // Find carriers that exist in our carrier data and are active
+      const validCarriers = matchingCarriers
+        .filter(carrier => carrierMap.has(carrier.carrier_id))
+        .map(carrier => {
+          const carrierInfo = carrierMap.get(carrier.carrier_id);
+          return {
+            carrier_id: carrier.carrier_id,
+            name: carrier.name,
+            payment_type: carrier.payment_type,
+            priority: parseInt(carrierInfo.priority) || 999,
+            status: String(carrierInfo.status || '').trim().toLowerCase()
+          };
+        })
+        .filter(carrier => carrier.status === 'active');
+      
+      console.log(`  - Valid active carriers: ${validCarriers.length}`);
+      
+      if (validCarriers.length === 0) {
+        console.log(`⚠️ No valid active carriers found`);
+        return JSON.stringify([]);
+      }
+      
+      // Sort by priority (ascending: 1, 2, 3...) and take top 3
+      const top3Carriers = validCarriers
+        .sort((a, b) => a.priority - b.priority)
+        .slice(0, 3)
+        .map(carrier => carrier.carrier_id);
+      
+      console.log(`✅ Top 3 carriers selected: ${JSON.stringify(top3Carriers)}`);
+      top3Carriers.forEach((carrierId, index) => {
+        const carrier = validCarriers.find(c => c.carrier_id === carrierId);
+        console.log(`  ${index + 1}. ${carrierId} - ${carrier.name} (Priority: ${carrier.priority})`);
+      });
+      
+      return JSON.stringify(top3Carriers);
+      
+    } catch (error) {
+      console.error('💥 GET TOP 3 CARRIERS ERROR:', error.message);
+      throw error;
+    }
+  }
+
+  /**
    * Get statistics about the assignment process
    * @returns {Promise<Object>} Statistics about orders and carriers
    */

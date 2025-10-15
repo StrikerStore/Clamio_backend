@@ -174,6 +174,7 @@ class NewMachineSetup {
           order_date DATETIME,
           product_name VARCHAR(500),
           product_code VARCHAR(100),
+          quantity INT,
           selling_price DECIMAL(10,2),
           order_total DECIMAL(10,2),
           payment_type VARCHAR(50),

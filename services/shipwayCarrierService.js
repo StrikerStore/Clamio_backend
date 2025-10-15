@@ -523,19 +523,66 @@ class ShipwayCarrierService {
         return { success: true, message: 'Already at bottom' };
       }
 
-      const swapWith = direction === 'up' ? index - 1 : index + 1;
-      const carrier1 = active[index];
-      const carrier2 = active[swapWith];
+      // Create a new array with the moved carrier
+      const newOrder = [...active];
+      const movedCarrier = newOrder[index];
+      const newIndex = direction === 'up' ? index - 1 : index + 1;
+      
+      // Remove the carrier from its current position
+      newOrder.splice(index, 1);
+      // Insert it at the new position
+      newOrder.splice(newIndex, 0, movedCarrier);
 
-      // Swap priorities
-      const tempPriority = carrier1.priority;
-      await database.updateCarrier(carrier1.carrier_id, { priority: carrier2.priority });
-      await database.updateCarrier(carrier2.carrier_id, { priority: tempPriority });
+      // Update priorities sequentially (1, 2, 3, ...)
+      await database.reorderCarrierPriorities(newOrder);
 
       return { success: true, message: 'Carrier moved successfully' };
     } catch (error) {
       console.error('Error moving carrier:', error.message);
       throw new Error(error.message || 'Failed to move carrier');
+    }
+  }
+
+  /**
+   * Normalize carrier priorities to be sequential (1, 2, 3, ...)
+   * This fixes any gaps or duplicates in priority values
+   * @returns {Promise<Object>} Result object
+   */
+  async normalizeCarrierPriorities() {
+    try {
+      const carriers = await this.readCarriersFromDatabase();
+      const normalizeStatus = (s) => String(s || '').trim().toLowerCase();
+
+      const active = carriers
+        .filter(c => normalizeStatus(c.status) === 'active')
+        .sort((a, b) => (parseInt(a.priority) || 0) - (parseInt(b.priority) || 0));
+
+      if (active.length === 0) {
+        return { success: true, message: 'No active carriers to normalize' };
+      }
+
+      // Check if normalization is needed
+      let needsNormalization = false;
+      for (let i = 0; i < active.length; i++) {
+        const expectedPriority = i + 1;
+        const actualPriority = parseInt(active[i].priority) || 0;
+        if (actualPriority !== expectedPriority) {
+          needsNormalization = true;
+          break;
+        }
+      }
+
+      if (!needsNormalization) {
+        return { success: true, message: 'Priorities are already normalized' };
+      }
+
+      // Normalize priorities
+      await database.reorderCarrierPriorities(active);
+
+      return { success: true, message: `Normalized priorities for ${active.length} active carriers` };
+    } catch (error) {
+      console.error('Error normalizing carrier priorities:', error.message);
+      throw new Error(error.message || 'Failed to normalize carrier priorities');
     }
   }
 
