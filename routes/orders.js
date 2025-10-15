@@ -92,6 +92,45 @@ async function createLabelGenerationNotification(errorMessage, orderId, vendor) 
       };
     }
     
+    // Pattern 4: No priority carriers assigned
+    else if (errorMessage.toLowerCase().includes('no priority carriers') || 
+             errorMessage.toLowerCase().includes('priority carriers assigned')) {
+      console.log('✅ Detected: No priority carriers assigned error');
+      
+      notificationData = {
+        type: 'carrier_unavailable',
+        severity: 'critical',
+        title: `No priority carriers assigned - Order ${orderId}`,
+        message: errorMessage,
+        order_id: orderId,
+        vendor_id: vendor.id,
+        vendor_name: vendor.name,
+        vendor_warehouse_id: vendor.warehouseId,
+        metadata: null,
+        error_details: 'Admin needs to assign priority carriers to this order before label generation'
+      };
+    }
+    
+    // Pattern 5: Generic label download error (catch-all for other errors)
+    else if (errorMessage.toLowerCase().includes('label') || 
+             errorMessage.toLowerCase().includes('download') ||
+             errorMessage.toLowerCase().includes('generation')) {
+      console.log('✅ Detected: Generic label/download error');
+      
+      notificationData = {
+        type: 'label_download_error',
+        severity: 'high',
+        title: `Label generation failed - Order ${orderId}`,
+        message: errorMessage,
+        order_id: orderId,
+        vendor_id: vendor.id,
+        vendor_name: vendor.name,
+        vendor_warehouse_id: vendor.warehouseId,
+        metadata: null,
+        error_details: 'Label generation failed. Please check the error details and resolve the issue.'
+      };
+    }
+    
     // If we identified a pattern, create the notification
     if (notificationData) {
       console.log('📝 Creating notification in database:', notificationData);
