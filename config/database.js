@@ -587,6 +587,12 @@ class Database {
             'warehouse_issue',
             'payment_failed',
             'order_stuck',
+            'vendor_error',
+            'vendor_api_error',
+            'vendor_connection_error',
+            'vendor_validation_error',
+            'vendor_timeout_error',
+            'vendor_authentication_error',
             'other'
           ) NOT NULL,
           severity ENUM('low', 'medium', 'high', 'critical') DEFAULT 'medium',
@@ -632,6 +638,95 @@ class Database {
       
       await this.mysqlConnection.execute(createNotificationsTableQuery);
       console.log('✅ Notifications table created/verified');
+
+      // Create notification_views table
+      const createNotificationViewsTableQuery = `
+        CREATE TABLE IF NOT EXISTS notification_views (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          notification_id INT NOT NULL,
+          admin_id VARCHAR(50) NOT NULL,
+          viewed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          
+          UNIQUE KEY unique_view (notification_id, admin_id),
+          FOREIGN KEY (notification_id) REFERENCES notifications(id) ON DELETE CASCADE,
+          FOREIGN KEY (admin_id) REFERENCES users(id) ON DELETE CASCADE,
+          
+          INDEX idx_notification (notification_id),
+          INDEX idx_admin (admin_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+      `;
+      
+      await this.mysqlConnection.execute(createNotificationViewsTableQuery);
+      console.log('✅ Notification views table created/verified');
+
+      // Create push_subscriptions table
+      const createPushSubscriptionsTableQuery = `
+        CREATE TABLE IF NOT EXISTS push_subscriptions (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          admin_id VARCHAR(50) NOT NULL,
+          endpoint TEXT NOT NULL,
+          p256dh_key VARCHAR(255) NOT NULL,
+          auth_key VARCHAR(255) NOT NULL,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          
+          UNIQUE KEY unique_admin_endpoint (admin_id, endpoint(255)),
+          FOREIGN KEY (admin_id) REFERENCES users(id) ON DELETE CASCADE,
+          
+          INDEX idx_admin (admin_id),
+          INDEX idx_created_at (created_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+      `;
+      
+      await this.mysqlConnection.execute(createPushSubscriptionsTableQuery);
+      console.log('✅ Push subscriptions table created/verified');
+
+      // Create push_notification_logs table
+      const createPushNotificationLogsTableQuery = `
+        CREATE TABLE IF NOT EXISTS push_notification_logs (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          notification_id INT NOT NULL,
+          admin_id VARCHAR(50) NOT NULL,
+          status ENUM('sent', 'failed', 'invalid_subscription') DEFAULT 'sent',
+          error_message TEXT,
+          sent_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          
+          INDEX idx_notification_id (notification_id),
+          INDEX idx_admin_id (admin_id),
+          INDEX idx_status (status),
+          INDEX idx_sent_at (sent_at),
+          
+          FOREIGN KEY (notification_id) REFERENCES notifications(id) ON DELETE CASCADE,
+          FOREIGN KEY (admin_id) REFERENCES users(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+      `;
+      
+      await this.mysqlConnection.execute(createPushNotificationLogsTableQuery);
+      console.log('✅ Push notification logs table created/verified');
+
+      // Add push_notifications_enabled column to users table if it doesn't exist
+      try {
+        // Check if column already exists
+        const [columns] = await this.mysqlConnection.execute(`
+          SELECT COLUMN_NAME 
+          FROM INFORMATION_SCHEMA.COLUMNS 
+          WHERE TABLE_NAME = 'users' 
+          AND COLUMN_NAME = 'push_notifications_enabled'
+          AND TABLE_SCHEMA = DATABASE()
+        `);
+        
+        if (columns.length === 0) {
+          await this.mysqlConnection.execute(`
+            ALTER TABLE users 
+            ADD COLUMN push_notifications_enabled BOOLEAN DEFAULT FALSE
+          `);
+          console.log('✅ Push notifications enabled column added to users table');
+        } else {
+          console.log('✅ Push notifications enabled column already exists in users table');
+        }
+      } catch (error) {
+        console.error('❌ Error adding push_notifications_enabled column:', error.message);
+      }
 
     } catch (error) {
       console.error('❌ Error creating notifications tables:', error.message);

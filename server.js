@@ -14,12 +14,16 @@ const ordersRoutes = require('./routes/orders');
 const settlementRoutes = require('./routes/settlements');
 const notificationRoutes = require('./routes/notifications');
 const inventoryRoutes = require('./routes/inventory');
+const publicRoutes = require('./routes/public');
 
 // Import database to initialize it
 const database = require('./config/database');
 const { fetchAndSaveShopifyProducts } = require('./services/shopifyProductFetcher');
 const shipwayService = require('./services/shipwayService');
 const cron = require('node-cron');
+
+// Import vendor error tracking middleware
+const { trackVendorErrors, handleVendorErrors } = require('./middleware/vendorErrorTracking');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -281,9 +285,15 @@ app.get('/db-test', async (req, res) => {
 });
 
 /**
+ * Vendor Error Tracking Middleware
+ */
+app.use('/api', trackVendorErrors);
+
+/**
  * API Routes
  */
 app.use('/api/auth', authRoutes);
+app.use('/api/public', publicRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/shipway', shipwayRoutes);
 app.use('/api/orders', ordersRoutes);
@@ -346,6 +356,8 @@ app.use('*', (req, res) => {
 /**
  * Global Error Handler
  */
+app.use(handleVendorErrors);
+
 app.use((error, req, res, next) => {
   console.error('Global error handler:', error);
 

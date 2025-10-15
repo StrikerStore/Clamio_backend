@@ -4,6 +4,7 @@
  */
 
 const database = require('../config/database');
+const pushNotificationService = require('../services/pushNotificationService');
 
 /**
  * @desc    Get all notifications with pagination and filters
@@ -304,6 +305,15 @@ exports.createNotification = async (req, res) => {
 
     console.log('📋 Retrieved notification:', newNotification);
 
+    // Send push notification to all subscribed admins
+    try {
+      const pushResult = await pushNotificationService.sendNotificationToAllAdmins(newNotification);
+      console.log('📱 Push notification result:', pushResult);
+    } catch (pushError) {
+      console.error('❌ Error sending push notification:', pushError);
+      // Don't fail the notification creation if push fails
+    }
+
     res.status(201).json({
       success: true,
       message: 'Notification created successfully',
@@ -562,11 +572,15 @@ exports.getNotificationStats = async (req, res) => {
 
     const typeStats = await database.query(typeStatsQuery);
 
+    // Get push notification stats
+    const pushStats = await pushNotificationService.getPushNotificationStats();
+
     res.json({
       success: true,
       data: {
         overview: stats,
-        by_type: typeStats
+        by_type: typeStats,
+        push_notifications: pushStats.data
       }
     });
   } catch (error) {
@@ -574,6 +588,170 @@ exports.getNotificationStats = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to fetch notification statistics',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * @desc    Get VAPID public key
+ * @route   GET /api/notifications/vapid-key
+ * @access  Authenticated users
+ */
+exports.getVapidKey = async (req, res) => {
+  try {
+    const publicKey = pushNotificationService.getVapidPublicKey();
+    
+    if (!publicKey) {
+      return res.json({
+        success: false,
+        message: 'VAPID keys not configured',
+        data: { publicKey: null }
+      });
+    }
+
+    res.json({
+      success: true,
+      data: { publicKey }
+    });
+  } catch (error) {
+    console.error('Error getting VAPID key:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get VAPID key',
+      error: error.message,
+      data: { publicKey: null }
+    });
+  }
+};
+
+/**
+ * @desc    Subscribe to push notifications
+ * @route   POST /api/notifications/subscribe
+ * @access  Authenticated users
+ */
+exports.subscribeToPush = async (req, res) => {
+  try {
+    const { subscription } = req.body;
+    const adminId = req.user.id;
+
+    if (!subscription || !subscription.endpoint) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid subscription data'
+      });
+    }
+
+    const result = await pushNotificationService.subscribeAdmin(adminId, subscription);
+
+    res.json({
+      success: true,
+      message: result.message
+    });
+  } catch (error) {
+    console.error('Error subscribing to push notifications:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to subscribe to push notifications',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * @desc    Unsubscribe from push notifications
+ * @route   POST /api/notifications/unsubscribe
+ * @access  Authenticated users
+ */
+exports.unsubscribeFromPush = async (req, res) => {
+  try {
+    const adminId = req.user.id;
+    const result = await pushNotificationService.unsubscribeAdmin(adminId);
+
+    res.json({
+      success: true,
+      message: result.message
+    });
+  } catch (error) {
+    console.error('Error unsubscribing from push notifications:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to unsubscribe from push notifications',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * @desc    Get push subscription status
+ * @route   GET /api/notifications/push-status
+ * @access  Authenticated users
+ */
+exports.getPushStatus = async (req, res) => {
+  try {
+    // Check if user is authenticated
+    if (!req.user || !req.user.id) {
+      return res.status(401).json({
+        success: false,
+        message: 'User not authenticated',
+        data: {
+          isSubscribed: false,
+          isEnabled: false,
+          permission: 'denied'
+        }
+      });
+    }
+
+    const adminId = req.user.id;
+    const status = await pushNotificationService.getAdminSubscriptionStatus(adminId);
+
+    res.json({
+      success: true,
+      data: status
+    });
+  } catch (error) {
+    console.error('Error getting push subscription status:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get push subscription status',
+      error: error.message,
+      data: {
+        isSubscribed: false,
+        isEnabled: false,
+        permission: 'denied'
+      }
+    });
+  }
+};
+
+/**
+ * @desc    Update push notification preference
+ * @route   PATCH /api/notifications/push-preference
+ * @access  Authenticated users
+ */
+exports.updatePushPreference = async (req, res) => {
+  try {
+    const { enabled } = req.body;
+    const adminId = req.user.id;
+
+    if (typeof enabled !== 'boolean') {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid preference value'
+      });
+    }
+
+    const result = await pushNotificationService.updateAdminPushPreference(adminId, enabled);
+
+    res.json({
+      success: true,
+      message: result.message
+    });
+  } catch (error) {
+    console.error('Error updating push notification preference:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update push notification preference',
       error: error.message
     });
   }

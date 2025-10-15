@@ -26,13 +26,6 @@ router.get('/stats', requireAdminOrSuperadmin, notificationController.getNotific
 router.get('/', requireAdminOrSuperadmin, notificationController.getNotifications);
 
 /**
- * @route   GET /api/notifications/:id
- * @desc    Get single notification by ID
- * @access  Admin/Superadmin
- */
-router.get('/:id', requireAdminOrSuperadmin, notificationController.getNotificationById);
-
-/**
  * @route   POST /api/notifications
  * @desc    Create new notification (can be called by vendors too)
  * @access  Authenticated users
@@ -68,11 +61,46 @@ router.post('/:id/dismiss', requireAdminOrSuperadmin, notificationController.dis
 router.post('/bulk-resolve', requireAdminOrSuperadmin, notificationController.bulkResolveNotifications);
 
 /**
+ * @route   GET /api/notifications/push-status
+ * @desc    Get push subscription status
+ * @access  Authenticated users
+ */
+router.get('/push-status', notificationController.getPushStatus);
+
+/**
+ * @route   GET /api/notifications/:id
+ * @desc    Get single notification by ID
+ * @access  Admin/Superadmin
+ */
+router.get('/:id', requireAdminOrSuperadmin, notificationController.getNotificationById);
+
+/**
  * @route   DELETE /api/notifications/:id
  * @desc    Delete notification
  * @access  Superadmin only
  */
 router.delete('/:id', requireSuperadmin, notificationController.deleteNotification);
+
+/**
+ * @route   POST /api/notifications/subscribe
+ * @desc    Subscribe to push notifications
+ * @access  Authenticated users
+ */
+router.post('/subscribe', notificationController.subscribeToPush);
+
+/**
+ * @route   POST /api/notifications/unsubscribe
+ * @desc    Unsubscribe from push notifications
+ * @access  Authenticated users
+ */
+router.post('/unsubscribe', notificationController.unsubscribeFromPush);
+
+/**
+ * @route   PATCH /api/notifications/push-preference
+ * @desc    Update push notification preference
+ * @access  Authenticated users
+ */
+router.patch('/push-preference', notificationController.updatePushPreference);
 
 module.exports = router;
 
