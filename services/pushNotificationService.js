@@ -46,7 +46,25 @@ class PushNotificationService {
    */
   async subscribeAdmin(adminId, subscription) {
     try {
-      console.log('📱 Subscribing admin to push notifications:', adminId);
+      console.log('📱 [PUSH SUBSCRIBE] Starting subscription process for admin:', adminId);
+      console.log('📱 [PUSH SUBSCRIBE] Subscription data:', {
+        endpoint: subscription.endpoint,
+        hasP256dh: !!subscription.keys.p256dh,
+        hasAuth: !!subscription.keys.auth,
+        p256dhLength: subscription.keys.p256dh?.length,
+        authLength: subscription.keys.auth?.length
+      });
+
+      // Validate subscription data
+      if (!subscription.endpoint) {
+        throw new Error('Missing subscription endpoint');
+      }
+      if (!subscription.keys.p256dh) {
+        throw new Error('Missing p256dh key');
+      }
+      if (!subscription.keys.auth) {
+        throw new Error('Missing auth key');
+      }
 
       const query = `
         INSERT INTO push_subscriptions 
@@ -59,17 +77,42 @@ class PushNotificationService {
         updated_at = NOW()
       `;
 
-      await database.query(query, [
+      console.log('📱 [PUSH SUBSCRIBE] Executing database query...');
+      const result = await database.query(query, [
         adminId,
         subscription.endpoint,
         subscription.keys.p256dh,
         subscription.keys.auth
       ]);
 
-      console.log('✅ Admin subscribed successfully:', adminId);
+      console.log('📱 [PUSH SUBSCRIBE] Database query result:', {
+        insertId: result.insertId,
+        affectedRows: result.affectedRows,
+        changedRows: result.changedRows
+      });
+
+      // Verify the subscription was saved
+      const [savedSubscription] = await database.query(
+        'SELECT * FROM push_subscriptions WHERE admin_id = ?',
+        [adminId]
+      );
+
+      console.log('📱 [PUSH SUBSCRIBE] Verification query result:', savedSubscription);
+
+      if (!savedSubscription) {
+        throw new Error('Subscription was not saved to database');
+      }
+
+      console.log('✅ [PUSH SUBSCRIBE] Admin subscribed successfully:', adminId);
       return { success: true, message: 'Subscribed to push notifications' };
     } catch (error) {
-      console.error('❌ Error subscribing admin:', error);
+      console.error('❌ [PUSH SUBSCRIBE] Error subscribing admin:', error);
+      console.error('❌ [PUSH SUBSCRIBE] Error details:', {
+        message: error.message,
+        code: error.code,
+        sqlState: error.sqlState,
+        sqlMessage: error.sqlMessage
+      });
       throw error;
     }
   }

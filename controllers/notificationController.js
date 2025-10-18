@@ -632,24 +632,45 @@ exports.getVapidKey = async (req, res) => {
  */
 exports.subscribeToPush = async (req, res) => {
   try {
+    console.log('🔔 [NOTIFICATION CONTROLLER] Push subscription request received');
+    console.log('🔔 [NOTIFICATION CONTROLLER] User:', {
+      id: req.user.id,
+      email: req.user.email,
+      role: req.user.role
+    });
+
     const { subscription } = req.body;
     const adminId = req.user.id;
 
+    console.log('🔔 [NOTIFICATION CONTROLLER] Request body:', {
+      hasSubscription: !!subscription,
+      endpoint: subscription?.endpoint,
+      hasKeys: !!subscription?.keys,
+      keysStructure: subscription?.keys ? Object.keys(subscription.keys) : null
+    });
+
     if (!subscription || !subscription.endpoint) {
+      console.log('❌ [NOTIFICATION CONTROLLER] Invalid subscription data');
       return res.status(400).json({
         success: false,
         message: 'Invalid subscription data'
       });
     }
 
+    console.log('🔔 [NOTIFICATION CONTROLLER] Calling push notification service...');
     const result = await pushNotificationService.subscribeAdmin(adminId, subscription);
+    console.log('🔔 [NOTIFICATION CONTROLLER] Service result:', result);
 
     res.json({
       success: true,
       message: result.message
     });
   } catch (error) {
-    console.error('Error subscribing to push notifications:', error);
+    console.error('❌ [NOTIFICATION CONTROLLER] Error subscribing to push notifications:', error);
+    console.error('❌ [NOTIFICATION CONTROLLER] Error details:', {
+      message: error.message,
+      stack: error.stack
+    });
     res.status(500).json({
       success: false,
       message: 'Failed to subscribe to push notifications',

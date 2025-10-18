@@ -92,6 +92,45 @@ async function createLabelGenerationNotification(errorMessage, orderId, vendor) 
       };
     }
     
+    // Pattern 4: No priority carriers assigned
+    else if (errorMessage.toLowerCase().includes('no priority carriers') || 
+             errorMessage.toLowerCase().includes('priority carriers assigned')) {
+      console.log('✅ Detected: No priority carriers assigned error');
+      
+      notificationData = {
+        type: 'carrier_unavailable',
+        severity: 'critical',
+        title: `No priority carriers assigned - Order ${orderId}`,
+        message: errorMessage,
+        order_id: orderId,
+        vendor_id: vendor.id,
+        vendor_name: vendor.name,
+        vendor_warehouse_id: vendor.warehouseId,
+        metadata: null,
+        error_details: 'Admin needs to assign priority carriers to this order before label generation'
+      };
+    }
+    
+    // Pattern 5: Generic label download error (catch-all for other errors)
+    else if (errorMessage.toLowerCase().includes('label') || 
+             errorMessage.toLowerCase().includes('download') ||
+             errorMessage.toLowerCase().includes('generation')) {
+      console.log('✅ Detected: Generic label/download error');
+      
+      notificationData = {
+        type: 'label_download_error',
+        severity: 'high',
+        title: `Label generation failed - Order ${orderId}`,
+        message: errorMessage,
+        order_id: orderId,
+        vendor_id: vendor.id,
+        vendor_name: vendor.name,
+        vendor_warehouse_id: vendor.warehouseId,
+        metadata: null,
+        error_details: 'Label generation failed. Please check the error details and resolve the issue.'
+      };
+    }
+    
     // If we identified a pattern, create the notification
     if (notificationData) {
       console.log('📝 Creating notification in database:', notificationData);
@@ -867,15 +906,56 @@ router.post('/admin/assign', authenticateBasicAuth, requireAdminOrSuperadmin, as
     
     // Update order assignment in MySQL
     const now = new Date().toISOString().replace('T', ' ').substring(0, 19);
-    const updatedOrder = await database.updateOrder(unique_id, {
+    
+    // Update order object in memory (like vendor claim behavior)
+    const updatedOrder = {
+      ...order,
       status: 'claimed',
       claimed_by: vendor_warehouse_id,
       claimed_at: now,
       last_claimed_by: vendor_warehouse_id,
       last_claimed_at: now
+    };
+    
+    // Assign top 3 priority carriers during admin assignment (same as vendor claim)
+    console.log('🚚 ASSIGNING TOP 3 PRIORITY CARRIERS...');
+    console.log('  - Order data for carrier assignment:');
+    console.log('    - order_id:', order.order_id);
+    console.log('    - pincode:', order.pincode);
+    console.log('    - payment_type:', order.payment_type);
+    console.log('    - unique_id:', order.unique_id);
+    
+    let priorityCarrier = '';
+    try {
+      priorityCarrier = await carrierServiceabilityService.getTop3PriorityCarriers(order);
+      console.log(`✅ Top 3 carriers assigned: ${priorityCarrier}`);
+      updatedOrder.priority_carrier = priorityCarrier;
+    } catch (carrierError) {
+      console.log(`⚠️ Carrier assignment failed: ${carrierError.message}`);
+      console.log('  - Order will be assigned without priority carriers');
+      updatedOrder.priority_carrier = '';
+    }
+    
+    // Now save everything to MySQL in one go (same as vendor claim)
+    console.log('💾 SAVING TO MYSQL');
+    console.log('  - Update data being sent to database:');
+    console.log('    - status:', updatedOrder.status);
+    console.log('    - claimed_by:', updatedOrder.claimed_by);
+    console.log('    - claimed_at:', updatedOrder.claimed_at);
+    console.log('    - last_claimed_by:', updatedOrder.last_claimed_by);
+    console.log('    - last_claimed_at:', updatedOrder.last_claimed_at);
+    console.log('    - priority_carrier:', updatedOrder.priority_carrier);
+    
+    const finalUpdatedOrder = await database.updateOrder(unique_id, {
+      status: updatedOrder.status,
+      claimed_by: updatedOrder.claimed_by,
+      claimed_at: updatedOrder.claimed_at,
+      last_claimed_by: updatedOrder.last_claimed_by,
+      last_claimed_at: updatedOrder.last_claimed_at,
+      priority_carrier: updatedOrder.priority_carrier
     });
     
-    if (!updatedOrder) {
+    if (!finalUpdatedOrder) {
       return res.status(500).json({ 
         success: false, 
         message: 'Failed to update order' 
@@ -943,12 +1023,58 @@ router.post('/admin/bulk-assign', authenticateBasicAuth, requireAdminOrSuperadmi
     // Update each order in MySQL
     for (const uid of unique_ids) {
       try {
-        const result = await database.updateOrder(uid, {
+        // Get order details for priority carrier assignment
+        const order = await database.getOrderByUniqueId(uid);
+        if (!order) {
+          console.error(`❌ Order not found: ${uid}`);
+          continue;
+        }
+        
+        // Update order object in memory (like vendor claim behavior)
+        const updatedOrder = {
+          ...order,
           status: 'claimed',
           claimed_by: vendor_warehouse_id,
           claimed_at: now,
           last_claimed_by: vendor_warehouse_id,
           last_claimed_at: now
+        };
+        
+        // Assign top 3 priority carriers during bulk assignment (same as vendor claim)
+        console.log(`🚚 ASSIGNING TOP 3 PRIORITY CARRIERS for ${order.order_id}...`);
+        console.log('  - Order data for carrier assignment:');
+        console.log('    - order_id:', order.order_id);
+        console.log('    - pincode:', order.pincode);
+        console.log('    - payment_type:', order.payment_type);
+        console.log('    - unique_id:', order.unique_id);
+        
+        let priorityCarrier = '';
+        try {
+          priorityCarrier = await carrierServiceabilityService.getTop3PriorityCarriers(order);
+          console.log(`✅ Top 3 carriers assigned: ${priorityCarrier}`);
+          updatedOrder.priority_carrier = priorityCarrier;
+        } catch (carrierError) {
+          console.log(`⚠️ Carrier assignment failed for ${order.order_id}: ${carrierError.message}`);
+          console.log('  - Order will be assigned without priority carriers');
+          updatedOrder.priority_carrier = '';
+        }
+        
+        console.log('💾 SAVING TO MYSQL (BULK)');
+        console.log('  - Update data being sent to database:');
+        console.log('    - status:', updatedOrder.status);
+        console.log('    - claimed_by:', updatedOrder.claimed_by);
+        console.log('    - claimed_at:', updatedOrder.claimed_at);
+        console.log('    - last_claimed_by:', updatedOrder.last_claimed_by);
+        console.log('    - last_claimed_at:', updatedOrder.last_claimed_at);
+        console.log('    - priority_carrier:', updatedOrder.priority_carrier);
+        
+        const result = await database.updateOrder(uid, {
+          status: updatedOrder.status,
+          claimed_by: updatedOrder.claimed_by,
+          claimed_at: updatedOrder.claimed_at,
+          last_claimed_by: updatedOrder.last_claimed_by,
+          last_claimed_at: updatedOrder.last_claimed_at,
+          priority_carrier: updatedOrder.priority_carrier
         });
         
         if (result.success) {
@@ -1003,16 +1129,24 @@ router.post('/admin/bulk-unassign', authenticateBasicAuth, requireAdminOrSuperad
         // First check if order exists and is claimed
         const order = await database.getOrderByUniqueId(uid);
         if (order && order.status !== 'unclaimed') {
-          const result = await database.updateOrder(uid, {
-            status: 'unclaimed',
-            claimed_by: '',
-            claimed_at: null,
-            priority_carrier: ''
-          });
+          console.log(`🔄 CLEARING CLAIM INFORMATION for ${order.order_id}...`);
           
-          if (result.success) {
-            updatedCount += 1;
-          }
+          // Clear claim information (same as vendor unclaim process)
+          await database.mysqlConnection.execute(
+            `UPDATE claims SET 
+              claimed_by = NULL, 
+              claimed_at = NULL, 
+              last_claimed_by = NULL, 
+              last_claimed_at = NULL, 
+              status = 'unclaimed',
+              label_downloaded = 0,
+              priority_carrier = NULL
+            WHERE order_unique_id = ?`,
+            [uid]
+          );
+          
+          console.log(`✅ CLAIM DATA CLEARED for ${order.order_id}`);
+          updatedCount += 1;
         }
       } catch (error) {
         console.error(`❌ Failed to update order ${uid}:`, error.message);
@@ -1075,14 +1209,25 @@ router.post('/admin/unassign', authenticateBasicAuth, requireAdminOrSuperadmin, 
     
     const previousVendor = order.claimed_by;
     
-    // Update order to unclaimed in MySQL
-    const updatedOrder = await database.updateOrder(unique_id, {
-      status: 'unclaimed',
-      claimed_by: '',
-      claimed_at: null,
-      priority_carrier: ''
-      // Keep last_claimed_by and last_claimed_at for history
-    });
+    // Clear claim information (same as vendor unclaim process)
+    console.log('🔄 CLEARING CLAIM INFORMATION...');
+    await database.mysqlConnection.execute(
+      `UPDATE claims SET 
+        claimed_by = NULL, 
+        claimed_at = NULL, 
+        last_claimed_by = NULL, 
+        last_claimed_at = NULL, 
+        status = 'unclaimed',
+        label_downloaded = 0,
+        priority_carrier = NULL
+      WHERE order_unique_id = ?`,
+      [unique_id]
+    );
+    
+    console.log('✅ CLAIM DATA CLEARED');
+    
+    // Get updated order for response
+    const updatedOrder = await database.getOrderByUniqueId(unique_id);
     
     if (!updatedOrder) {
       return res.status(500).json({ 

@@ -113,9 +113,31 @@ class VendorErrorTrackingService {
   }
 
   /**
-   * Determine notification type based on operation and error
+   * Determine notification type based on operation and error - Enhanced for dynamic categorization
    */
   getNotificationType(operation, error) {
+    // First, try to get type based on error type (more specific)
+    const errorTypeMap = {
+      'AUTHENTICATION_ERROR': 'authentication_error',
+      'PERMISSION_ERROR': 'authentication_error',
+      'VALIDATION_ERROR': 'vendor_validation_error',
+      'DATABASE_ERROR': 'vendor_api_error',
+      'NETWORK_ERROR': 'vendor_connection_error',
+      'TIMEOUT_ERROR': 'vendor_timeout_error',
+      'SERVER_ERROR': 'vendor_api_error',
+      'CONNECTION_ERROR': 'vendor_connection_error',
+      'NOT_FOUND_ERROR': 'vendor_operation_error',
+      'RATE_LIMIT_ERROR': 'vendor_operation_error',
+      'CLIENT_ERROR': 'vendor_operation_error',
+      'UNKNOWN_ERROR': 'vendor_operation_error'
+    };
+
+    // If error type is mapped, use it
+    if (error.type && errorTypeMap[error.type]) {
+      return errorTypeMap[error.type];
+    }
+
+    // Fallback to operation-based mapping
     const operationTypeMap = {
       // Order operations
       'claim_order': 'order_claim_error',
@@ -156,7 +178,7 @@ class VendorErrorTrackingService {
   }
 
   /**
-   * Determine severity based on operation and error
+   * Determine severity based on operation and error - Enhanced for dynamic severity assignment
    */
   determineSeverity(operation, error, defaultSeverity) {
     // Critical operations that affect order processing
@@ -169,22 +191,25 @@ class VendorErrorTrackingService {
       'mark_ready', 'bulk_mark_ready', 'download_label', 'bulk_download_labels'
     ];
 
-    // Check for critical error types
-    const criticalErrorTypes = [
-      'NETWORK_ERROR', 'TIMEOUT_ERROR', 'AUTHENTICATION_ERROR', 'PERMISSION_ERROR'
-    ];
+    // Enhanced error type severity mapping
+    const errorSeverityMap = {
+      'AUTHENTICATION_ERROR': 'critical',
+      'PERMISSION_ERROR': 'critical',
+      'DATABASE_ERROR': 'critical',
+      'NETWORK_ERROR': 'high',
+      'TIMEOUT_ERROR': 'high',
+      'CONNECTION_ERROR': 'high',
+      'SERVER_ERROR': 'critical',
+      'VALIDATION_ERROR': 'medium',
+      'NOT_FOUND_ERROR': 'medium',
+      'RATE_LIMIT_ERROR': 'medium',
+      'CLIENT_ERROR': 'medium',
+      'UNKNOWN_ERROR': 'high'
+    };
 
-    const highErrorTypes = [
-      'VALIDATION_ERROR', 'FILE_ERROR', 'DATA_ERROR'
-    ];
-
-    // Check error type
-    if (criticalErrorTypes.includes(error.type)) {
-      return 'critical';
-    }
-
-    if (highErrorTypes.includes(error.type)) {
-      return 'high';
+    // Check error type severity first (most specific)
+    if (error.type && errorSeverityMap[error.type]) {
+      return errorSeverityMap[error.type];
     }
 
     // Check operation criticality
@@ -196,13 +221,36 @@ class VendorErrorTrackingService {
       return 'high';
     }
 
+    // Check HTTP status code severity
+    if (error.code) {
+      if (error.code >= 500) return 'critical';
+      if (error.code === 401 || error.code === 403) return 'critical';
+      if (error.code === 404 || error.code === 422) return 'medium';
+      if (error.code >= 400) return 'high';
+    }
+
     // Check error message for keywords
     const errorMessage = error.message.toLowerCase();
-    if (errorMessage.includes('critical') || errorMessage.includes('fatal')) {
+    if (errorMessage.includes('critical') || errorMessage.includes('fatal') || 
+        errorMessage.includes('severe') || errorMessage.includes('emergency')) {
       return 'critical';
     }
 
-    if (errorMessage.includes('failed') || errorMessage.includes('error')) {
+    if (errorMessage.includes('failed') || errorMessage.includes('error') ||
+        errorMessage.includes('unable') || errorMessage.includes('cannot')) {
+      return 'high';
+    }
+
+    if (errorMessage.includes('warning') || errorMessage.includes('notice')) {
+      return 'low';
+    }
+
+    // Default based on operation type
+    if (operation.includes('bulk_') || operation.includes('claim') || operation.includes('reverse')) {
+      return 'critical';
+    }
+
+    if (operation.includes('download') || operation.includes('upload') || operation.includes('fetch')) {
       return 'high';
     }
 
