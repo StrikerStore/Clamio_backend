@@ -205,6 +205,29 @@ class NewMachineSetup {
       `);
       console.log('✅ Orders table created/verified');
 
+      // 7. Order Tracking table
+      await this.connection.execute(`
+        CREATE TABLE IF NOT EXISTS order_tracking (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          order_id VARCHAR(100) NOT NULL,
+          order_type ENUM('active', 'inactive') NOT NULL,
+          shipment_status VARCHAR(100) NOT NULL,
+          timestamp DATETIME NOT NULL,
+          ndr_reason VARCHAR(255) NULL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          
+          -- Indexes for performance
+          INDEX idx_order_id (order_id),
+          INDEX idx_order_type (order_type),
+          INDEX idx_timestamp (timestamp),
+          INDEX idx_shipment_status (shipment_status),
+          INDEX idx_order_timestamp (order_id, timestamp),
+          INDEX idx_order_type_status (order_id, order_type)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+      `);
+      console.log('✅ Order tracking table created/verified');
+
       // All indexes are already created within the table definitions above
       console.log('✅ All tables created successfully!');
       

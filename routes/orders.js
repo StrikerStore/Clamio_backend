@@ -681,6 +681,17 @@ router.get('/grouped', async (req, res) => {
     
     console.log('📊 Grouped orders processed:', groupedOrdersArray.length);
     
+    // Calculate total quantity across all orders (for tab count)
+    const totalQuantityAcrossAllOrders = groupedOrdersArray.reduce((sum, order) => {
+      return sum + (order.total_quantity || 0);
+    }, 0);
+    
+    console.log('📊 Total quantity across all orders:', totalQuantityAcrossAllOrders);
+    console.log('📊 Sample order data for debugging:');
+    if (groupedOrdersArray.length > 0) {
+      console.log('  - First order:', JSON.stringify(groupedOrdersArray[0], null, 2));
+    }
+    
     // Apply pagination
     const totalCount = groupedOrdersArray.length;
     const startIndex = (page - 1) * limit;
@@ -710,7 +721,8 @@ router.get('/grouped', async (req, res) => {
           returnedCount: paginatedOrders.length
         },
         totalOrders: totalCount,
-        totalProducts: vendorOrders.length
+        totalProducts: vendorOrders.length,
+        totalQuantity: totalQuantityAcrossAllOrders
       }
     };
     
@@ -719,6 +731,7 @@ router.get('/grouped', async (req, res) => {
     console.log('  - Success:', responseData.success);
     console.log('  - Total Orders:', responseData.data.totalOrders);
     console.log('  - Total Products:', responseData.data.totalProducts);
+    console.log('  - Total Quantity:', responseData.data.totalQuantity);
     console.log('  - Grouped Orders Count:', responseData.data.groupedOrders.length);
     console.log('  - Response JSON:', JSON.stringify(responseData, null, 2));
     
