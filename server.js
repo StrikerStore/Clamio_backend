@@ -521,6 +521,53 @@ app.listen(PORT, async () => {
       console.error('[Carrier Sync] Startup sync failed:', err.message);
     }
   })();
+
+  // Start Order Tracking cron jobs
+  const orderTrackingService = require('./services/orderTrackingService');
+  
+  // Active Orders Tracking - every 1 hour
+  cron.schedule('0 * * * *', async () => {
+    try {
+      console.log('[Order Tracking] Starting active orders sync...');
+      await orderTrackingService.syncActiveOrderTracking();
+      console.log('[Order Tracking] Active orders sync completed.');
+    } catch (err) {
+      console.error('[Order Tracking] Active orders sync failed:', err.message);
+    }
+  });
+
+  // Inactive Orders Tracking - daily at 2 AM
+  cron.schedule('0 2 * * *', async () => {
+    try {
+      console.log('[Order Tracking] Starting inactive orders sync...');
+      await orderTrackingService.syncInactiveOrderTracking();
+      console.log('[Order Tracking] Inactive orders sync completed.');
+    } catch (err) {
+      console.error('[Order Tracking] Inactive orders sync failed:', err.message);
+    }
+  });
+
+  // Order Tracking Cleanup - weekly on Sunday at 3 AM
+  cron.schedule('0 3 * * 0', async () => {
+    try {
+      console.log('[Order Tracking] Starting cleanup of old tracking data...');
+      await orderTrackingService.cleanupOldTrackingData();
+      console.log('[Order Tracking] Cleanup completed.');
+    } catch (err) {
+      console.error('[Order Tracking] Cleanup failed:', err.message);
+    }
+  });
+
+  // Run active orders tracking once immediately on startup (optional)
+  (async () => {
+    try {
+      console.log('[Order Tracking] Running initial active orders sync on startup...');
+      await orderTrackingService.syncActiveOrderTracking();
+      console.log('[Order Tracking] Initial active orders sync completed.');
+    } catch (err) {
+      console.error('[Order Tracking] Initial active orders sync failed:', err.message);
+    }
+  })();
 });
 
 module.exports = app; 

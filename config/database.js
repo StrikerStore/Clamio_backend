@@ -298,6 +298,9 @@ class Database {
 
       // Create labels table for caching label URLs
       await this.createLabelsTable();
+
+      // Create order tracking table for shipment tracking
+      await this.createOrderTrackingTable();
     } catch (error) {
       console.error('❌ Error creating orders table:', error.message);
     }
@@ -377,13 +380,11 @@ class Database {
    */
   async createLabelsTable() {
     try {
-      // Drop existing labels table to recreate with clean structure
-      console.log('🔄 Dropping existing labels table and creating fresh one...');
-      await this.mysqlConnection.execute('DROP TABLE IF EXISTS labels');
-      console.log('✅ Old labels table dropped');
+      // Create labels table if it doesn't exist (preserve existing data)
+      console.log('🔄 Creating labels table if not exists...');
 
       const createLabelsTableQuery = `
-        CREATE TABLE labels (
+        CREATE TABLE IF NOT EXISTS labels (
           id INT AUTO_INCREMENT PRIMARY KEY,
           order_id VARCHAR(100) UNIQUE NOT NULL,
           label_url VARCHAR(1000),
@@ -395,16 +396,20 @@ class Database {
           handover_at TIMESTAMP NULL,
           priority_carrier VARCHAR(50),
           is_manifest TINYINT(1) DEFAULT 0,
+          is_handover TINYINT(1) DEFAULT 0,
+          current_shipment_status VARCHAR(100) NULL,
           INDEX idx_order_id (order_id),
           INDEX idx_awb (awb),
           INDEX idx_carrier_id (carrier_id),
           INDEX idx_priority_carrier (priority_carrier),
-          INDEX idx_is_manifest (is_manifest)
+          INDEX idx_is_manifest (is_manifest),
+          INDEX idx_is_handover (is_handover),
+          INDEX idx_current_shipment_status (current_shipment_status)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `;
       
       await this.mysqlConnection.execute(createLabelsTableQuery);
-      console.log('✅ Fresh labels table created with clean structure');
+      console.log('✅ Labels table created/verified (existing data preserved)');
       
       // Add is_manifest column if it doesn't exist (for existing tables)
       try {
@@ -423,10 +428,77 @@ class Database {
         }
       }
       
-      // Migrate existing labels data from orders table
-      await this.migrateLabelsData();
+      // Add is_handover column if it doesn't exist (for existing tables)
+      try {
+        await this.mysqlConnection.execute(`
+          ALTER TABLE labels 
+          ADD COLUMN is_handover TINYINT(1) DEFAULT 0,
+          ADD INDEX idx_is_handover (is_handover)
+        `);
+        console.log('✅ Added is_handover column to labels table');
+      } catch (error) {
+        if (error.code === 'ER_DUP_FIELDNAME') {
+          console.log('ℹ️ is_handover column already exists in labels table');
+        } else {
+          console.error('❌ Error adding is_handover column to labels table:', error.message);
+        }
+      }
+
+      // Add current_shipment_status column if it doesn't exist (for existing tables)
+      try {
+        await this.mysqlConnection.execute(`
+          ALTER TABLE labels 
+          ADD COLUMN current_shipment_status VARCHAR(100) NULL,
+          ADD INDEX idx_current_shipment_status (current_shipment_status)
+        `);
+        console.log('✅ Added current_shipment_status column to labels table');
+      } catch (error) {
+        if (error.code === 'ER_DUP_FIELDNAME') {
+          console.log('ℹ️ current_shipment_status column already exists in labels table');
+        } else {
+          console.error('❌ Error adding current_shipment_status column to labels table:', error.message);
+        }
+      }
+      
       } catch (error) {
       console.error('❌ Error creating labels table:', error.message);
+    }
+  }
+
+  /**
+   * Create order tracking table for shipment tracking data
+   */
+  async createOrderTrackingTable() {
+    if (!this.mysqlConnection) return;
+
+    try {
+      console.log('🔄 Creating order tracking table...');
+
+      const createOrderTrackingTableQuery = `
+        CREATE TABLE IF NOT EXISTS order_tracking (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          order_id VARCHAR(100) NOT NULL,
+          order_type ENUM('active', 'inactive') NOT NULL,
+          shipment_status VARCHAR(100) NOT NULL,
+          timestamp DATETIME NOT NULL,
+          ndr_reason VARCHAR(255) NULL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          
+          -- Indexes for performance
+          INDEX idx_order_id (order_id),
+          INDEX idx_order_type (order_type),
+          INDEX idx_timestamp (timestamp),
+          INDEX idx_shipment_status (shipment_status),
+          INDEX idx_order_timestamp (order_id, timestamp),
+          INDEX idx_order_type_status (order_id, order_type)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+      `;
+      
+      await this.mysqlConnection.execute(createOrderTrackingTableQuery);
+      console.log('✅ Order tracking table created/verified');
+    } catch (error) {
+      console.error('❌ Error creating order tracking table:', error.message);
     }
   }
 
@@ -2462,7 +2534,7 @@ class Database {
         SELECT 
           o.*,
           p.image as product_image,
-          c.status,
+          c.status as claims_status,
           c.claimed_by,
           c.claimed_at,
           c.last_claimed_by,
@@ -2477,7 +2549,14 @@ class Database {
           l.carrier_name,
           l.handover_at,
           c.priority_carrier,
-          l.is_manifest
+          l.is_manifest,
+          l.current_shipment_status,
+          l.is_handover,
+          CASE 
+            WHEN l.current_shipment_status IS NOT NULL AND l.current_shipment_status != '' 
+            THEN l.current_shipment_status 
+            ELSE c.status 
+          END as status
         FROM orders o
         LEFT JOIN products p ON (
           REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
@@ -2563,7 +2642,7 @@ class Database {
         SELECT 
           o.*,
           p.image as product_image,
-          c.status,
+          c.status as claims_status,
           c.claimed_by,
           c.claimed_at,
           c.last_claimed_by,
@@ -2578,7 +2657,14 @@ class Database {
           l.carrier_name,
           l.handover_at,
           c.priority_carrier,
-          l.is_manifest
+          l.is_manifest,
+          l.current_shipment_status,
+          l.is_handover,
+          CASE 
+            WHEN l.current_shipment_status IS NOT NULL AND l.current_shipment_status != '' 
+            THEN l.current_shipment_status 
+            ELSE c.status 
+          END as status
         FROM orders o
         LEFT JOIN products p ON (
           REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
@@ -3035,6 +3121,417 @@ class Database {
       return rows;
     } catch (error) {
       console.error('Error executing query:', error);
+      throw error;
+    }
+  }
+
+  // ==================== ORDER TRACKING METHODS ====================
+
+  /**
+   * Get active orders that need tracking updates
+   * Active orders: label_downloaded = 1 from claims table
+   * Note: We determine active/inactive based on latest shipment_status from Shipway API
+   */
+  async getActiveOrdersForTracking() {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      const [rows] = await this.mysqlConnection.execute(`
+        SELECT DISTINCT c.order_id 
+        FROM claims c
+        INNER JOIN orders o ON c.order_id = o.order_id
+        WHERE c.label_downloaded = 1 
+        AND c.order_id IS NOT NULL
+        ORDER BY c.order_id
+      `);
+      return rows;
+    } catch (error) {
+      console.error('Error getting active orders for tracking:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get inactive orders that need tracking updates
+   * Inactive orders: label_downloaded = 1 from claims table
+   * Note: We determine active/inactive based on latest shipment_status from Shipway API
+   */
+  async getInactiveOrdersForTracking() {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      const [rows] = await this.mysqlConnection.execute(`
+        SELECT DISTINCT c.order_id 
+        FROM claims c
+        INNER JOIN orders o ON c.order_id = o.order_id
+        WHERE c.label_downloaded = 1 
+        AND c.order_id IS NOT NULL
+        ORDER BY c.order_id
+      `);
+      return rows;
+    } catch (error) {
+      console.error('Error getting inactive orders for tracking:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Store order tracking data
+   * @param {string} orderId - The order ID
+   * @param {string} orderType - 'active' or 'inactive'
+   * @param {Array} trackingEvents - Array of tracking events from Shipway API
+   */
+  async storeOrderTracking(orderId, orderType, trackingEvents) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      // Clear existing tracking data for this order to avoid duplicates
+      await this.mysqlConnection.execute(
+        'DELETE FROM order_tracking WHERE order_id = ?',
+        [orderId]
+      );
+
+      // Insert new tracking events
+      for (const event of trackingEvents) {
+        await this.mysqlConnection.execute(`
+          INSERT INTO order_tracking 
+          (order_id, order_type, shipment_status, timestamp, ndr_reason)
+          VALUES (?, ?, ?, ?, ?)
+        `, [
+          orderId,
+          orderType,
+          event.name || 'Unknown',
+          event.time || new Date(),
+          event.ndr_reason || null
+        ]);
+      }
+      
+      console.log(`✅ Stored ${trackingEvents.length} tracking events for order ${orderId}`);
+      
+    } catch (error) {
+      console.error(`❌ Error storing tracking data for order ${orderId}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get tracking data for a specific order
+   * @param {string} orderId - The order ID
+   */
+  async getOrderTracking(orderId) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      const [rows] = await this.mysqlConnection.execute(`
+        SELECT 
+          id,
+          order_id,
+          order_type,
+          shipment_status,
+          timestamp,
+          ndr_reason,
+          created_at,
+          updated_at
+        FROM order_tracking 
+        WHERE order_id = ?
+        ORDER BY timestamp ASC
+      `, [orderId]);
+      
+      return rows;
+    } catch (error) {
+      console.error(`Error getting tracking data for order ${orderId}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get all orders with their latest tracking status
+   */
+  async getOrdersWithTrackingStatus() {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      const [rows] = await this.mysqlConnection.execute(`
+        SELECT 
+          o.order_id,
+          o.customer_name,
+          o.status as order_status,
+          o.label_downloaded,
+          ot.order_type,
+          ot.shipment_status as latest_shipment_status,
+          ot.timestamp as latest_tracking_time
+        FROM orders o
+        LEFT JOIN (
+          SELECT 
+            order_id,
+            order_type,
+            shipment_status,
+            timestamp,
+            ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY timestamp DESC) as rn
+          FROM order_tracking
+        ) ot ON o.order_id = ot.order_id AND ot.rn = 1
+        WHERE o.label_downloaded = 1
+        ORDER BY o.order_id
+      `);
+      
+      return rows;
+    } catch (error) {
+      console.error('Error getting orders with tracking status:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Cleanup old tracking data (older than specified days)
+   * @param {number} daysOld - Number of days old (default: 90)
+   */
+  async cleanupOldOrderTracking(daysOld = 90) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      const [result] = await this.mysqlConnection.execute(`
+        DELETE FROM order_tracking 
+        WHERE created_at < DATE_SUB(NOW(), INTERVAL ? DAY)
+      `, [daysOld]);
+      
+      return {
+        deletedCount: result.affectedRows,
+        message: `Deleted ${result.affectedRows} old tracking records`
+      };
+    } catch (error) {
+      console.error('Error cleaning up old tracking data:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get tracking statistics
+   */
+  async getTrackingStatistics() {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      const [stats] = await this.mysqlConnection.execute(`
+        SELECT 
+          COUNT(DISTINCT order_id) as total_orders_tracked,
+          COUNT(*) as total_tracking_events,
+          SUM(CASE WHEN order_type = 'active' THEN 1 ELSE 0 END) as active_events,
+          SUM(CASE WHEN order_type = 'inactive' THEN 1 ELSE 0 END) as inactive_events,
+          COUNT(DISTINCT CASE WHEN order_type = 'active' THEN order_id END) as active_orders,
+          COUNT(DISTINCT CASE WHEN order_type = 'inactive' THEN order_id END) as inactive_orders
+        FROM order_tracking
+      `);
+      
+      return stats[0];
+    } catch (error) {
+      console.error('Error getting tracking statistics:', error);
+      throw error;
+    }
+  }
+
+  // ==================== LABELS TABLE METHODS ====================
+
+  /**
+   * Update labels table with current shipment status and handover logic
+   * @param {string} orderId - The order ID
+   * @param {string} currentStatus - Current shipment status
+   * @param {boolean} isHandover - Whether this order is handed over
+   */
+  async updateLabelsShipmentStatus(orderId, currentStatus, isHandover = false) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      // Check if label exists for this order
+      const [existingLabels] = await this.mysqlConnection.execute(
+        'SELECT id, is_handover FROM labels WHERE order_id = ?',
+        [orderId]
+      );
+
+      if (existingLabels.length === 0) {
+        console.log(`⚠️ No label found for order ${orderId}, skipping labels update`);
+        return;
+      }
+
+      const currentHandoverStatus = existingLabels[0].is_handover;
+
+      // Update current_shipment_status and potentially is_handover
+      let updateQuery = `
+        UPDATE labels 
+        SET current_shipment_status = ?
+      `;
+      let queryParams = [currentStatus];
+
+      // Only update is_handover if it's currently 0 and we're setting it to 1
+      // This ensures is_handover can only go from 0 to 1, never back to 0
+      let handoverJustSet = false;
+      if (isHandover && currentHandoverStatus === 0) {
+        updateQuery += `, is_handover = 1`;
+        handoverJustSet = true;
+        console.log(`🚚 Setting is_handover = 1 for order ${orderId} (status: ${currentStatus})`);
+      }
+
+      updateQuery += ` WHERE order_id = ?`;
+      queryParams.push(orderId);
+
+      await this.mysqlConnection.execute(updateQuery, queryParams);
+      
+      console.log(`✅ Updated labels table for order ${orderId}: status=${currentStatus}, handover=${isHandover ? '1' : 'unchanged'}`);
+      
+      // If we just set is_handover = 1, trigger auto-manifest check
+      if (handoverJustSet) {
+        console.log(`🔄 [Auto-Manifest] Order ${orderId} just became handed over, checking if auto-manifest is needed...`);
+        
+        // Import auto-manifest service and trigger it asynchronously
+        setImmediate(async () => {
+          try {
+            const autoManifestService = require('../services/autoManifestService');
+            await autoManifestService.processAutoManifest();
+          } catch (error) {
+            console.error('❌ [Auto-Manifest] Error in auto-manifest process:', error.message);
+          }
+        });
+      }
+      
+    } catch (error) {
+      console.error(`❌ Error updating labels table for order ${orderId}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get labels with their current shipment status
+   */
+  async getLabelsWithShipmentStatus() {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      const [rows] = await this.mysqlConnection.execute(`
+        SELECT 
+          l.order_id,
+          l.label_url,
+          l.awb,
+          l.carrier_name,
+          l.is_handover,
+          l.current_shipment_status,
+          l.created_at,
+          l.updated_at,
+          o.customer_name,
+          o.product_name
+        FROM labels l
+        LEFT JOIN orders o ON l.order_id = o.order_id
+        ORDER BY l.updated_at DESC
+      `);
+      
+      return rows;
+    } catch (error) {
+      console.error('Error getting labels with shipment status:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get labels that are handed over (is_handover = 1)
+   */
+  async getHandedOverLabels() {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      const [rows] = await this.mysqlConnection.execute(`
+        SELECT 
+          l.order_id,
+          l.label_url,
+          l.awb,
+          l.carrier_name,
+          l.current_shipment_status,
+          l.handover_at,
+          l.updated_at,
+          o.customer_name,
+          o.product_name
+        FROM labels l
+        LEFT JOIN orders o ON l.order_id = o.order_id
+        WHERE l.is_handover = 1
+        ORDER BY l.updated_at DESC
+      `);
+      
+      return rows;
+    } catch (error) {
+      console.error('Error getting handed over labels:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get orders that need auto-manifest (is_handover = 1 but is_manifest = 0)
+   */
+  async getOrdersNeedingAutoManifest() {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      const [rows] = await this.mysqlConnection.execute(`
+        SELECT 
+          l.order_id,
+          l.label_url,
+          l.awb,
+          l.carrier_name,
+          l.current_shipment_status,
+          l.updated_at,
+          o.customer_name,
+          o.product_name
+        FROM labels l
+        LEFT JOIN orders o ON l.order_id = o.order_id
+        WHERE l.is_handover = 1 AND l.is_manifest = 0
+        ORDER BY l.updated_at DESC
+      `);
+      
+      return rows;
+    } catch (error) {
+      console.error('Error getting orders needing auto-manifest:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Update is_manifest status for an order
+   * @param {string} orderId - The order ID
+   * @param {boolean} isManifest - Whether manifest is created
+   */
+  async updateManifestStatus(orderId, isManifest = true) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      await this.mysqlConnection.execute(
+        'UPDATE labels SET is_manifest = ? WHERE order_id = ?',
+        [isManifest ? 1 : 0, orderId]
+      );
+      
+      console.log(`✅ Updated manifest status for order ${orderId}: is_manifest = ${isManifest ? 1 : 0}`);
+      
+    } catch (error) {
+      console.error(`❌ Error updating manifest status for order ${orderId}:`, error);
       throw error;
     }
   }
