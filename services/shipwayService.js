@@ -244,7 +244,7 @@ class ShipwayService {
     const ordersExcelPath = path.join(__dirname, '../data/orders.xlsx');
     const rawDataJsonPath = path.join(__dirname, '../data/raw_shipway_orders.json');
     const url = `${this.baseURL}/getorders`;
-    const params = { status: 'O' };
+    const params = {};
     let shipwayOrders = [];
     let rawApiResponse = null;
     
@@ -257,8 +257,7 @@ class ShipwayService {
       console.log('🔄 Starting paginated fetch from Shipway API...');
       
       while (hasMorePages) {
-        const currentParams = { 
-          status: 'O',
+        const currentParams = {
           page: page
         };
         
@@ -603,8 +602,7 @@ class ShipwayService {
       console.log('🔄 Starting paginated fetch from Shipway API...');
       
       while (hasMorePages) {
-        const currentParams = { 
-          status: 'O',
+        const currentParams = {
           page: page
         };
         
@@ -1127,8 +1125,7 @@ class ShipwayService {
       console.log('🔄 Starting paginated fetch from Shipway API (for clone verification)...');
       
       while (hasMorePages) {
-        const currentParams = { 
-          status: 'O',
+        const currentParams = {
           page: page
         };
         
