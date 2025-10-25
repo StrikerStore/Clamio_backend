@@ -2522,14 +2522,36 @@ class Database {
 
   /**
    * Get all orders from MySQL
+   * @param {string} vendorWarehouseId - Optional vendor warehouse ID to filter orders
    * @returns {Array} Array of all orders
    */
-  async getAllOrders() {
+  async getAllOrders(vendorWarehouseId = null) {
     if (!this.mysqlConnection) {
       throw new Error('MySQL connection not available');
     }
 
     try {
+      let whereClause = '';
+      let queryParams = [];
+      
+      if (vendorWarehouseId) {
+        // Show: unclaimed orders + orders claimed by this vendor + orders ready for handover
+        whereClause = `
+          WHERE (
+            (o.is_in_new_order = 1 OR c.label_downloaded = 1)
+            AND (
+              c.claimed_by IS NULL 
+              OR c.claimed_by = ? 
+              OR c.status = 'ready_for_handover'
+            )
+          )
+        `;
+        queryParams = [vendorWarehouseId];
+      } else {
+        // Original behavior: all orders
+        whereClause = 'WHERE (o.is_in_new_order = 1 OR c.label_downloaded = 1)';
+      }
+
       const [rows] = await this.mysqlConnection.execute(`
         SELECT 
           o.*,
@@ -2565,9 +2587,9 @@ class Database {
         )
         LEFT JOIN claims c ON o.unique_id = c.order_unique_id
         LEFT JOIN labels l ON o.order_id = l.order_id
-        WHERE (o.is_in_new_order = 1 OR c.label_downloaded = 1) 
+        ${whereClause}
         ORDER BY o.order_date DESC, o.order_id, o.product_name
-      `);
+      `, queryParams);
       
       return rows;
     } catch (error) {

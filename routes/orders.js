@@ -184,7 +184,23 @@ router.get('/', async (req, res) => {
       return res.status(500).json({ success: false, message: 'Database connection not available' });
     }
     
-    const orders = await database.getAllOrders();
+    // Check if vendor token is provided for filtered view
+    let vendorWarehouseId = null;
+    const token = req.headers['authorization'];
+    
+    if (token) {
+      try {
+        const vendor = await database.getUserByToken(token);
+        if (vendor && vendor.active_session === 'TRUE' && vendor.warehouseId) {
+          vendorWarehouseId = vendor.warehouseId;
+          console.log('🔍 Filtering orders for vendor:', vendorWarehouseId);
+        }
+      } catch (error) {
+        console.log('⚠️ Could not get vendor info, showing all orders:', error.message);
+      }
+    }
+    
+    const orders = await database.getAllOrders(vendorWarehouseId);
     return res.status(200).json({ success: true, data: { orders } });
   } catch (err) {
     console.error('Error getting orders:', err);
