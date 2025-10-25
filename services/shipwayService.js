@@ -331,15 +331,15 @@ class ShipwayService {
       
       console.log(`🎉 Pagination complete! Total orders fetched: ${allOrders.length}`);
       
-      // Filter orders to only include last 40 days
-      const fortyDaysAgo = new Date();
-      fortyDaysAgo.setDate(fortyDaysAgo.getDate() - 40);
+      // Filter orders to only include last 60 days
+      const sixtyDaysAgo = new Date();
+      sixtyDaysAgo.setDate(sixtyDaysAgo.getDate() - 60);
       
       const filteredOrders = allOrders.filter(order => {
         if (!order.order_date) return false;
         
         const orderDate = new Date(order.order_date);
-        const isWithin40Days = orderDate >= fortyDaysAgo;
+        const isWithin40Days = orderDate >= sixtyDaysAgo;
         
         if (!isWithin40Days) {
           console.log(`  ⏰ Filtering out old order: ${order.order_id} (${order.order_date})`);
@@ -678,14 +678,14 @@ class ShipwayService {
       console.log(`🎉 Pagination complete! Total orders fetched: ${allOrders.length}`);
       
       // Filter orders to only include last 40 days
-      const fortyDaysAgo = new Date();
-      fortyDaysAgo.setDate(fortyDaysAgo.getDate() - 40);
+      const sixtyDaysAgo = new Date();
+      sixtyDaysAgo.setDate(sixtyDaysAgo.getDate() - 60);
       
       const filteredOrders = allOrders.filter(order => {
         if (!order.order_date) return false;
         
         const orderDate = new Date(order.order_date);
-        const isWithin40Days = orderDate >= fortyDaysAgo;
+        const isWithin40Days = orderDate >= sixtyDaysAgo;
         
         if (!isWithin40Days) {
           console.log(`  ⏰ Filtering out old order: ${order.order_id} (${order.order_date})`);
