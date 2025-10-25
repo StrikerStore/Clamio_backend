@@ -244,7 +244,7 @@ class ShipwayService {
     const ordersExcelPath = path.join(__dirname, '../data/orders.xlsx');
     const rawDataJsonPath = path.join(__dirname, '../data/raw_shipway_orders.json');
     const url = `${this.baseURL}/getorders`;
-    const params = {};
+    const params = { status: 'O' };
     let shipwayOrders = [];
     let rawApiResponse = null;
     
@@ -258,6 +258,7 @@ class ShipwayService {
       
       while (hasMorePages) {
         const currentParams = {
+          status: 'O',
           page: page
         };
         
@@ -603,6 +604,7 @@ class ShipwayService {
       
       while (hasMorePages) {
         const currentParams = {
+          status: 'O',
           page: page
         };
         
@@ -1126,6 +1128,7 @@ class ShipwayService {
       
       while (hasMorePages) {
         const currentParams = {
+          status: 'O',
           page: page
         };
         
