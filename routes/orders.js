@@ -733,6 +733,13 @@ router.get('/grouped', async (req, res) => {
     console.log('  - Total Products:', responseData.data.totalProducts);
     console.log('  - Total Quantity:', responseData.data.totalQuantity);
     console.log('  - Grouped Orders Count:', responseData.data.groupedOrders.length);
+    
+    // Debug: Log each grouped order's total_quantity
+    console.log('🔍 DEBUG: Individual order quantities:');
+    responseData.data.groupedOrders.forEach((order, index) => {
+      console.log(`  Order ${index} (${order.order_id}): total_quantity = ${order.total_quantity}`);
+    });
+    
     console.log('  - Response JSON:', JSON.stringify(responseData, null, 2));
     
     return res.json(responseData);
