@@ -35,12 +35,7 @@ class Database {
       let connection = await mysql.createConnection({
         host: dbConfig.host,
         user: dbConfig.user,
-        password: dbConfig.password,
-        port: process.env.DB_PORT || 3306,
-        connectTimeout: 60000, // 60 seconds
-        acquireTimeout: 60000,  // 60 seconds
-        timeout: 60000,         // 60 seconds
-        ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false
+        password: dbConfig.password
       });
 
       // Create database if it doesn't exist
@@ -53,12 +48,7 @@ class Database {
         user: dbConfig.user,
         password: dbConfig.password,
         database: dbConfig.database,
-        port: process.env.DB_PORT || 3306,
-        timezone: '+05:30', // Set to IST (Indian Standard Time)
-        connectTimeout: 60000, // 60 seconds
-        acquireTimeout: 60000,  // 60 seconds
-        timeout: 60000,         // 60 seconds
-        ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false
+        timezone: '+05:30' // Set to IST (Indian Standard Time)
       });
       
       console.log('✅ MySQL connection established with IST timezone (+05:30)');
