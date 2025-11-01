@@ -35,7 +35,12 @@ class Database {
       let connection = await mysql.createConnection({
         host: dbConfig.host,
         user: dbConfig.user,
-        password: dbConfig.password
+        password: dbConfig.password,
+        port: process.env.DB_PORT || 3306,
+        connectTimeout: 60000, // 60 seconds
+        acquireTimeout: 60000,  // 60 seconds
+        timeout: 60000,         // 60 seconds
+        ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false
       });
 
       // Create database if it doesn't exist
@@ -48,7 +53,12 @@ class Database {
         user: dbConfig.user,
         password: dbConfig.password,
         database: dbConfig.database,
-        timezone: '+05:30' // Set to IST (Indian Standard Time)
+        port: process.env.DB_PORT || 3306,
+        timezone: '+05:30', // Set to IST (Indian Standard Time)
+        connectTimeout: 60000, // 60 seconds
+        acquireTimeout: 60000,  // 60 seconds
+        timeout: 60000,         // 60 seconds
+        ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false
       });
       
       console.log('✅ MySQL connection established with IST timezone (+05:30)');
@@ -2688,6 +2698,126 @@ class Database {
   }
 
   /**
+   * Get My Orders (orders that are claimed but not yet manifested)
+   * @param {string} warehouseId - Vendor warehouse ID
+   * @returns {Array} Array of individual orders for My Orders section
+   */
+  async getMyOrders(warehouseId) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      const [rows] = await this.mysqlConnection.execute(`
+        SELECT 
+          o.*,
+          p.image as product_image,
+          c.status as claims_status,
+          c.claimed_by,
+          c.claimed_at,
+          c.last_claimed_by,
+          c.last_claimed_at,
+          c.clone_status,
+          c.cloned_order_id,
+          c.is_cloned_row,
+          c.label_downloaded,
+          l.label_url,
+          l.awb,
+          l.carrier_id,
+          l.carrier_name,
+          l.handover_at,
+          c.priority_carrier,
+          l.is_manifest,
+          l.current_shipment_status,
+          l.is_handover,
+          CASE 
+            WHEN l.current_shipment_status IS NOT NULL AND l.current_shipment_status != '' 
+            THEN l.current_shipment_status 
+            ELSE c.status 
+          END as status
+        FROM orders o
+        LEFT JOIN products p ON (
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id
+        )
+        LEFT JOIN claims c ON o.unique_id = c.order_unique_id
+        LEFT JOIN labels l ON o.order_id = l.order_id
+        WHERE c.claimed_by = ? 
+        AND (c.status = 'claimed' OR c.status = 'ready_for_handover')
+        AND (o.is_in_new_order = 1 OR c.label_downloaded = 1)
+        AND (l.is_manifest IS NULL OR l.is_manifest = 0)
+        ORDER BY o.order_date DESC, o.order_id
+      `, [warehouseId]);
+      
+      return rows;
+    } catch (error) {
+      console.error('Error getting My Orders:', error);
+      throw new Error('Failed to get My Orders from database');
+    }
+  }
+
+  /**
+   * Get Handover Orders (orders that have been manifested)
+   * @param {string} warehouseId - Vendor warehouse ID
+   * @returns {Array} Array of individual orders for Handover section
+   */
+  async getHandoverOrders(warehouseId) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      const [rows] = await this.mysqlConnection.execute(`
+        SELECT 
+          o.*,
+          p.image as product_image,
+          c.status as claims_status,
+          c.claimed_by,
+          c.claimed_at,
+          c.last_claimed_by,
+          c.last_claimed_at,
+          c.clone_status,
+          c.cloned_order_id,
+          c.is_cloned_row,
+          c.label_downloaded,
+          l.label_url,
+          l.awb,
+          l.carrier_id,
+          l.carrier_name,
+          l.handover_at,
+          c.priority_carrier,
+          l.is_manifest,
+          l.current_shipment_status,
+          l.is_handover,
+          CASE 
+            WHEN l.current_shipment_status IS NOT NULL AND l.current_shipment_status != '' 
+            THEN l.current_shipment_status 
+            ELSE c.status 
+          END as status
+        FROM orders o
+        LEFT JOIN products p ON (
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id
+        )
+        LEFT JOIN claims c ON o.unique_id = c.order_unique_id
+        LEFT JOIN labels l ON o.order_id = l.order_id
+        WHERE c.claimed_by = ? 
+        AND (c.status = 'claimed' OR c.status = 'ready_for_handover')
+        AND (o.is_in_new_order = 1 OR c.label_downloaded = 1)
+        AND l.is_manifest = 1
+        ORDER BY o.order_date DESC, o.order_id
+      `, [warehouseId]);
+      
+      return rows;
+    } catch (error) {
+      console.error('Error getting Handover Orders:', error);
+      throw new Error('Failed to get Handover Orders from database');
+    }
+  }
+
+  /**
    * Update order in MySQL
    * @param {string} unique_id - Order unique ID
    * @param {Object} updateData - Data to update
@@ -3350,8 +3480,9 @@ class Database {
    * @param {string} orderId - The order ID
    * @param {string} currentStatus - Current shipment status
    * @param {boolean} isHandover - Whether this order is handed over
+   * @param {string|null} handoverTimestamp - Timestamp when order became "In Transit" (from tracking API)
    */
-  async updateLabelsShipmentStatus(orderId, currentStatus, isHandover = false) {
+  async updateLabelsShipmentStatus(orderId, currentStatus, isHandover = false, handoverTimestamp = null) {
     if (!this.mysqlConnection) {
       throw new Error('MySQL connection not available');
     }
@@ -3359,7 +3490,7 @@ class Database {
     try {
       // Check if label exists for this order
       const [existingLabels] = await this.mysqlConnection.execute(
-        'SELECT id, is_handover FROM labels WHERE order_id = ?',
+        'SELECT id, is_handover, handover_at FROM labels WHERE order_id = ?',
         [orderId]
       );
 
@@ -3369,6 +3500,7 @@ class Database {
       }
 
       const currentHandoverStatus = existingLabels[0].is_handover;
+      const existingHandoverAt = existingLabels[0].handover_at;
 
       // Update current_shipment_status and potentially is_handover
       let updateQuery = `
@@ -3383,7 +3515,23 @@ class Database {
       if (isHandover && currentHandoverStatus === 0) {
         updateQuery += `, is_handover = 1`;
         handoverJustSet = true;
-        console.log(`🚚 Setting is_handover = 1 for order ${orderId} (status: ${currentStatus})`);
+        
+        // Set handover_at timestamp ONLY if it doesn't already exist (first "In Transit" event)
+        if (!existingHandoverAt) {
+          if (handoverTimestamp) {
+            updateQuery += `, handover_at = ?`;
+            queryParams.push(handoverTimestamp);
+            console.log(`🚚 Setting is_handover = 1 and handover_at = ${handoverTimestamp} for order ${orderId}`);
+          } else {
+            // If no timestamp provided, use current time
+            updateQuery += `, handover_at = NOW()`;
+            console.log(`🚚 Setting is_handover = 1 and handover_at = NOW() for order ${orderId}`);
+          }
+        } else {
+          console.log(`🚚 Order ${orderId} already has handover_at = ${existingHandoverAt}, preserving original timestamp`);
+        }
+        
+        console.log(`🚚 Order ${orderId} status changed to In Transit (handed over)`);
       }
 
       updateQuery += ` WHERE order_id = ?`;

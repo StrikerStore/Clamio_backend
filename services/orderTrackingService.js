@@ -199,7 +199,19 @@ class OrderTrackingService {
       const latestStatus = trackingData.shipment_status_history[trackingData.shipment_status_history.length - 1];
       const isHandover = latestStatus.name === 'In Transit';
       
-      await database.updateLabelsShipmentStatus(orderId, latestStatus.name, isHandover);
+      // Get the timestamp for handover event (if available)
+      // IMPORTANT: We want the FIRST "In Transit" event, not the latest
+      let handoverTimestamp = null;
+      if (isHandover) {
+        // Find the first occurrence of "In Transit" status
+        const firstInTransitEvent = trackingData.shipment_status_history.find(event => event.name === 'In Transit');
+        if (firstInTransitEvent && firstInTransitEvent.time) {
+          handoverTimestamp = firstInTransitEvent.time;
+          console.log(`🚚 [Tracking] Found first "In Transit" event for order ${orderId} at timestamp: ${handoverTimestamp}`);
+        }
+      }
+      
+      await database.updateLabelsShipmentStatus(orderId, latestStatus.name, isHandover, handoverTimestamp);
       
       return {
         success: true,

@@ -339,16 +339,16 @@ class ShipwayService {
         if (!order.order_date) return false;
         
         const orderDate = new Date(order.order_date);
-        const isWithin40Days = orderDate >= sixtyDaysAgo;
+        const isWithin60Days = orderDate >= sixtyDaysAgo;
         
-        if (!isWithin40Days) {
+        if (!isWithin60Days) {
           console.log(`  ⏰ Filtering out old order: ${order.order_id} (${order.order_date})`);
         }
         
-        return isWithin40Days;
+        return isWithin60Days;
       });
       
-      console.log(`📅 Date filter applied: ${filteredOrders.length} orders within last 40 days (filtered out ${allOrders.length - filteredOrders.length} old orders)`);
+      console.log(`📅 Date filter applied: ${filteredOrders.length} orders within last 60 days (filtered out ${allOrders.length - filteredOrders.length} old orders)`);
       
       shipwayOrders = filteredOrders;
       rawApiResponse = { success: 1, message: allOrders }; // Keep all orders in raw JSON
@@ -677,7 +677,7 @@ class ShipwayService {
       
       console.log(`🎉 Pagination complete! Total orders fetched: ${allOrders.length}`);
       
-      // Filter orders to only include last 40 days
+      // Filter orders to only include last 60 days
       const sixtyDaysAgo = new Date();
       sixtyDaysAgo.setDate(sixtyDaysAgo.getDate() - 60);
       
@@ -685,16 +685,16 @@ class ShipwayService {
         if (!order.order_date) return false;
         
         const orderDate = new Date(order.order_date);
-        const isWithin40Days = orderDate >= sixtyDaysAgo;
+        const isWithin60Days = orderDate >= sixtyDaysAgo;
         
-        if (!isWithin40Days) {
+        if (!isWithin60Days) {
           console.log(`  ⏰ Filtering out old order: ${order.order_id} (${order.order_date})`);
         }
         
-        return isWithin40Days;
+        return isWithin60Days;
       });
       
-      console.log(`📅 Date filter applied: ${filteredOrders.length} orders within last 40 days (filtered out ${allOrders.length - filteredOrders.length} old orders)`);
+      console.log(`📅 Date filter applied: ${filteredOrders.length} orders within last 60 days (filtered out ${allOrders.length - filteredOrders.length} old orders)`);
       
       shipwayOrders = filteredOrders;
       rawApiResponse = { success: 1, message: allOrders }; // Keep all orders in raw JSON
