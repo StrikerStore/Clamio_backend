@@ -9,11 +9,19 @@ const storage = multer.memoryStorage();
 const upload = multer({ 
   storage: storage,
   fileFilter: (req, file, cb) => {
-    // Accept only CSV files
-    if (file.mimetype === 'text/csv' || file.originalname.endsWith('.csv')) {
+    // Accept CSV files with various mimetypes (different systems report different types for CSV)
+    const isCSV = 
+      file.mimetype === 'text/csv' ||
+      file.mimetype === 'application/csv' ||
+      file.mimetype === 'text/plain' ||
+      file.mimetype === 'application/vnd.ms-excel' ||
+      file.mimetype === 'application/x-csv' ||
+      file.originalname.toLowerCase().endsWith('.csv');
+    
+    if (isCSV) {
       cb(null, true);
     } else {
-      cb(new Error('Only CSV files are allowed'));
+      cb(new Error('Only CSV files are allowed. Received mimetype: ' + file.mimetype));
     }
   },
   limits: {
