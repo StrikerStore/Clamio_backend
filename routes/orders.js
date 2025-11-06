@@ -647,6 +647,8 @@ router.get('/my-orders', async (req, res) => {
           total_products: 0,
           total_quantity: 0,
           status: order.status,
+          is_handover: order.is_handover, // Add is_handover field
+          current_shipment_status: order.current_shipment_status, // Add current_shipment_status field
           products: []
         };
       }
@@ -847,6 +849,9 @@ router.get('/handover', async (req, res) => {
           total_products: 0,
           total_quantity: 0,
           status: order.status,
+          is_handover: order.is_handover, // Add is_handover field
+          manifest_id: order.manifest_id, // Add manifest_id field
+          current_shipment_status: order.current_shipment_status, // Add current_shipment_status field
           products: []
         };
       }
@@ -1047,6 +1052,8 @@ router.get('/grouped', async (req, res) => {
           customer_name: order.customer_name || order.customer,
           claimed_at: order.claimed_at,
           label_downloaded: order.label_downloaded, // Add label_downloaded field
+          is_handover: order.is_handover, // Add is_handover field
+          current_shipment_status: order.current_shipment_status, // Add current_shipment_status field
           total_value: 0,
           total_products: 0,
           total_quantity: 0,
@@ -1565,7 +1572,13 @@ router.post('/admin/bulk-unassign', authenticateBasicAuth, requireAdminOrSuperad
             [uid]
           );
           
-          console.log(`✅ CLAIM DATA CLEARED for ${order.order_id}`);
+          // Clear manifest data if exists
+          await database.mysqlConnection.execute(
+            'UPDATE labels SET is_manifest = 0, manifest_id = NULL WHERE order_id = ?',
+            [order.order_id]
+          );
+          
+          console.log(`✅ CLAIM DATA AND MANIFEST CLEARED for ${order.order_id}`);
           updatedCount += 1;
         }
       } catch (error) {
@@ -1645,6 +1658,14 @@ router.post('/admin/unassign', authenticateBasicAuth, requireAdminOrSuperadmin, 
     );
     
     console.log('✅ CLAIM DATA CLEARED');
+    
+    // Clear manifest data if exists (for orders that were marked ready)
+    console.log('🔄 CLEARING MANIFEST DATA IF EXISTS...');
+    await database.mysqlConnection.execute(
+      'UPDATE labels SET is_manifest = 0, manifest_id = NULL WHERE order_id = ?',
+      [order.order_id]
+    );
+    console.log('✅ MANIFEST DATA CLEARED');
     
     // Get updated order for response
     const updatedOrder = await database.getOrderByUniqueId(unique_id);
@@ -2035,18 +2056,41 @@ async function generateLabelForOrder(orderId, products, vendor, format = 'therma
   try {
     console.log('🔄 Generating label for order:', orderId);
     
-    // Extract original order ID if this is a clone
-    const originalOrderId = orderId.includes('_') ? orderId.split('_')[0] : orderId;
-    console.log('  - Original order ID for contact info:', originalOrderId);
+    // Get customer info from database
+    const database = require('../config/database');
+    const customerInfo = await database.getCustomerInfoByOrderId(orderId);
     
-    // Load raw shipway orders for contact info
-    const rawOrdersPath = path.join(__dirname, '../data/raw_shipway_orders.json');
-    const rawOrdersData = JSON.parse(fs.readFileSync(rawOrdersPath, 'utf8'));
-    const originalOrder = rawOrdersData.message.find(order => order.order_id === originalOrderId);
-    
-    if (!originalOrder) {
-      throw new Error(`Original order not found in raw_shipway_orders.json for order ID: ${originalOrderId}`);
+    if (!customerInfo) {
+      throw new Error(`Customer info not found for order ID: ${orderId}. Please sync orders from Shipway first.`);
     }
+    
+    // Convert customer_info to originalOrder format expected by prepareShipwayRequestBody
+    const originalOrder = {
+      order_id: orderId,
+      email: customerInfo.email,
+      b_address: customerInfo.billing_address,
+      b_address_2: customerInfo.billing_address2,
+      b_city: customerInfo.billing_city,
+      b_state: customerInfo.billing_state,
+      b_country: customerInfo.billing_country,
+      b_firstname: customerInfo.billing_firstname,
+      b_lastname: customerInfo.billing_lastname,
+      b_phone: customerInfo.billing_phone,
+      b_zipcode: customerInfo.billing_zipcode,
+      b_latitude: customerInfo.billing_latitude,
+      b_longitude: customerInfo.billing_longitude,
+      s_address: customerInfo.shipping_address,
+      s_address_2: customerInfo.shipping_address2,
+      s_city: customerInfo.shipping_city,
+      s_state: customerInfo.shipping_state,
+      s_country: customerInfo.shipping_country,
+      s_firstname: customerInfo.shipping_firstname,
+      s_lastname: customerInfo.shipping_lastname,
+      s_phone: customerInfo.shipping_phone,
+      s_zipcode: customerInfo.shipping_zipcode,
+      s_latitude: customerInfo.shipping_latitude,
+      s_longitude: customerInfo.shipping_longitude
+    };
 
     // STEP 1: Get top 3 priority carriers from the first product
     console.log(`🚚 RETRIEVING TOP 3 PRIORITY CARRIERS for order ${orderId}...`);
@@ -2074,7 +2118,6 @@ async function generateLabelForOrder(orderId, products, vendor, format = 'therma
     }
     
     // Get carrier details from database for name lookup
-    const database = require('../config/database');
     const carrierServiceabilityService = require('../services/carrierServiceabilityService');
     const allCarriers = await carrierServiceabilityService.readCarriersFromDatabase();
     const carrierMap = new Map(allCarriers.map(c => [c.carrier_id, c]));
@@ -2553,14 +2596,41 @@ async function prepareInputData(originalOrderId, claimedProducts, allOrderProduc
   // Generate unique clone ID
   const cloneOrderId = await generateUniqueCloneId(originalOrderId);
   
-  // Load original order data once
-  const rawOrdersPath = path.join(__dirname, '../data/raw_shipway_orders.json');
-  const rawOrdersData = JSON.parse(fs.readFileSync(rawOrdersPath, 'utf8'));
-  const originalOrder = rawOrdersData.message.find(order => order.order_id === originalOrderId);
+  // Get customer info from database
+  const database = require('../config/database');
+  const customerInfo = await database.getCustomerInfoByOrderId(originalOrderId);
   
-  if (!originalOrder) {
-    throw new Error('Original order not found in raw_shipway_orders.json');
+  if (!customerInfo) {
+    throw new Error(`Customer info not found for order ID: ${originalOrderId}. Please sync orders from Shipway first.`);
   }
+  
+  // Convert customer_info to originalOrder format expected by prepareShipwayRequestBody
+  const originalOrder = {
+    order_id: originalOrderId,
+    email: customerInfo.email,
+    b_address: customerInfo.billing_address,
+    b_address_2: customerInfo.billing_address2,
+    b_city: customerInfo.billing_city,
+    b_state: customerInfo.billing_state,
+    b_country: customerInfo.billing_country,
+    b_firstname: customerInfo.billing_firstname,
+    b_lastname: customerInfo.billing_lastname,
+    b_phone: customerInfo.billing_phone,
+    b_zipcode: customerInfo.billing_zipcode,
+    b_latitude: customerInfo.billing_latitude,
+    b_longitude: customerInfo.billing_longitude,
+    s_address: customerInfo.shipping_address,
+    s_address_2: customerInfo.shipping_address2,
+    s_city: customerInfo.shipping_city,
+    s_state: customerInfo.shipping_state,
+    s_country: customerInfo.shipping_country,
+    s_firstname: customerInfo.shipping_firstname,
+    s_lastname: customerInfo.shipping_lastname,
+    s_phone: customerInfo.shipping_phone,
+    s_zipcode: customerInfo.shipping_zipcode,
+    s_latitude: customerInfo.shipping_latitude,
+    s_longitude: customerInfo.shipping_longitude
+  };
   
   const inputData = {
     originalOrderId,
@@ -2739,6 +2809,16 @@ async function updateLocalDatabaseAfterClone(inputData) {
   console.log(`  - Clone Order ID: ${cloneOrderId}`);
   console.log(`  - Original Order ID: ${originalOrderId}`);
   console.log(`  - Setting label_downloaded = 0 (not downloaded yet)`);
+  
+  // Copy customer info from original order to clone order
+  console.log(`📋 Copying customer info from ${originalOrderId} to ${cloneOrderId}...`);
+  try {
+    await database.copyCustomerInfo(originalOrderId, cloneOrderId);
+    console.log(`✅ Customer info copied successfully`);
+  } catch (error) {
+    console.error(`⚠️ Failed to copy customer info: ${error.message}`);
+    throw error;
+  }
   
     for (const product of claimedProducts) {
       // Update both orders and claims tables in a single call
@@ -2972,9 +3052,18 @@ async function callShipwayCreateManifestAPI(orderIds) {
       throw new Error(`Shipway Create Manifest API error: ${data.message || response.statusText}`);
     }
     
+    // Extract manifest_id from response (Shipway returns it as "manifest_ids")
+    // Response can be single ID "4656335" or multiple IDs "4656335,4656336"
+    const manifestIds = data.manifest_ids || null;
+    // For single payment type, it returns single ID, so we just use it
+    const manifestId = manifestIds;
+    
     console.log('✅ Shipway Create Manifest API call successful');
+    console.log('  - Manifest ID(s):', manifestId);
+    
     return {
       success: true,
+      manifest_id: manifestId,
       data: data
     };
     
@@ -3179,9 +3268,6 @@ router.post('/bulk-download-labels', async (req, res) => {
       try {
         console.log(`🔄 Processing order: ${orderId}`);
         
-        // Check if this is already a clone order
-        const isCloneOrder = orderId.includes('_');
-        
         // Get all products for this order_id
         const orderProducts = orders.filter(order => order.order_id === orderId);
         const claimedProducts = orderProducts.filter(order => 
@@ -3217,31 +3303,7 @@ router.post('/bulk-download-labels', async (req, res) => {
         }
 
         let labelResponse;
-        if (isCloneOrder) {
-          // Already a clone order - direct download
-          console.log(`📋 BULK: Processing clone order ${orderId}`);
-          labelResponse = await generateLabelForOrder(orderId, claimedProducts, vendor, format);
-          
-          // Store label and carrier info for clone order
-          if (labelResponse.success && labelResponse.data.shipping_url) {
-            await database.upsertLabel({
-              order_id: orderId,
-              label_url: labelResponse.data.shipping_url,
-              awb: labelResponse.data.awb,
-              carrier_id: labelResponse.data.carrier_id,
-              carrier_name: labelResponse.data.carrier_name
-            });
-            console.log(`✅ BULK: Stored label data for clone order ${orderId}`);
-            
-            // ✅ Mark label as downloaded in claims table for all claimed products
-            for (const product of claimedProducts) {
-              await database.updateOrder(product.unique_id, {
-                label_downloaded: 1  // Mark as downloaded after successful label generation
-              });
-              console.log(`  ✅ BULK: Marked product ${product.unique_id} label as downloaded`);
-            }
-          }
-        } else if (orderProducts.length === claimedProducts.length) {
+        if (orderProducts.length === claimedProducts.length) {
           // Direct download - all products claimed by vendor
           console.log(`📋 BULK: Processing direct download for ${orderId}`);
           labelResponse = await generateLabelForOrder(orderId, claimedProducts, vendor, format);
@@ -3800,15 +3862,17 @@ router.post('/mark-ready', async (req, res) => {
 
     console.log('✅ Shipway manifest API successful');
 
-    // Set is_manifest = 1 in labels table first
-    console.log('🔄 Setting is_manifest = 1 in labels table...');
+    // Set is_manifest = 1 and manifest_id in labels table
+    console.log('🔄 Setting is_manifest = 1 and manifest_id in labels table...');
     const labelData = {
       order_id: order_id,
-      is_manifest: 1
+      is_manifest: 1,
+      manifest_id: manifestResponse.manifest_id
     };
     
     await database.upsertLabel(labelData);
     console.log(`  ✅ Set is_manifest = 1 for order ${order_id}`);
+    console.log(`  ✅ Set manifest_id = ${manifestResponse.manifest_id} for order ${order_id}`);
 
     // Update order status to ready_for_handover after setting is_manifest
     console.log('🔄 Updating order status to ready_for_handover...');
@@ -3825,6 +3889,7 @@ router.post('/mark-ready', async (req, res) => {
     console.log(`  - Order ${order_id} marked as ready for handover`);
     console.log(`  - Manifest created successfully`);
     console.log(`  - is_manifest flag set to 1`);
+    console.log(`  - manifest_id: ${manifestResponse.manifest_id}`);
 
     return res.json({
       success: true,
@@ -3833,7 +3898,8 @@ router.post('/mark-ready', async (req, res) => {
         order_id: order_id,
         status: 'ready_for_handover',
         manifest_created: true,
-        is_manifest: 1
+        is_manifest: 1,
+        manifest_id: manifestResponse.manifest_id
       }
     });
 
@@ -3896,6 +3962,7 @@ router.post('/bulk-mark-ready', async (req, res) => {
     const successfulOrders = [];
     const failedOrders = [];
     const validOrderIds = [];
+    const manifestIds = []; // Array to store created manifest IDs
 
     // First, validate all orders
     for (const order_id of order_ids) {
@@ -3939,66 +4006,154 @@ router.post('/bulk-mark-ready', async (req, res) => {
       }
     }
 
-    // If we have valid orders, call the bulk manifest API
+    // If we have valid orders, split by payment_type and call manifest API separately
     if (validOrderIds.length > 0) {
-      console.log(`🔄 Calling Shipway Create Manifest API for ${validOrderIds.length} orders...`);
-      console.log(`  - Valid order IDs: ${validOrderIds.join(', ')}`);
+      console.log(`🔄 Processing ${validOrderIds.length} valid orders...`);
       
-      const manifestResponse = await callShipwayCreateManifestAPI(validOrderIds);
+      // Step 1: Group orders by payment_type (COD vs Prepaid)
+      const codOrderIds = [];
+      const prepaidOrderIds = [];
       
-      if (!manifestResponse.success) {
-        console.log(`❌ Shipway bulk manifest API failed:`, manifestResponse.message);
-        // Add all valid orders to failed list
-        validOrderIds.forEach(order_id => {
-          failedOrders.push({
-            order_id: order_id,
-            reason: 'Failed to create manifest: ' + manifestResponse.message
-          });
-        });
-      } else {
-        console.log(`✅ Shipway bulk manifest API successful for ${validOrderIds.length} orders`);
-
-        // Process each valid order for database updates
-        for (const order_id of validOrderIds) {
-          try {
-            const orderProducts = orders.filter(order => order.order_id === order_id);
-            const claimedProducts = orderProducts.filter(order => 
-              order.claimed_by === vendor.warehouseId && order.status === 'claimed'
-            );
-
-            // Set is_manifest = 1 in labels table first
-            console.log(`🔄 Setting is_manifest = 1 in labels table for ${order_id}...`);
-            const labelData = {
-              order_id: order_id,
-              is_manifest: 1
-            };
-            
-            await database.upsertLabel(labelData);
-            console.log(`  ✅ Set is_manifest = 1 for order ${order_id}`);
-
-            // Update order status to ready_for_handover after setting is_manifest
-            console.log(`🔄 Updating order status to ready_for_handover for ${order_id}...`);
-            
-            for (const product of claimedProducts) {
-              await database.updateOrder(product.unique_id, {
-                status: 'ready_for_handover'
-              });
-              console.log(`  ✅ Updated product ${product.unique_id} status to ready_for_handover`);
-            }
-
-            successfulOrders.push({
-              order_id: order_id,
-              status: 'ready_for_handover',
-              manifest_created: true,
-              is_manifest: 1
-            });
-
-          } catch (error) {
-            console.error(`❌ Error updating order ${order_id}:`, error);
+      for (const order_id of validOrderIds) {
+        const orderProducts = orders.filter(order => order.order_id === order_id);
+        // Get payment_type from first product (all products in same order have same payment_type)
+        const paymentType = orderProducts[0]?.payment_type;
+        
+        if (paymentType === 'C') {
+          codOrderIds.push(order_id);
+        } else if (paymentType === 'P') {
+          prepaidOrderIds.push(order_id);
+        }
+      }
+      
+      console.log(`📊 Orders grouped by payment type:`);
+      console.log(`  - COD orders: ${codOrderIds.length} (${codOrderIds.join(', ')})`);
+      console.log(`  - Prepaid orders: ${prepaidOrderIds.length} (${prepaidOrderIds.join(', ')})`);
+      
+      // Step 2: Process COD orders
+      if (codOrderIds.length > 0) {
+        console.log(`🔄 Calling Shipway Create Manifest API for COD orders...`);
+        const codManifestResponse = await callShipwayCreateManifestAPI(codOrderIds);
+        
+        if (!codManifestResponse.success) {
+          console.log(`❌ COD manifest creation failed:`, codManifestResponse.message);
+          codOrderIds.forEach(order_id => {
             failedOrders.push({
               order_id: order_id,
-              reason: error.message
+              reason: 'Failed to create COD manifest: ' + codManifestResponse.message
             });
+          });
+        } else {
+          console.log(`✅ COD Manifest created successfully`);
+          console.log(`  - Manifest ID: ${codManifestResponse.manifest_id}`);
+          manifestIds.push(codManifestResponse.manifest_id);
+          
+          // Process each COD order
+          for (const order_id of codOrderIds) {
+            try {
+              const orderProducts = orders.filter(order => order.order_id === order_id);
+              const claimedProducts = orderProducts.filter(order => 
+                order.claimed_by === vendor.warehouseId && order.status === 'claimed'
+              );
+
+              // Set is_manifest = 1 and manifest_id in labels table
+              console.log(`🔄 Setting manifest data for COD order ${order_id}...`);
+              const labelData = {
+                order_id: order_id,
+                is_manifest: 1,
+                manifest_id: codManifestResponse.manifest_id
+              };
+              
+              await database.upsertLabel(labelData);
+              console.log(`  ✅ Set manifest_id = ${codManifestResponse.manifest_id} for order ${order_id}`);
+
+              // Update order status to ready_for_handover
+              for (const product of claimedProducts) {
+                await database.updateOrder(product.unique_id, {
+                  status: 'ready_for_handover'
+                });
+              }
+
+              successfulOrders.push({
+                order_id: order_id,
+                status: 'ready_for_handover',
+                manifest_created: true,
+                is_manifest: 1,
+                manifest_id: codManifestResponse.manifest_id,
+                payment_type: 'COD'
+              });
+
+            } catch (error) {
+              console.error(`❌ Error updating COD order ${order_id}:`, error);
+              failedOrders.push({
+                order_id: order_id,
+                reason: error.message
+              });
+            }
+          }
+        }
+      }
+      
+      // Step 3: Process Prepaid orders
+      if (prepaidOrderIds.length > 0) {
+        console.log(`🔄 Calling Shipway Create Manifest API for Prepaid orders...`);
+        const prepaidManifestResponse = await callShipwayCreateManifestAPI(prepaidOrderIds);
+        
+        if (!prepaidManifestResponse.success) {
+          console.log(`❌ Prepaid manifest creation failed:`, prepaidManifestResponse.message);
+          prepaidOrderIds.forEach(order_id => {
+            failedOrders.push({
+              order_id: order_id,
+              reason: 'Failed to create Prepaid manifest: ' + prepaidManifestResponse.message
+            });
+          });
+        } else {
+          console.log(`✅ Prepaid Manifest created successfully`);
+          console.log(`  - Manifest ID: ${prepaidManifestResponse.manifest_id}`);
+          manifestIds.push(prepaidManifestResponse.manifest_id);
+          
+          // Process each Prepaid order
+          for (const order_id of prepaidOrderIds) {
+            try {
+              const orderProducts = orders.filter(order => order.order_id === order_id);
+              const claimedProducts = orderProducts.filter(order => 
+                order.claimed_by === vendor.warehouseId && order.status === 'claimed'
+              );
+
+              // Set is_manifest = 1 and manifest_id in labels table
+              console.log(`🔄 Setting manifest data for Prepaid order ${order_id}...`);
+              const labelData = {
+                order_id: order_id,
+                is_manifest: 1,
+                manifest_id: prepaidManifestResponse.manifest_id
+              };
+              
+              await database.upsertLabel(labelData);
+              console.log(`  ✅ Set manifest_id = ${prepaidManifestResponse.manifest_id} for order ${order_id}`);
+
+              // Update order status to ready_for_handover
+              for (const product of claimedProducts) {
+                await database.updateOrder(product.unique_id, {
+                  status: 'ready_for_handover'
+                });
+              }
+
+              successfulOrders.push({
+                order_id: order_id,
+                status: 'ready_for_handover',
+                manifest_created: true,
+                is_manifest: 1,
+                manifest_id: prepaidManifestResponse.manifest_id,
+                payment_type: 'Prepaid'
+              });
+
+            } catch (error) {
+              console.error(`❌ Error updating Prepaid order ${order_id}:`, error);
+              failedOrders.push({
+                order_id: order_id,
+                reason: error.message
+              });
+            }
           }
         }
       }
@@ -4007,6 +4162,7 @@ router.post('/bulk-mark-ready', async (req, res) => {
     console.log('🟢 BULK MARK READY COMPLETE');
     console.log(`  - Successful orders: ${successfulOrders.length}`);
     console.log(`  - Failed orders: ${failedOrders.length}`);
+    console.log(`  - Manifest IDs created: ${manifestIds.join(', ')}`);
 
     if (successfulOrders.length === 0) {
       return res.status(400).json({
@@ -4017,7 +4173,8 @@ router.post('/bulk-mark-ready', async (req, res) => {
           failed_orders: failedOrders,
           total_requested: order_ids.length,
           total_successful: successfulOrders.length,
-          total_failed: failedOrders.length
+          total_failed: failedOrders.length,
+          manifest_ids: manifestIds
         }
       });
     }
@@ -4030,7 +4187,8 @@ router.post('/bulk-mark-ready', async (req, res) => {
         failed_orders: failedOrders,
         total_requested: order_ids.length,
         total_successful: successfulOrders.length,
-        total_failed: failedOrders.length
+        total_failed: failedOrders.length,
+        manifest_ids: manifestIds
       }
     });
 
@@ -4234,12 +4392,18 @@ router.post('/reverse', async (req, res) => {
 
       // Clear label data after successful cancellation
       await database.mysqlConnection.execute(
-        'UPDATE labels SET awb = NULL, label_url = NULL, carrier_id = NULL, carrier_name = NULL, priority_carrier = NULL WHERE order_id = ?',
+        'UPDATE labels SET awb = NULL, label_url = NULL, carrier_id = NULL, carrier_name = NULL, priority_carrier = NULL, is_manifest = 0, manifest_id = NULL, current_shipment_status = NULL WHERE order_id = ?',
         [order.order_id]
       );
-      console.log('✅ LABEL DATA CLEARED');
+      console.log('✅ LABEL DATA CLEARED (including manifest_id)');
     } else {
       console.log('🔄 CASE 1: No label downloaded - simple reverse');
+      // Even without label download, reset manifest fields if they exist (for Handover tab orders)
+      await database.mysqlConnection.execute(
+        'UPDATE labels SET is_manifest = 0, manifest_id = NULL, current_shipment_status = NULL WHERE order_id = ?',
+        [order.order_id]
+      );
+      console.log('✅ MANIFEST FIELDS RESET (including manifest_id)');
     }
 
     // Clear claim information (both cases)
@@ -4257,6 +4421,13 @@ router.post('/reverse', async (req, res) => {
     );
 
     console.log('✅ CLAIM DATA CLEARED');
+
+    // Set is_in_new_order = 1 so unclaimed order appears in All Orders tab
+    await database.mysqlConnection.execute(
+      'UPDATE orders SET is_in_new_order = 1 WHERE unique_id = ?',
+      [unique_id]
+    );
+    console.log('✅ ORDER SET TO NEW ORDER STATUS');
 
     // Get updated order for response
     const updatedOrder = await database.getOrderByUniqueId(unique_id);
@@ -4445,12 +4616,18 @@ router.post('/reverse-grouped', async (req, res) => {
 
       // Clear label data after successful cancellation (only once for the entire order)
       await database.mysqlConnection.execute(
-        'UPDATE labels SET awb = NULL, label_url = NULL, carrier_id = NULL, carrier_name = NULL, priority_carrier = NULL WHERE order_id = ?',
+        'UPDATE labels SET awb = NULL, label_url = NULL, carrier_id = NULL, carrier_name = NULL, priority_carrier = NULL, is_manifest = 0, manifest_id = NULL, current_shipment_status = NULL WHERE order_id = ?',
         [order_id]
       );
-      console.log('✅ LABEL DATA CLEARED');
+      console.log('✅ LABEL DATA CLEARED (including manifest_id)');
     } else {
       console.log('🔄 CASE 1: No label downloaded - simple reverse');
+      // Even without label download, reset manifest fields if they exist (for Handover tab orders)
+      await database.mysqlConnection.execute(
+        'UPDATE labels SET is_manifest = 0, manifest_id = NULL, current_shipment_status = NULL WHERE order_id = ?',
+        [order_id]
+      );
+      console.log('✅ MANIFEST FIELDS RESET (including manifest_id)');
     }
 
     // Clear claim information for ONLY the vendor's products
@@ -4484,6 +4661,13 @@ router.post('/reverse-grouped', async (req, res) => {
     }
 
     console.log('✅ CLAIM DATA CLEARED FOR VENDOR\'S PRODUCTS');
+
+    // Set is_in_new_order = 1 for all products in this order so unclaimed orders appear in All Orders tab
+    await database.mysqlConnection.execute(
+      'UPDATE orders SET is_in_new_order = 1 WHERE order_id = ?',
+      [order_id]
+    );
+    console.log('✅ ORDERS SET TO NEW ORDER STATUS');
 
     const successMessage = isLabelDownloaded 
       ? `Shipment cancelled and ${validUniqueIds.length} products reversed successfully`
@@ -4566,6 +4750,284 @@ router.get('/auto-reverse-stats', authenticateBasicAuth, requireAdminOrSuperadmi
       success: false,
       message: 'Failed to get auto-reversal statistics',
       error: error.message
+    });
+  }
+});
+
+/**
+ * @route   POST /api/orders/download-manifest-summary
+ * @desc    Download manifest summary PDF for given manifest_id(s)
+ * @access  Vendor (token required)
+ */
+router.post('/download-manifest-summary', async (req, res) => {
+  const { manifest_ids } = req.body;
+  const token = req.headers['authorization'];
+  
+  console.log('🔵 DOWNLOAD MANIFEST SUMMARY REQUEST START');
+  console.log('  - manifest_ids:', manifest_ids);
+  console.log('  - token received:', token ? 'YES' : 'NO');
+  
+  if (!manifest_ids || !token) {
+    console.log('❌ DOWNLOAD MANIFEST SUMMARY FAILED: Missing required fields');
+    return res.status(400).json({ 
+      success: false, 
+      message: 'manifest_ids and Authorization token required' 
+    });
+  }
+
+  try {
+    // Load database and verify vendor
+    const database = require('../config/database');
+    await database.waitForMySQLInitialization();
+    
+    if (!database.isMySQLAvailable()) {
+      console.log('❌ MySQL connection not available');
+      return res.status(500).json({ success: false, message: 'Database connection not available' });
+    }
+    
+    const vendor = await database.getUserByToken(token);
+    
+    if (!vendor || vendor.active_session !== 'TRUE') {
+      console.log('❌ VENDOR NOT FOUND OR INACTIVE');
+      return res.status(401).json({ success: false, message: 'Invalid or inactive vendor token' });
+    }
+
+    console.log('✅ VENDOR FOUND:');
+    console.log('  - Email:', vendor.email);
+    console.log('  - Warehouse ID:', vendor.warehouseId);
+
+    // Get vendor address
+    let vendorAddress = '';
+    try {
+      const [addressRows] = await database.mysqlConnection.execute(`
+        SELECT address, city, state, pincode 
+        FROM users 
+        WHERE warehouseId = ?
+      `, [vendor.warehouseId]);
+      
+      if (addressRows.length > 0 && addressRows[0].address) {
+        const addr = addressRows[0];
+        const parts = [];
+        if (addr.address) parts.push(addr.address);
+        if (addr.city) parts.push(addr.city);
+        if (addr.state) parts.push(addr.state);
+        if (addr.pincode) parts.push(addr.pincode);
+        vendorAddress = parts.join(', ');
+      }
+    } catch (error) {
+      console.log('⚠️ Could not fetch warehouse address:', error.message);
+    }
+
+    // Convert manifest_ids to array if single value
+    const manifestIdsArray = Array.isArray(manifest_ids) ? manifest_ids : [manifest_ids];
+    console.log('📋 Processing manifest IDs:', manifestIdsArray);
+
+    // Query database for manifest summary data
+    const manifestData = [];
+    
+    for (const manifest_id of manifestIdsArray) {
+      console.log(`🔍 Querying data for manifest_id: ${manifest_id}`);
+      
+      // Query to get carrier summary for this manifest
+      const [summaryRows] = await database.mysqlConnection.execute(`
+        SELECT 
+          l.carrier_name,
+          o.payment_type,
+          COUNT(DISTINCT l.order_id) as order_count,
+          GROUP_CONCAT(DISTINCT l.order_id ORDER BY l.order_id SEPARATOR ', ') as order_ids
+        FROM labels l
+        JOIN orders o ON l.order_id = o.order_id
+        WHERE l.manifest_id = ?
+        GROUP BY l.carrier_name, o.payment_type
+        ORDER BY l.carrier_name, o.payment_type
+      `, [manifest_id]);
+      
+      console.log(`  - Found ${summaryRows.length} carrier/payment combinations`);
+      
+      if (summaryRows.length > 0) {
+        manifestData.push({
+          manifest_id: manifest_id,
+          payment_type: summaryRows[0].payment_type,
+          summary: summaryRows
+        });
+      }
+    }
+    
+    if (manifestData.length === 0) {
+      console.log('❌ No data found for provided manifest IDs');
+      return res.status(404).json({
+        success: false,
+        message: 'No orders found for the provided manifest IDs'
+      });
+    }
+
+    console.log('✅ Manifest data collected, generating PDF...');
+    
+    // Fetch logo image
+    let logoBuffer = null;
+    try {
+      const logoUrl = 'https://cdn.shopify.com/s/files/1/0922/4824/4508/files/striker_logo_28245adf-5794-46fb-9ba2-e7703824330e.png?v=1744064798';
+      const logoResponse = await fetch(logoUrl);
+      if (logoResponse.ok) {
+        logoBuffer = Buffer.from(await logoResponse.arrayBuffer());
+        console.log('✅ Logo fetched successfully');
+      }
+    } catch (error) {
+      console.log('⚠️ Could not fetch logo:', error.message);
+    }
+    
+    // Generate PDF
+    const PDFDocument = require('pdfkit');
+    const doc = new PDFDocument({ 
+      size: 'A4', 
+      margin: 50,
+      info: {
+        Title: 'Manifest Summary Report',
+        Author: 'Clamio Vendor System'
+      }
+    });
+    
+    // Set response headers for PDF download
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const filename = `manifest-summary-${timestamp}.pdf`;
+    
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    
+    // Pipe PDF to response
+    doc.pipe(res);
+    
+    // Top Section: Logo and Store Name
+    const topY = 40;
+    
+    // Add logo at top right (smaller)
+    if (logoBuffer) {
+      try {
+        const logoWidth = 50;
+        const logoHeight = 50;
+        const logoX = doc.page.width - logoWidth - 50;
+        doc.image(logoBuffer, logoX, topY, { width: logoWidth, height: logoHeight, fit: [logoWidth, logoHeight] });
+      } catch (error) {
+        console.log('⚠️ Could not embed logo in PDF:', error.message);
+      }
+    }
+    
+    // Add "Striker Store" at top center
+    doc.fontSize(18).font('Helvetica-Bold').fillColor('#1F2937');
+    doc.text('Striker Store', 0, topY + 5, { align: 'center', width: doc.page.width });
+    
+    doc.y = topY + 35;
+    
+    // PDF Header
+    doc.fontSize(16).font('Helvetica-Bold').fillColor('#000000').text('MANIFEST SUMMARY REPORT', { align: 'center' });
+    doc.fontSize(8).font('Helvetica');
+    doc.y += 15;
+    doc.text(`Generated: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`, { align: 'center' });
+    doc.text(`Warehouse: ${vendor.warehouseId}`, { align: 'center' });
+    if (vendorAddress) {
+      doc.text(`Address: ${vendorAddress}`, { align: 'center' });
+    }
+    doc.text(`Vendor: ${vendor.email}`, { align: 'center' });
+    doc.y += 15;
+    
+    // Calculate grand totals
+    let grandTotal = 0;
+    
+    // Process each manifest (COD and/or Prepaid)
+    for (let i = 0; i < manifestData.length; i++) {
+      const { manifest_id, payment_type, summary } = manifestData[i];
+      
+      // Determine payment type label
+      const paymentTypeLabel = payment_type === 'C' ? 'COD' : 'Prepaid';
+      
+      // Manifest section header (no emojis - they don't render properly in PDF)
+      doc.fontSize(12).font('Helvetica-Bold').fillColor('#000000');
+      doc.text(`${paymentTypeLabel.toUpperCase()} MANIFEST`, { underline: true });
+      doc.fontSize(9).font('Helvetica');
+      doc.y += 8;
+      doc.text(`Manifest ID: ${manifest_id}`);
+      doc.y += 10;
+      
+      // Table header
+      const tableTop = doc.y;
+      const colWidths = { carrier: 120, paymentType: 80, orders: 50, orderIds: 245 };
+      const startX = 50;
+      const totalWidth = colWidths.carrier + colWidths.paymentType + colWidths.orders + colWidths.orderIds;
+      
+      // Draw table header
+      doc.fontSize(10).font('Helvetica-Bold');
+      doc.rect(startX, tableTop, totalWidth, 25).fill('#3B82F6');
+      doc.fillColor('white').text('Carrier', startX + 5, tableTop + 8, { width: colWidths.carrier - 10, continued: false });
+      doc.text('Payment', startX + colWidths.carrier + 5, tableTop + 8, { width: colWidths.paymentType - 10, continued: false });
+      doc.text('Count', startX + colWidths.carrier + colWidths.paymentType + 5, tableTop + 8, { width: colWidths.orders - 10, align: 'center', continued: false });
+      doc.text('Order IDs', startX + colWidths.carrier + colWidths.paymentType + colWidths.orders + 5, tableTop + 8, { width: colWidths.orderIds - 10, continued: false });
+      
+      // Draw table rows
+      let currentY = tableTop + 25;
+      doc.fillColor('black').font('Helvetica');
+      let manifestTotal = 0;
+      
+      summary.forEach((row, index) => {
+        const bgColor = index % 2 === 0 ? '#F3F4F6' : '#FFFFFF';
+        const rowHeight = 20;
+        doc.rect(startX, currentY, totalWidth, rowHeight).fill(bgColor);
+        
+        const friendlyPaymentType = row.payment_type === 'C' ? 'COD' : 'Prepaid';
+        
+        doc.fillColor('black').fontSize(9);
+        doc.text(row.carrier_name || 'Unknown', startX + 5, currentY + 5, { width: colWidths.carrier - 10, continued: false });
+        doc.text(friendlyPaymentType, startX + colWidths.carrier + 5, currentY + 5, { width: colWidths.paymentType - 10, continued: false });
+        doc.text(row.order_count.toString(), startX + colWidths.carrier + colWidths.paymentType + 5, currentY + 5, { width: colWidths.orders - 10, align: 'center', continued: false });
+        doc.text(row.order_ids || '', startX + colWidths.carrier + colWidths.paymentType + colWidths.orders + 5, currentY + 5, { width: colWidths.orderIds - 10, continued: false });
+        
+        currentY += rowHeight;
+        manifestTotal += parseInt(row.order_count);
+      });
+      
+      // Manifest total
+      doc.rect(startX, currentY, totalWidth, 22).fill('#10B981');
+      doc.fillColor('white').font('Helvetica-Bold').fontSize(9);
+      doc.text(`Total ${paymentTypeLabel} Orders: ${manifestTotal}`, startX + 10, currentY + 6, { continued: false });
+      
+      grandTotal += manifestTotal;
+      
+      // Move Y position down after the table
+      doc.y = currentY + 30;
+      
+      // Add spacing between manifests
+      if (i < manifestData.length - 1) {
+        doc.strokeColor('#E5E7EB').lineWidth(0.5).moveTo(50, doc.y).lineTo(545, doc.y).stroke();
+        doc.y += 12;
+      }
+    }
+    
+    // Grand total (if multiple manifests)
+    if (manifestData.length > 1) {
+      doc.y += 8;
+      const grandTotalY = doc.y;
+      doc.fontSize(11).font('Helvetica-Bold').fillColor('#1F2937');
+      doc.rect(50, grandTotalY, 495, 22).fill('#FEF3C7');
+      doc.fillColor('#92400E').text(`GRAND TOTAL: ${grandTotal} Orders`, 50, grandTotalY + 5, { align: 'center' });
+      doc.y = grandTotalY + 30;
+    }
+    
+    // Footer - add at bottom without absolute positioning
+    doc.y += 15;
+    doc.fontSize(7).font('Helvetica').fillColor('#6B7280');
+    doc.text(`Report generated by ${vendor.email}`, { align: 'center' });
+    doc.text(`Generated on ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`, { align: 'center' });
+    
+    // Finalize PDF
+    doc.end();
+    
+    console.log('✅ PDF generated and sent successfully');
+
+  } catch (error) {
+    console.error('❌ DOWNLOAD MANIFEST SUMMARY ERROR:', error);
+    return res.status(500).json({ 
+      success: false, 
+      message: 'Failed to generate manifest summary', 
+      error: error.message 
     });
   }
 });

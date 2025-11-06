@@ -1090,6 +1090,62 @@ class ShipwayService {
             error: carrierError.message 
           });
         }
+
+        // Automatically populate customer_info table from orders
+        try {
+          console.log('📋 Populating customer_info table...');
+          let customerInfoCount = 0;
+          
+          // Get unique order_ids from shipway orders
+          const uniqueOrderIds = [...new Set(shipwayOrders.map(order => order.order_id))];
+          
+          for (const order of shipwayOrders) {
+            // Upsert customer info (create or update)
+            const customerData = {
+              order_id: order.order_id,
+              email: order.email || null,
+              billing_firstname: order.b_firstname || null,
+              billing_lastname: order.b_lastname || null,
+              billing_phone: order.b_phone || null,
+              billing_address: order.b_address || null,
+              billing_address2: order.b_address_2 || null,
+              billing_city: order.b_city || null,
+              billing_state: order.b_state || null,
+              billing_country: order.b_country || null,
+              billing_zipcode: order.b_zipcode || null,
+              billing_latitude: order.b_latitude || null,
+              billing_longitude: order.b_longitude || null,
+              shipping_firstname: order.s_firstname || null,
+              shipping_lastname: order.s_lastname || null,
+              shipping_phone: order.s_phone || null,
+              shipping_address: order.s_address || null,
+              shipping_address2: order.s_address_2 || null,
+              shipping_city: order.s_city || null,
+              shipping_state: order.s_state || null,
+              shipping_country: order.s_country || null,
+              shipping_zipcode: order.s_zipcode || null,
+              shipping_latitude: order.s_latitude || null,
+              shipping_longitude: order.s_longitude || null
+            };
+            
+            await database.upsertCustomerInfo(customerData);
+            customerInfoCount++;
+          }
+          
+          console.log(`✅ Customer info populated: ${customerInfoCount} new records`);
+          this.logApiActivity({ 
+            type: 'customer-info-sync', 
+            success: true,
+            customerInfoCount: customerInfoCount,
+            message: `Successfully populated ${customerInfoCount} customer info records`
+          });
+        } catch (customerInfoError) {
+          console.error('⚠️ Failed to populate customer_info:', customerInfoError.message);
+          this.logApiActivity({ 
+            type: 'customer-info-sync-error', 
+            error: customerInfoError.message 
+          });
+        }
       } else {
         this.logApiActivity({ type: 'mysql-no-change-but-flags-updated', rows: flatOrders.length });
       }
