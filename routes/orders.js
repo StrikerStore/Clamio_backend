@@ -3970,9 +3970,11 @@ router.post('/bulk-mark-ready', async (req, res) => {
         console.log(`🔍 Validating order: ${order_id}`);
         
         const orderProducts = orders.filter(order => order.order_id === order_id);
+        console.log(`TESTING ORDER PRODUCTS: ${orderProducts}`);
         const claimedProducts = orderProducts.filter(order => 
           order.claimed_by === vendor.warehouseId && order.status === 'claimed'
         );
+        console.log(`TESTING CLAIMED PRODUCTS: ${claimedProducts}`);
 
         if (claimedProducts.length === 0) {
           console.log(`❌ No products claimed by this vendor for order: ${order_id}`);
