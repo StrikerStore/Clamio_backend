@@ -2009,7 +2009,30 @@ router.post('/download-label', async (req, res) => {
       // Condition 2: Clone required - some products claimed by vendor
       console.log('🔄 CONDITION 2: Clone required - some products claimed by vendor');
       
-      const cloneResponse = await handleOrderCloning(order_id, claimedProducts, orderProducts, vendor);
+      let cloneResponse;
+      try {
+        // Try normal clone creation first
+        cloneResponse = await handleOrderCloning(order_id, claimedProducts, orderProducts, vendor);
+      } catch (firstError) {
+        // Check if error is due to clone conflict with external orders
+        if (firstError.message && firstError.message.includes('not found in Shipway')) {
+          console.log('⚠️ CLONE CONFLICT DETECTED: Clone order already exists in Shipway (created externally)');
+          console.log('🔄 RETRYING: Using suffix _99 to avoid conflict with external clones...');
+          
+          try {
+            // Retry with _99 suffix to avoid conflicts with external clones (_1, _2, etc.)
+            cloneResponse = await handleOrderCloning(order_id, claimedProducts, orderProducts, vendor, '99');
+            console.log('✅ RETRY SUCCESSFUL: Clone created with _99 suffix');
+          } catch (retryError) {
+            console.error('❌ RETRY FAILED: Could not create clone even with _99 suffix');
+            throw retryError; // Re-throw to be caught by outer catch block
+          }
+        } else {
+          // Not a clone conflict error, re-throw original error
+          throw firstError;
+        }
+      }
+      
       return res.json(cloneResponse);
       
     } else {
@@ -2068,6 +2091,7 @@ async function generateLabelForOrder(orderId, products, vendor, format = 'therma
     // Convert customer_info to originalOrder format expected by prepareShipwayRequestBody
     const originalOrder = {
       order_id: orderId,
+      store_code: customerInfo.store_code || '1', // Use dynamic store_code from database
       email: customerInfo.email,
       b_address: customerInfo.billing_address,
       b_address_2: customerInfo.billing_address2,
@@ -2403,7 +2427,7 @@ async function generateFormattedLabelPDF(shippingUrl, format) {
 /**
  * Handle order cloning (Condition 2: Clone required)
  */
-async function handleOrderCloning(originalOrderId, claimedProducts, allOrderProducts, vendor) {
+async function handleOrderCloning(originalOrderId, claimedProducts, allOrderProducts, vendor, forceCloneSuffix = null) {
   const MAX_ATTEMPTS = 5;
   let cloneOrderId;
   
@@ -2413,6 +2437,9 @@ async function handleOrderCloning(originalOrderId, claimedProducts, allOrderProd
   console.log(`  - Total products in order: ${allOrderProducts.length}`);
   console.log(`  - Products claimed by vendor: ${claimedProducts.length}`);
   console.log(`  - Vendor warehouse ID: ${vendor.warehouseId}`);
+  if (forceCloneSuffix) {
+    console.log(`  - Forced Clone Suffix: ${forceCloneSuffix} (Retry attempt to avoid conflict)`);
+  }
   
   try {
     // ============================================================================
@@ -2420,7 +2447,7 @@ async function handleOrderCloning(originalOrderId, claimedProducts, allOrderProd
     // ============================================================================
     console.log('\n📋 STEP 0: Capturing and freezing input data...');
     
-    const inputData = await prepareInputData(originalOrderId, claimedProducts, allOrderProducts, vendor);
+    const inputData = await prepareInputData(originalOrderId, claimedProducts, allOrderProducts, vendor, forceCloneSuffix);
     cloneOrderId = inputData.cloneOrderId;
     
     console.log(`✅ Input data captured and frozen:`);
@@ -2591,11 +2618,11 @@ async function retryOperation(operation, maxAttempts, stepName, inputData) {
 }
 
 // Step 0: Prepare and freeze input data
-async function prepareInputData(originalOrderId, claimedProducts, allOrderProducts, vendor) {
+async function prepareInputData(originalOrderId, claimedProducts, allOrderProducts, vendor, forceCloneSuffix = null) {
   console.log('📋 Capturing input data for clone process...');
   
   // Generate unique clone ID
-  const cloneOrderId = await generateUniqueCloneId(originalOrderId);
+  const cloneOrderId = await generateUniqueCloneId(originalOrderId, forceCloneSuffix);
   
   // Get customer info from database
   const database = require('../config/database');
@@ -2651,8 +2678,15 @@ async function prepareInputData(originalOrderId, claimedProducts, allOrderProduc
 }
 
 // Generate unique clone order ID
-async function generateUniqueCloneId(originalOrderId) {
+async function generateUniqueCloneId(originalOrderId, forceCloneSuffix = null) {
     const database = require('../config/database');
+  
+  // If forceCloneSuffix is provided, use it directly (for retry scenarios)
+  if (forceCloneSuffix) {
+    const forcedCloneOrderId = `${originalOrderId}_${forceCloneSuffix}`;
+    console.log(`  - Using forced Clone Order ID: ${forcedCloneOrderId}`);
+    return forcedCloneOrderId;
+  }
   
   // Get ALL orders from database (no filters) for clone ID checking
   let allOrders;
@@ -2946,7 +2980,7 @@ function prepareShipwayRequestBody(orderId, products, originalOrder, vendor, gen
   const baseRequestBody = {
     order_id: orderId,
     ewaybill: "",
-    store_code: "1",
+    store_code: originalOrder.store_code || "1", // Use dynamic store_code from order data
     products: shipwayProducts,
     discount: "0",
     shipping: "0",
@@ -3332,7 +3366,25 @@ router.post('/bulk-download-labels', async (req, res) => {
         } else if (claimedProducts.length > 0) {
           // Clone required - some products claimed by vendor
           console.log(`📋 BULK: Processing clone creation for ${orderId}`);
-          labelResponse = await handleOrderCloning(orderId, claimedProducts, orderProducts, vendor);
+          
+          try {
+            // Try normal clone creation first
+            labelResponse = await handleOrderCloning(orderId, claimedProducts, orderProducts, vendor);
+          } catch (cloneError) {
+            // Check if error is due to clone conflict with external orders
+            if (cloneError.message && cloneError.message.includes('not found in Shipway')) {
+              console.log(`⚠️ BULK: Clone conflict detected for ${orderId}, retrying with _99 suffix...`);
+              try {
+                // Retry with _99 suffix to avoid conflicts with external clones
+                labelResponse = await handleOrderCloning(orderId, claimedProducts, orderProducts, vendor, '99');
+                console.log(`✅ BULK: Retry successful for ${orderId} with _99 suffix`);
+              } catch (retryError) {
+                throw retryError; // Re-throw to be caught by outer catch
+              }
+            } else {
+              throw cloneError; // Re-throw if not a clone conflict
+            }
+          }
           // Note: handleOrderCloning already stores labels via markLabelAsDownloaded
         } else {
           return {
@@ -4055,7 +4107,7 @@ router.post('/bulk-mark-ready', async (req, res) => {
             try {
               const orderProducts = orders.filter(order => order.order_id === order_id);
               const claimedProducts = orderProducts.filter(order => 
-                order.claimed_by === vendor.warehouseId && order.status === 'claimed'
+                order.claimed_by === vendor.warehouseId && order.claims_status === 'claimed'
               );
 
               // Set is_manifest = 1 and manifest_id in labels table
@@ -4119,7 +4171,7 @@ router.post('/bulk-mark-ready', async (req, res) => {
             try {
               const orderProducts = orders.filter(order => order.order_id === order_id);
               const claimedProducts = orderProducts.filter(order => 
-                order.claimed_by === vendor.warehouseId && order.status === 'claimed'
+                order.claimed_by === vendor.warehouseId && order.claims_status === 'claimed'
               );
 
               // Set is_manifest = 1 and manifest_id in labels table

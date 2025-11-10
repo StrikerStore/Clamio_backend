@@ -611,8 +611,40 @@ class Database {
       
       await this.mysqlConnection.execute(createCustomerInfoTableQuery);
       console.log('✅ Customer info table created/verified');
+
+      // Add store_code column to existing customer_info table if it doesn't exist (migration)
+      await this.addStoreCodeToCustomerInfoIfNotExists();
     } catch (error) {
       console.error('❌ Error creating customer info table:', error.message);
+    }
+  }
+
+  /**
+   * Add store_code column to existing customer_info table if it doesn't exist (migration)
+   */
+  async addStoreCodeToCustomerInfoIfNotExists() {
+    if (!this.mysqlConnection) return;
+
+    try {
+      // Check if store_code column exists in customer_info table
+      const [columns] = await this.mysqlConnection.execute(
+        `SHOW COLUMNS FROM customer_info LIKE 'store_code'`
+      );
+
+      if (columns.length === 0) {
+        console.log('🔄 Adding store_code column to existing customer_info table...');
+        
+        // Add store_code column after order_id
+        await this.mysqlConnection.execute(
+          `ALTER TABLE customer_info ADD COLUMN store_code VARCHAR(10) DEFAULT '1' AFTER order_id`
+        );
+        
+        console.log('✅ store_code column added to customer_info table');
+      } else {
+        console.log('✅ store_code column already exists in customer_info table');
+      }
+    } catch (error) {
+      console.error('❌ Error adding store_code column to customer_info table:', error.message);
     }
   }
 
@@ -3385,7 +3417,7 @@ class Database {
 
     try {
       const fields = [
-        'email', 'billing_firstname', 'billing_lastname', 'billing_phone',
+        'store_code', 'email', 'billing_firstname', 'billing_lastname', 'billing_phone',
         'billing_address', 'billing_address2', 'billing_city', 'billing_state',
         'billing_country', 'billing_zipcode', 'billing_latitude', 'billing_longitude',
         'shipping_firstname', 'shipping_lastname', 'shipping_phone',
@@ -3399,6 +3431,7 @@ class Database {
 
       const values = [
         customerData.order_id,
+        customerData.store_code || '1',
         customerData.email || null,
         customerData.billing_firstname || null,
         customerData.billing_lastname || null,

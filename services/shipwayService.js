@@ -895,6 +895,7 @@ class ShipwayService {
           collectable_amount: collectableAmount,
           // Add pincode from s_zipcode, preserve existing if available
           pincode: existingClaim ? existingClaim.pincode : (order.s_zipcode || ''),
+          // Note: store_code is stored in customer_info table (order-level), not in orders table (product-level)
           // Preserve existing claim data or use defaults for new orders
           status: existingClaim ? existingClaim.status : 'unclaimed',
           claimed_by: existingClaim ? existingClaim.claimed_by : '',
@@ -1103,6 +1104,7 @@ class ShipwayService {
             // Upsert customer info (create or update)
             const customerData = {
               order_id: order.order_id,
+              store_code: order.store_code || '1',
               email: order.email || null,
               billing_firstname: order.b_firstname || null,
               billing_lastname: order.b_lastname || null,
