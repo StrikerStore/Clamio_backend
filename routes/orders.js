@@ -1901,7 +1901,8 @@ router.post('/download-label', async (req, res) => {
     // Get all products for this order_id
     const orderProducts = orders.filter(order => order.order_id === order_id);
     const claimedProducts = orderProducts.filter(order => 
-      order.claimed_by === vendor.warehouseId && order.status === 'claimed'
+      order.claimed_by === vendor.warehouseId && 
+      (order.is_handover !== 1 && order.is_handover !== '1')  // Allow download until handed over
     );
 
     console.log('📊 Order Analysis:');
@@ -3271,7 +3272,8 @@ router.post('/bulk-download-labels', async (req, res) => {
         // Get all products for this order_id
         const orderProducts = orders.filter(order => order.order_id === orderId);
         const claimedProducts = orderProducts.filter(order => 
-          order.claimed_by === vendor.warehouseId && order.status === 'claimed'
+          order.claimed_by === vendor.warehouseId && 
+          (order.is_handover !== 1 && order.is_handover !== '1')  // Allow download until handed over
         );
 
         if (claimedProducts.length === 0) {
@@ -3823,7 +3825,7 @@ router.post('/mark-ready', async (req, res) => {
     const orders = await database.getAllOrders();
     const orderProducts = orders.filter(order => order.order_id === order_id);
     const claimedProducts = orderProducts.filter(order => 
-      order.claimed_by === vendor.warehouseId && order.status === 'claimed'
+      order.claimed_by === vendor.warehouseId && order.claims_status === 'claimed'
     );
 
     if (claimedProducts.length === 0) {
@@ -3971,7 +3973,7 @@ router.post('/bulk-mark-ready', async (req, res) => {
         
         const orderProducts = orders.filter(order => order.order_id === order_id);
         const claimedProducts = orderProducts.filter(order => 
-          order.claimed_by === vendor.warehouseId && order.status === 'claimed'
+          order.claimed_by === vendor.warehouseId && order.claims_status === 'claimed'
         );
 
         if (claimedProducts.length === 0) {
