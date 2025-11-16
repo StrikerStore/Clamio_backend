@@ -10,6 +10,7 @@ A Node.js backend API for the Clamio web application with user management, authe
 - 📊 **Excel Database**: Local Excel file-based data storage
 - 🔒 **Security**: Input validation, rate limiting, CORS, and security headers
 - 📝 **Password Management**: Secure password hashing and reset functionality
+- 🛍️ **Product Monitoring**: Automated cron job to track new products added in last 24 hours
 
 ## Tech Stack
 
@@ -132,6 +133,14 @@ The server will start on `http://localhost:5000` (or the port specified in your 
 | POST | `/api/shipway/multiple-warehouses` | Get multiple warehouses |
 | GET | `/api/shipway/stats` | Get warehouse API statistics |
 
+### Product Monitoring (Admin/Superadmin)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/admin/inventory/products/new` | Check new products (last 24 hours) |
+| GET | `/api/admin/inventory/products/new/:hours` | Check new products (custom hours) |
+| GET | `/api/admin/inventory/products/updated/:hours` | Check updated products (custom hours) |
+
 ## Basic Authentication
 
 ### How Basic Auth Works
@@ -239,6 +248,61 @@ GET /api/shipway/warehouse/6430
 Authorization: Basic <superadmin-credentials>
 ```
 
+## Product Monitoring
+
+### Overview
+The system includes an automated product monitoring service that runs every 24 hours to check for new products added to the database. See [PRODUCT_MONITORING_GUIDE.md](./PRODUCT_MONITORING_GUIDE.md) for detailed documentation.
+
+### Cron Job Schedule
+- **Frequency**: Every 24 hours (Daily at 3:00 AM)
+- **Function**: Checks for products added in last 24 hours
+- **Purpose**: Track inventory changes and trigger custom actions
+
+### API Examples
+
+#### Check New Products (Last 24 Hours)
+```
+GET /api/admin/inventory/products/new
+Authorization: Basic <admin-credentials>
+```
+
+Response:
+```json
+{
+  "success": true,
+  "message": "Found 5 new product(s) in the last 24 hours",
+  "data": {
+    "count": 5,
+    "products": [...],
+    "timestamp": "2025-11-16T10:30:00.000Z"
+  }
+}
+```
+
+#### Check New Products (Custom Time Window)
+```
+GET /api/admin/inventory/products/new/6
+Authorization: Basic <admin-credentials>
+```
+
+#### Check Updated Products
+```
+GET /api/admin/inventory/products/updated/24
+Authorization: Basic <admin-credentials>
+```
+
+### Manual Testing
+```bash
+# Run test script
+node scripts/test-product-monitor.js
+
+# Check last 6 hours
+node scripts/test-product-monitor.js 6
+
+# Check updated products
+node scripts/test-product-monitor.js updated 24
+```
+
 ## Default Users
 
 The system comes with a default superadmin user:
@@ -314,7 +378,10 @@ backend/
 │   ├── users.js            # User management routes
 │   └── shipway.js          # Shipway API routes
 ├── services/
-│   └── shipwayService.js   # Shipway API service
+│   ├── shipwayService.js   # Shipway API service
+│   └── productMonitorService.js # Product monitoring service
+├── scripts/
+│   └── test-product-monitor.js # Product monitor test script
 ├── test/
 │   └── test-api.js         # API testing script
 ├── data/                   # Excel database files

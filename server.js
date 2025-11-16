@@ -576,6 +576,20 @@ app.listen(PORT, async () => {
     }
   });
 
+  // Product Monitor - Check for new products every 24 hours (daily at 3 AM)
+  const productMonitorService = require('./services/productMonitorService');
+  cron.schedule('0 3 * * *', async () => {
+    try {
+      console.log('[Product Monitor] Starting daily check for new products...');
+      const result = await productMonitorService.checkNewProducts();
+      if (result.success) {
+        console.log(`[Product Monitor] Check completed. Found ${result.count} new product(s).`);
+      }
+    } catch (err) {
+      console.error('[Product Monitor] Daily check failed:', err.message);
+    }
+  });
+
   // Run active orders tracking once immediately on startup (optional)
   (async () => {
     try {
