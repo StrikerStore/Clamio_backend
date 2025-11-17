@@ -70,6 +70,16 @@ class OrderTrackingService {
 
       console.log(`✅ [Active Tracking] Sync completed: ${successCount} success, ${errorCount} errors`);
       
+      // Validate handover/tracking logic after sync (runs hourly along with current_shipment_status update)
+      try {
+        console.log('[Handover/Tracking Validation] Running validation check after tracking sync...');
+        const validationResult = await database.validateHandoverTrackingLogic();
+        console.log(`✅ [Handover/Tracking Validation] Validation completed: ${validationResult.handoverTab} in handover, ${validationResult.trackingTab} in tracking`);
+      } catch (validationError) {
+        console.error('[Handover/Tracking Validation] Validation check failed:', validationError.message);
+        // Don't fail the entire sync if validation fails
+      }
+      
       return {
         success: true,
         message: 'Active tracking sync completed',

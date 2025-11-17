@@ -2978,7 +2978,10 @@ class Database {
         AND (c.status = 'claimed' OR c.status = 'ready_for_handover')
         AND (o.is_in_new_order = 1 OR c.label_downloaded = 1)
         AND l.is_manifest = 1
-        AND (l.handover_at IS NULL OR TIMESTAMPDIFF(HOUR, l.handover_at, NOW()) < 24)
+        AND (
+          l.handover_at IS NULL 
+          OR (l.handover_at IS NOT NULL AND TIMESTAMPDIFF(HOUR, l.handover_at, NOW()) < 24)
+        )
         ORDER BY o.order_date DESC, o.order_id
       `, [warehouseId]);
       
@@ -3914,6 +3917,95 @@ class Database {
       
     } catch (error) {
       console.error(`❌ Error updating labels table for order ${orderId}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Validate handover/tracking logic - checks which orders should be in handover vs tracking tab
+   * This is called hourly along with current_shipment_status updates
+   * @returns {Object} Summary of validation results
+   */
+  async validateHandoverTrackingLogic() {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      console.log('🔍 [Handover/Tracking Validation] Starting validation check...');
+      
+      // Get all orders with handover_at timestamp and is_manifest = 1
+      const [orders] = await this.mysqlConnection.execute(`
+        SELECT 
+          l.order_id,
+          l.handover_at,
+          l.is_manifest,
+          TIMESTAMPDIFF(HOUR, l.handover_at, NOW()) as hours_since_handover,
+          CASE 
+            WHEN l.handover_at IS NULL THEN 'handover'
+            WHEN TIMESTAMPDIFF(HOUR, l.handover_at, NOW()) < 24 THEN 'handover'
+            WHEN TIMESTAMPDIFF(HOUR, l.handover_at, NOW()) >= 24 THEN 'tracking'
+            ELSE 'unknown'
+          END as expected_tab
+        FROM labels l
+        INNER JOIN orders o ON o.order_id = l.order_id
+        INNER JOIN claims c ON o.unique_id = c.order_unique_id
+        WHERE l.is_manifest = 1
+        AND (l.handover_at IS NOT NULL OR c.status IN ('claimed', 'ready_for_handover'))
+        ORDER BY l.handover_at DESC
+      `);
+
+      const handoverOrders = orders.filter(o => o.expected_tab === 'handover');
+      const trackingOrders = orders.filter(o => o.expected_tab === 'tracking');
+      const ordersWithoutHandover = orders.filter(o => o.handover_at === null);
+
+      console.log(`📊 [Handover/Tracking Validation] Validation Summary:`);
+      console.log(`   - Total orders checked: ${orders.length}`);
+      console.log(`   - Orders in Handover tab: ${handoverOrders.length} (handover_at IS NULL or < 24 hours)`);
+      console.log(`   - Orders in Tracking tab: ${trackingOrders.length} (handover_at >= 24 hours)`);
+      console.log(`   - Orders without handover_at: ${ordersWithoutHandover.length}`);
+
+      // Log orders that are close to the 24-hour threshold (within 1 hour)
+      const nearThreshold = orders.filter(o => 
+        o.handover_at !== null && 
+        o.hours_since_handover >= 23 && 
+        o.hours_since_handover < 24
+      );
+      
+      if (nearThreshold.length > 0) {
+        console.log(`⚠️ [Handover/Tracking Validation] ${nearThreshold.length} order(s) approaching 24-hour threshold:`);
+        nearThreshold.forEach(order => {
+          console.log(`   - Order ${order.order_id}: ${order.hours_since_handover.toFixed(1)} hours since handover (will move to tracking soon)`);
+        });
+      }
+
+      // Log orders that just crossed the 24-hour threshold (within last hour)
+      const justCrossed = orders.filter(o => 
+        o.handover_at !== null && 
+        o.hours_since_handover >= 24 && 
+        o.hours_since_handover < 25
+      );
+      
+      if (justCrossed.length > 0) {
+        console.log(`🔄 [Handover/Tracking Validation] ${justCrossed.length} order(s) recently moved to tracking tab:`);
+        justCrossed.forEach(order => {
+          console.log(`   - Order ${order.order_id}: ${order.hours_since_handover.toFixed(1)} hours since handover (now in tracking)`);
+        });
+      }
+
+      return {
+        success: true,
+        totalOrders: orders.length,
+        handoverTab: handoverOrders.length,
+        trackingTab: trackingOrders.length,
+        withoutHandover: ordersWithoutHandover.length,
+        nearThreshold: nearThreshold.length,
+        justCrossed: justCrossed.length,
+        timestamp: new Date().toISOString()
+      };
+      
+    } catch (error) {
+      console.error('❌ [Handover/Tracking Validation] Validation failed:', error);
       throw error;
     }
   }
