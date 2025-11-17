@@ -294,6 +294,15 @@ class ShipwayService {
           currentPageOrders = response.data.message;
         } else if (typeof response.data === 'object' && response.data.order_id) {
           currentPageOrders = [response.data];
+        } else if (typeof response.data === 'object' && response.data.message === 'No orders found') {
+          // Handle "No orders found" response gracefully
+          currentPageOrders = [];
+          console.log(`  ℹ️ Page ${page}: No orders found, stopping pagination`);
+        } else if (typeof response.data === 'object' && !response.data.order_id && !Array.isArray(response.data.orders) && !Array.isArray(response.data.message)) {
+          // Handle empty/unexpected response - treat as no orders instead of erroring
+          this.logApiActivity({ type: 'shipway-empty-or-unexpected-format', data: response.data });
+          currentPageOrders = [];
+          console.log(`  ⚠️ Page ${page}: Empty or unexpected response, treating as no orders - stopping pagination`);
         } else {
           this.logApiActivity({ type: 'shipway-unexpected-format', data: response.data });
           throw new Error('Unexpected Shipway API response format');
@@ -304,8 +313,11 @@ class ShipwayService {
         // Add orders from this page to our collection
         allOrders = allOrders.concat(currentPageOrders);
         
-        // If we got fewer than 100 orders, we've reached the last page
-        if (currentPageOrders.length < 100) {
+        // If we got 0 orders or fewer than 100 orders, we've reached the last page
+        if (currentPageOrders.length === 0) {
+          hasMorePages = false;
+          console.log(`  🏁 Last page reached (0 orders found, no more data)`);
+        } else if (currentPageOrders.length < 100) {
           hasMorePages = false;
           console.log(`  🏁 Last page reached (${currentPageOrders.length} < 100 orders)`);
         } else {
@@ -640,6 +652,15 @@ class ShipwayService {
           currentPageOrders = response.data.message;
         } else if (typeof response.data === 'object' && response.data.order_id) {
           currentPageOrders = [response.data];
+        } else if (typeof response.data === 'object' && response.data.message === 'No orders found') {
+          // Handle "No orders found" response gracefully
+          currentPageOrders = [];
+          console.log(`  ℹ️ Page ${page}: No orders found, stopping pagination`);
+        } else if (typeof response.data === 'object' && !response.data.order_id && !Array.isArray(response.data.orders) && !Array.isArray(response.data.message)) {
+          // Handle empty/unexpected response - treat as no orders instead of erroring
+          this.logApiActivity({ type: 'shipway-empty-or-unexpected-format', data: response.data });
+          currentPageOrders = [];
+          console.log(`  ⚠️ Page ${page}: Empty or unexpected response, treating as no orders - stopping pagination`);
         } else {
           this.logApiActivity({ type: 'shipway-unexpected-format', data: response.data });
           throw new Error('Unexpected Shipway API response format');
@@ -650,8 +671,11 @@ class ShipwayService {
         // Add orders from this page to our collection
         allOrders = allOrders.concat(currentPageOrders);
         
-        // If we got fewer than 100 orders, we've reached the last page
-        if (currentPageOrders.length < 100) {
+        // If we got 0 orders or fewer than 100 orders, we've reached the last page
+        if (currentPageOrders.length === 0) {
+          hasMorePages = false;
+          console.log(`  🏁 Last page reached (0 orders found, no more data)`);
+        } else if (currentPageOrders.length < 100) {
           hasMorePages = false;
           console.log(`  🏁 Last page reached (${currentPageOrders.length} < 100 orders)`);
         } else {
@@ -1221,6 +1245,15 @@ class ShipwayService {
           currentPageOrders = response.data.message;
         } else if (typeof response.data === 'object' && response.data.order_id) {
           currentPageOrders = [response.data];
+        } else if (typeof response.data === 'object' && response.data.message === 'No orders found') {
+          // Handle "No orders found" response gracefully
+          currentPageOrders = [];
+          console.log(`  ℹ️ Page ${page}: No orders found, stopping pagination`);
+        } else if (typeof response.data === 'object' && !response.data.order_id && !Array.isArray(response.data.orders) && !Array.isArray(response.data.message)) {
+          // Handle empty/unexpected response - treat as no orders instead of erroring
+          this.logApiActivity({ type: 'shipway-empty-or-unexpected-format', data: response.data });
+          currentPageOrders = [];
+          console.log(`  ⚠️ Page ${page}: Empty or unexpected response, treating as no orders - stopping pagination`);
         } else {
           throw new Error('Unexpected Shipway API response format');
         }
@@ -1230,8 +1263,11 @@ class ShipwayService {
         // Add orders from this page to our collection
         allOrders = allOrders.concat(currentPageOrders);
         
-        // If we got fewer than 100 orders, we've reached the last page
-        if (currentPageOrders.length < 100) {
+        // If we got 0 orders or fewer than 100 orders, we've reached the last page
+        if (currentPageOrders.length === 0) {
+          hasMorePages = false;
+          console.log(`  🏁 Last page reached (0 orders found, no more data)`);
+        } else if (currentPageOrders.length < 100) {
           hasMorePages = false;
           console.log(`  🏁 Last page reached (${currentPageOrders.length} < 100 orders)`);
         } else {
