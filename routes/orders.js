@@ -958,11 +958,6 @@ router.get('/order-tracking', async (req, res) => {
   console.log('📥 Request URL:', req.url);
   console.log('📥 Request IP:', req.ip);
   
-  // Extract pagination parameters
-  const page = parseInt(req.query.page) || 1;
-  const limit = parseInt(req.query.limit) || 50;
-  console.log('📄 Pagination params:', { page, limit });
-  
   let token = req.headers['authorization'];
   console.log('\n🔑 TOKEN ANALYSIS:');
   console.log('  - Raw token:', token);
@@ -1103,23 +1098,12 @@ router.get('/order-tracking', async (req, res) => {
     }
     
     const totalCount = groupedOrdersArray.length;
-    const startIndex = (page - 1) * limit;
-    const endIndex = startIndex + limit;
-    const paginatedOrders = groupedOrdersArray.slice(startIndex, endIndex);
     
     const responseData = {
       success: true,
       message: 'Order Tracking Orders retrieved successfully',
       data: {
-        trackingOrders: paginatedOrders,
-        pagination: {
-          current_page: page,
-          total_pages: Math.ceil(totalCount / limit),
-          total_count: totalCount,
-          limit: limit,
-          has_next: endIndex < totalCount,
-          has_prev: page > 1
-        },
+        trackingOrders: groupedOrdersArray,
         summary: {
           total_orders: totalCount,
           total_products: groupedOrdersArray.reduce((sum, order) => sum + order.total_products, 0),
