@@ -413,11 +413,20 @@ router.post('/claim', async (req, res) => {
     // Get order from MySQL
     console.log('📂 Loading order from MySQL...');
     console.log('🔍 Looking for unique_id:', unique_id);
+    console.log('🔍 Request body details:', {
+      unique_id,
+      quantity_to_claim,
+      has_quantity_param: quantity_to_claim !== undefined
+    });
     
     const order = await database.getOrderByUniqueId(unique_id);
     
     if (!order) {
-      console.log('❌ ORDER NOT FOUND');
+      console.log('❌ ORDER NOT FOUND IN DATABASE');
+      console.log('  - Searched for unique_id:', unique_id);
+      console.log('  - Make sure the unique_id exists in the orders table');
+      console.log('  - Note: If frontend sent a modified unique_id (e.g., with _unit_1 suffix),');
+      console.log('         it should have been converted to original_unique_id before sending');
       return res.status(404).json({ success: false, message: 'Order row not found' });
     }
     
