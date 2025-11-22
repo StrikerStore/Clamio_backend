@@ -52,6 +52,7 @@ class Database {
       });
       
       console.log('✅ MySQL connection established with IST timezone (+05:30)');
+      await this.createUtilityTable();
       await this.createCarriersTable();
       await this.createProductsTable();
       await this.createUsersTable();
@@ -67,6 +68,45 @@ class Database {
       this.mysqlConnection = null;
       this.mysqlInitialized = true; // Mark as initialized even if failed
       throw new Error(`Database initialization failed: ${error.message}`);
+    }
+  }
+
+  /**
+   * Create utility table if it doesn't exist
+   * This table stores configurable system parameters
+   */
+  async createUtilityTable() {
+    if (!this.mysqlConnection) return;
+
+    try {
+      const createTableQuery = `
+        CREATE TABLE IF NOT EXISTS utility (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          parameter VARCHAR(255) UNIQUE NOT NULL,
+          value TEXT NOT NULL,
+          created_by VARCHAR(255) DEFAULT 'system',
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          modified_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          INDEX idx_parameter (parameter)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+      `;
+      
+      await this.mysqlConnection.execute(createTableQuery);
+      console.log('✅ Utility table created/verified');
+
+      // Insert default value for number_of_day_of_order_include if it doesn't exist
+      try {
+        await this.mysqlConnection.execute(`
+          INSERT INTO utility (parameter, value, created_by, created_at, modified_at)
+          VALUES ('number_of_day_of_order_include', '60', 'system', NOW(), NOW())
+          ON DUPLICATE KEY UPDATE parameter = parameter
+        `);
+        console.log('✅ Default utility parameter set: number_of_day_of_order_include = 60 days');
+      } catch (error) {
+        console.error('❌ Error setting default utility parameter:', error.message);
+      }
+    } catch (error) {
+      console.error('❌ Error creating utility table:', error.message);
     }
   }
 
@@ -113,7 +153,9 @@ class Database {
           image VARCHAR(500),
           altText TEXT,
           totalImages INTEGER DEFAULT 0,
-          sku_id VARCHAR(100)
+          sku_id VARCHAR(100),
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `;
       
@@ -133,6 +175,36 @@ class Database {
           console.log('ℹ️ sku_id column already exists in products table');
         } else {
           console.error('❌ Error adding sku_id column to products table:', error.message);
+        }
+      }
+
+      // Add created_at column if it doesn't exist
+      try {
+        await this.mysqlConnection.execute(`
+          ALTER TABLE products 
+          ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        `);
+        console.log('✅ Added created_at column to products table');
+      } catch (error) {
+        if (error.code === 'ER_DUP_FIELDNAME') {
+          console.log('ℹ️ created_at column already exists in products table');
+        } else {
+          console.error('❌ Error adding created_at column to products table:', error.message);
+        }
+      }
+
+      // Add updated_at column if it doesn't exist
+      try {
+        await this.mysqlConnection.execute(`
+          ALTER TABLE products 
+          ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        `);
+        console.log('✅ Added updated_at column to products table');
+      } catch (error) {
+        if (error.code === 'ER_DUP_FIELDNAME') {
+          console.log('ℹ️ updated_at column already exists in products table');
+        } else {
+          console.error('❌ Error adding updated_at column to products table:', error.message);
         }
       }
     } catch (error) {
@@ -263,7 +335,7 @@ class Database {
 
       const createTableQuery = `
         CREATE TABLE IF NOT EXISTS orders (
-          id VARCHAR(50) PRIMARY KEY,
+          id VARCHAR(255) PRIMARY KEY,
           unique_id VARCHAR(100) UNIQUE,
           order_id VARCHAR(100),
           customer_name VARCHAR(255),
@@ -296,11 +368,17 @@ class Database {
       // Add size column to existing tables if it doesn't exist (migration)
       await this.addSizeColumnIfNotExists();
 
+      // Increase id column size if needed (migration)
+      await this.increaseIdColumnSizeIfNeeded();
+
       // Create labels table for caching label URLs
       await this.createLabelsTable();
 
       // Create order tracking table for shipment tracking
       await this.createOrderTrackingTable();
+
+      // Create customer info table for storing customer details
+      await this.createCustomerInfoTable();
     } catch (error) {
       console.error('❌ Error creating orders table:', error.message);
     }
@@ -340,6 +418,45 @@ class Database {
       }
     } catch (error) {
       console.error('❌ Error adding size column:', error.message);
+    }
+  }
+
+  /**
+   * Increase id column size if it's too small (migration)
+   */
+  async increaseIdColumnSizeIfNeeded() {
+    if (!this.mysqlConnection) return;
+
+    try {
+      // Check current id column size
+      const [columns] = await this.mysqlConnection.execute(
+        `SHOW COLUMNS FROM orders WHERE Field = 'id'`
+      );
+
+      if (columns.length > 0) {
+        const idColumn = columns[0];
+        const currentType = idColumn.Type.toUpperCase();
+        
+        // Check if it's VARCHAR(50) or smaller
+        const match = currentType.match(/VARCHAR\((\d+)\)/);
+        if (match) {
+          const currentSize = parseInt(match[1]);
+          if (currentSize < 255) {
+            console.log(`🔄 Increasing id column size from VARCHAR(${currentSize}) to VARCHAR(255)...`);
+            
+            // Note: Don't specify PRIMARY KEY here - MySQL preserves it when modifying the column
+            await this.mysqlConnection.execute(
+              `ALTER TABLE orders MODIFY COLUMN id VARCHAR(255)`
+            );
+            
+            console.log('✅ id column size increased to VARCHAR(255)');
+          } else {
+            console.log(`✅ id column size is already VARCHAR(${currentSize})`);
+          }
+        }
+      }
+    } catch (error) {
+      console.error('❌ Error increasing id column size:', error.message);
     }
   }
 
@@ -398,13 +515,15 @@ class Database {
           is_manifest TINYINT(1) DEFAULT 0,
           is_handover TINYINT(1) DEFAULT 0,
           current_shipment_status VARCHAR(100) NULL,
+          manifest_id VARCHAR(100) NULL,
           INDEX idx_order_id (order_id),
           INDEX idx_awb (awb),
           INDEX idx_carrier_id (carrier_id),
           INDEX idx_priority_carrier (priority_carrier),
           INDEX idx_is_manifest (is_manifest),
           INDEX idx_is_handover (is_handover),
-          INDEX idx_current_shipment_status (current_shipment_status)
+          INDEX idx_current_shipment_status (current_shipment_status),
+          INDEX idx_manifest_id (manifest_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `;
       
@@ -459,6 +578,22 @@ class Database {
           console.error('❌ Error adding current_shipment_status column to labels table:', error.message);
         }
       }
+
+      // Add manifest_id column if it doesn't exist (for existing tables)
+      try {
+        await this.mysqlConnection.execute(`
+          ALTER TABLE labels 
+          ADD COLUMN manifest_id VARCHAR(100) NULL,
+          ADD INDEX idx_manifest_id (manifest_id)
+        `);
+        console.log('✅ Added manifest_id column to labels table');
+      } catch (error) {
+        if (error.code === 'ER_DUP_FIELDNAME') {
+          console.log('ℹ️ manifest_id column already exists in labels table');
+        } else {
+          console.error('❌ Error adding manifest_id column to labels table:', error.message);
+        }
+      }
       
       } catch (error) {
       console.error('❌ Error creating labels table:', error.message);
@@ -499,6 +634,89 @@ class Database {
       console.log('✅ Order tracking table created/verified');
     } catch (error) {
       console.error('❌ Error creating order tracking table:', error.message);
+    }
+  }
+
+  /**
+   * Create customer info table for storing customer contact details
+   */
+  async createCustomerInfoTable() {
+    if (!this.mysqlConnection) return;
+
+    try {
+      console.log('🔄 Creating customer_info table...');
+
+      const createCustomerInfoTableQuery = `
+        CREATE TABLE IF NOT EXISTS customer_info (
+          order_id VARCHAR(100) PRIMARY KEY,
+          email VARCHAR(255),
+          billing_firstname VARCHAR(100),
+          billing_lastname VARCHAR(100),
+          billing_phone VARCHAR(20),
+          billing_address TEXT,
+          billing_address2 TEXT,
+          billing_city VARCHAR(100),
+          billing_state VARCHAR(100),
+          billing_country VARCHAR(10),
+          billing_zipcode VARCHAR(20),
+          billing_latitude VARCHAR(20),
+          billing_longitude VARCHAR(20),
+          shipping_firstname VARCHAR(100),
+          shipping_lastname VARCHAR(100),
+          shipping_phone VARCHAR(20),
+          shipping_address TEXT,
+          shipping_address2 TEXT,
+          shipping_city VARCHAR(100),
+          shipping_state VARCHAR(100),
+          shipping_country VARCHAR(10),
+          shipping_zipcode VARCHAR(20),
+          shipping_latitude VARCHAR(20),
+          shipping_longitude VARCHAR(20),
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          
+          INDEX idx_email (email),
+          INDEX idx_billing_zipcode (billing_zipcode),
+          INDEX idx_shipping_zipcode (shipping_zipcode)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+      `;
+      
+      await this.mysqlConnection.execute(createCustomerInfoTableQuery);
+      console.log('✅ Customer info table created/verified');
+
+      // Add store_code column to existing customer_info table if it doesn't exist (migration)
+      await this.addStoreCodeToCustomerInfoIfNotExists();
+    } catch (error) {
+      console.error('❌ Error creating customer info table:', error.message);
+    }
+  }
+
+  /**
+   * Add store_code column to existing customer_info table if it doesn't exist (migration)
+   */
+  async addStoreCodeToCustomerInfoIfNotExists() {
+    if (!this.mysqlConnection) return;
+
+    try {
+      // Check if store_code column exists in customer_info table
+      const [columns] = await this.mysqlConnection.execute(
+        `SHOW COLUMNS FROM customer_info LIKE 'store_code'`
+      );
+
+      if (columns.length === 0) {
+        console.log('🔄 Adding store_code column to existing customer_info table...');
+        
+        // Add store_code column after order_id
+        await this.mysqlConnection.execute(
+          `ALTER TABLE customer_info ADD COLUMN store_code VARCHAR(10) DEFAULT '1' AFTER order_id`
+        );
+        
+        console.log('✅ store_code column added to customer_info table');
+      } else {
+        console.log('✅ store_code column already exists in customer_info table');
+      }
+    } catch (error) {
+      console.error('❌ Error adding store_code column to customer_info table:', error.message);
     }
   }
 
@@ -2315,15 +2533,16 @@ class Database {
         [
           orderData.order_id || null,
           orderData.handover_at || null,
-          orderData.priority_carrier || null,
-          orderData.is_in_new_order !== undefined ? orderData.is_in_new_order : true
+          orderData.priority_carrier || null
         ]
       );
 
       return await this.getOrderByUniqueId(orderData.unique_id);
     } catch (error) {
       console.error('Error creating order:', error);
-      throw new Error('Failed to create order');
+      // Include the actual error message for better debugging
+      const errorMessage = error.message || 'Unknown error';
+      throw new Error(`Failed to create order: ${errorMessage}`);
     }
   }
 
@@ -2550,6 +2769,7 @@ class Database {
           l.handover_at,
           c.priority_carrier,
           l.is_manifest,
+          l.manifest_id,
           l.current_shipment_status,
           l.is_handover,
           CASE 
@@ -2565,7 +2785,7 @@ class Database {
         )
         LEFT JOIN claims c ON o.unique_id = c.order_unique_id
         LEFT JOIN labels l ON o.order_id = l.order_id
-        WHERE (o.is_in_new_order = 1 OR c.label_downloaded = 1) 
+        WHERE (o.is_in_new_order = 1 OR c.label_downloaded = 1 OR (c.status = 'unclaimed' AND c.status IS NOT NULL)) 
         ORDER BY o.order_date DESC, o.order_id, o.product_name
       `);
       
@@ -2684,6 +2904,194 @@ class Database {
     } catch (error) {
       console.error('Error getting vendor orders:', error);
       throw new Error('Failed to get vendor orders from database');
+    }
+  }
+
+  /**
+   * Get My Orders (orders that are claimed but not yet manifested)
+   * @param {string} warehouseId - Vendor warehouse ID
+   * @returns {Array} Array of individual orders for My Orders section
+   */
+  async getMyOrders(warehouseId) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      const [rows] = await this.mysqlConnection.execute(`
+        SELECT 
+          o.*,
+          p.image as product_image,
+          c.status as claims_status,
+          c.claimed_by,
+          c.claimed_at,
+          c.last_claimed_by,
+          c.last_claimed_at,
+          c.clone_status,
+          c.cloned_order_id,
+          c.is_cloned_row,
+          c.label_downloaded,
+          l.label_url,
+          l.awb,
+          l.carrier_id,
+          l.carrier_name,
+          l.handover_at,
+          c.priority_carrier,
+          l.is_manifest,
+          l.current_shipment_status,
+          l.is_handover,
+          CASE 
+            WHEN l.current_shipment_status IS NOT NULL AND l.current_shipment_status != '' 
+            THEN l.current_shipment_status 
+            ELSE c.status 
+          END as status
+        FROM orders o
+        LEFT JOIN products p ON (
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id
+        )
+        LEFT JOIN claims c ON o.unique_id = c.order_unique_id
+        LEFT JOIN labels l ON o.order_id = l.order_id
+        WHERE c.claimed_by = ? 
+        AND (c.status = 'claimed' OR c.status = 'ready_for_handover')
+        AND (o.is_in_new_order = 1 OR c.label_downloaded = 1)
+        AND (l.is_manifest IS NULL OR l.is_manifest = 0)
+        ORDER BY o.order_date DESC, o.order_id
+      `, [warehouseId]);
+      
+      return rows;
+    } catch (error) {
+      console.error('Error getting My Orders:', error);
+      throw new Error('Failed to get My Orders from database');
+    }
+  }
+
+  /**
+   * Get Handover Orders (orders that have been manifested within last 24 hours)
+   * @param {string} warehouseId - Vendor warehouse ID
+   * @returns {Array} Array of individual orders for Handover section (< 24 hrs from handover_at)
+   */
+  async getHandoverOrders(warehouseId) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      const [rows] = await this.mysqlConnection.execute(`
+        SELECT 
+          o.*,
+          p.image as product_image,
+          c.status as claims_status,
+          c.claimed_by,
+          c.claimed_at,
+          c.last_claimed_by,
+          c.last_claimed_at,
+          c.clone_status,
+          c.cloned_order_id,
+          c.is_cloned_row,
+          c.label_downloaded,
+          l.label_url,
+          l.awb,
+          l.carrier_id,
+          l.carrier_name,
+          l.handover_at,
+          c.priority_carrier,
+          l.is_manifest,
+          l.manifest_id,
+          l.current_shipment_status,
+          l.is_handover,
+          CASE 
+            WHEN l.current_shipment_status IS NOT NULL AND l.current_shipment_status != '' 
+            THEN l.current_shipment_status 
+            ELSE c.status 
+          END as status
+        FROM orders o
+        LEFT JOIN products p ON (
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id
+        )
+        LEFT JOIN claims c ON o.unique_id = c.order_unique_id
+        LEFT JOIN labels l ON o.order_id = l.order_id
+        WHERE c.claimed_by = ? 
+        AND (c.status = 'claimed' OR c.status = 'ready_for_handover')
+        AND (o.is_in_new_order = 1 OR c.label_downloaded = 1)
+        AND l.is_manifest = 1
+        AND (
+          l.handover_at IS NULL 
+          OR (l.handover_at IS NOT NULL AND TIMESTAMPDIFF(HOUR, l.handover_at, NOW()) < 24)
+        )
+        ORDER BY o.order_date DESC, o.order_id
+      `, [warehouseId]);
+      
+      return rows;
+    } catch (error) {
+      console.error('Error getting Handover Orders:', error);
+      throw new Error('Failed to get Handover Orders from database');
+    }
+  }
+
+  /**
+   * Get Order Tracking Orders (orders that have been in handover for 24+ hours)
+   * @param {string} warehouseId - Vendor warehouse ID
+   * @returns {Array} Array of individual orders for Order Tracking section (>= 24 hrs from handover_at)
+   */
+  async getOrderTrackingOrders(warehouseId) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      const [rows] = await this.mysqlConnection.execute(`
+        SELECT 
+          o.*,
+          p.image as product_image,
+          c.status as claims_status,
+          c.claimed_by,
+          c.claimed_at,
+          c.last_claimed_by,
+          c.last_claimed_at,
+          c.clone_status,
+          c.cloned_order_id,
+          c.is_cloned_row,
+          c.label_downloaded,
+          l.label_url,
+          l.awb,
+          l.carrier_id,
+          l.carrier_name,
+          l.handover_at,
+          c.priority_carrier,
+          l.is_manifest,
+          l.manifest_id,
+          l.current_shipment_status,
+          l.is_handover,
+          CASE 
+            WHEN l.current_shipment_status IS NOT NULL AND l.current_shipment_status != '' 
+            THEN l.current_shipment_status 
+            ELSE c.status 
+          END as status
+        FROM orders o
+        LEFT JOIN products p ON (
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id
+        )
+        LEFT JOIN claims c ON o.unique_id = c.order_unique_id
+        LEFT JOIN labels l ON o.order_id = l.order_id
+        WHERE c.claimed_by = ? 
+        AND (c.status = 'claimed' OR c.status = 'ready_for_handover')
+        AND (o.is_in_new_order = 1 OR c.label_downloaded = 1)
+        AND l.is_manifest = 1
+        AND l.handover_at IS NOT NULL
+        AND TIMESTAMPDIFF(HOUR, l.handover_at, NOW()) >= 24
+        ORDER BY o.order_date DESC, o.order_id
+      `, [warehouseId]);
+      
+      return rows;
+    } catch (error) {
+      console.error('Error getting Order Tracking Orders:', error);
+      throw new Error('Failed to get Order Tracking Orders from database');
     }
   }
 
@@ -3046,6 +3454,10 @@ class Database {
         updateFields.push('is_manifest = ?');
         updateValues.push(labelData.is_manifest || 0);
       }
+      if (labelData.hasOwnProperty('manifest_id')) {
+        updateFields.push('manifest_id = ?');
+        updateValues.push(labelData.manifest_id || null);
+      }
       
       // Always add updated_at
       updateFields.push('updated_at = CURRENT_TIMESTAMP');
@@ -3053,8 +3465,8 @@ class Database {
       const updateClause = updateFields.join(', ');
       
       const [result] = await this.mysqlConnection.execute(
-        `INSERT INTO labels (order_id, label_url, awb, carrier_id, carrier_name, priority_carrier, is_manifest) 
-         VALUES (?, ?, ?, ?, ?, ?, ?) 
+        `INSERT INTO labels (order_id, label_url, awb, carrier_id, carrier_name, priority_carrier, is_manifest, manifest_id) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?) 
          ON DUPLICATE KEY UPDATE ${updateClause}`,
         [
           labelData.order_id,
@@ -3064,6 +3476,7 @@ class Database {
           labelData.carrier_name || null,
           labelData.priority_carrier || null,
           labelData.is_manifest || 0,
+          labelData.manifest_id || null,
           ...updateValues
         ]
       );
@@ -3102,6 +3515,137 @@ class Database {
     } catch (error) {
       console.error('Error getting all labels:', error);
       throw new Error('Failed to get labels from database');
+    }
+  }
+
+  // ========================================
+  // Customer Info Methods
+  // ========================================
+
+  /**
+   * Get customer info by order ID
+   * @param {string} orderId - Order ID
+   * @returns {Object|null} Customer info or null if not found
+   */
+  async getCustomerInfoByOrderId(orderId) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      const [rows] = await this.mysqlConnection.execute(
+        'SELECT * FROM customer_info WHERE order_id = ?',
+        [orderId]
+      );
+      return rows.length > 0 ? rows[0] : null;
+    } catch (error) {
+      console.error('Error getting customer info by order ID:', error);
+      throw new Error('Failed to get customer info from database');
+    }
+  }
+
+  /**
+   * Create or update customer info
+   * @param {Object} customerData - Customer data
+   * @returns {Object} Created/updated customer info
+   */
+  async upsertCustomerInfo(customerData) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      const fields = [
+        'store_code', 'email', 'billing_firstname', 'billing_lastname', 'billing_phone',
+        'billing_address', 'billing_address2', 'billing_city', 'billing_state',
+        'billing_country', 'billing_zipcode', 'billing_latitude', 'billing_longitude',
+        'shipping_firstname', 'shipping_lastname', 'shipping_phone',
+        'shipping_address', 'shipping_address2', 'shipping_city', 'shipping_state',
+        'shipping_country', 'shipping_zipcode', 'shipping_latitude', 'shipping_longitude'
+      ];
+
+      const updateClauses = fields.map(field => `${field} = VALUES(${field})`).join(', ');
+      const fieldNames = ['order_id', ...fields].join(', ');
+      const placeholders = ['order_id', ...fields].map(() => '?').join(', ');
+
+      const values = [
+        customerData.order_id,
+        customerData.store_code || '1',
+        customerData.email || null,
+        customerData.billing_firstname || null,
+        customerData.billing_lastname || null,
+        customerData.billing_phone || null,
+        customerData.billing_address || null,
+        customerData.billing_address2 || null,
+        customerData.billing_city || null,
+        customerData.billing_state || null,
+        customerData.billing_country || null,
+        customerData.billing_zipcode || null,
+        customerData.billing_latitude || null,
+        customerData.billing_longitude || null,
+        customerData.shipping_firstname || null,
+        customerData.shipping_lastname || null,
+        customerData.shipping_phone || null,
+        customerData.shipping_address || null,
+        customerData.shipping_address2 || null,
+        customerData.shipping_city || null,
+        customerData.shipping_state || null,
+        customerData.shipping_country || null,
+        customerData.shipping_zipcode || null,
+        customerData.shipping_latitude || null,
+        customerData.shipping_longitude || null
+      ];
+
+      await this.mysqlConnection.execute(
+        `INSERT INTO customer_info (${fieldNames}) VALUES (${placeholders})
+         ON DUPLICATE KEY UPDATE ${updateClauses}`,
+        values
+      );
+
+      return await this.getCustomerInfoByOrderId(customerData.order_id);
+    } catch (error) {
+      console.error('Error creating/updating customer info:', error);
+      throw new Error('Failed to save customer info to database');
+    }
+  }
+
+  /**
+   * Copy customer info from one order to another (for clones)
+   * @param {string} sourceOrderId - Source order ID
+   * @param {string} targetOrderId - Target order ID (clone)
+   * @returns {Object} Copied customer info
+   */
+  async copyCustomerInfo(sourceOrderId, targetOrderId) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      // Get source customer info
+      const sourceCustomer = await this.getCustomerInfoByOrderId(sourceOrderId);
+      
+      if (!sourceCustomer) {
+        throw new Error(`Customer info not found for order ${sourceOrderId}`);
+      }
+
+      // Create new customer info with target order_id
+      const targetCustomer = {
+        ...sourceCustomer,
+        order_id: targetOrderId
+      };
+
+      // Remove timestamps to let database generate new ones
+      delete targetCustomer.created_at;
+      delete targetCustomer.updated_at;
+
+      // Insert the copied customer info
+      await this.upsertCustomerInfo(targetCustomer);
+
+      console.log(`✅ Copied customer info from ${sourceOrderId} to ${targetOrderId}`);
+      return await this.getCustomerInfoByOrderId(targetOrderId);
+    } catch (error) {
+      console.error('Error copying customer info:', error);
+      throw new Error(`Failed to copy customer info: ${error.message}`);
     }
   }
 
@@ -3350,8 +3894,9 @@ class Database {
    * @param {string} orderId - The order ID
    * @param {string} currentStatus - Current shipment status
    * @param {boolean} isHandover - Whether this order is handed over
+   * @param {string|null} handoverTimestamp - Timestamp when order became "In Transit" (from tracking API)
    */
-  async updateLabelsShipmentStatus(orderId, currentStatus, isHandover = false) {
+  async updateLabelsShipmentStatus(orderId, currentStatus, isHandover = false, handoverTimestamp = null) {
     if (!this.mysqlConnection) {
       throw new Error('MySQL connection not available');
     }
@@ -3359,7 +3904,7 @@ class Database {
     try {
       // Check if label exists for this order
       const [existingLabels] = await this.mysqlConnection.execute(
-        'SELECT id, is_handover FROM labels WHERE order_id = ?',
+        'SELECT id, is_handover, handover_at FROM labels WHERE order_id = ?',
         [orderId]
       );
 
@@ -3369,6 +3914,7 @@ class Database {
       }
 
       const currentHandoverStatus = existingLabels[0].is_handover;
+      const existingHandoverAt = existingLabels[0].handover_at;
 
       // Update current_shipment_status and potentially is_handover
       let updateQuery = `
@@ -3383,7 +3929,23 @@ class Database {
       if (isHandover && currentHandoverStatus === 0) {
         updateQuery += `, is_handover = 1`;
         handoverJustSet = true;
-        console.log(`🚚 Setting is_handover = 1 for order ${orderId} (status: ${currentStatus})`);
+        
+        // Set handover_at timestamp ONLY if it doesn't already exist (first "In Transit" event)
+        if (!existingHandoverAt) {
+          if (handoverTimestamp) {
+            updateQuery += `, handover_at = ?`;
+            queryParams.push(handoverTimestamp);
+            console.log(`🚚 Setting is_handover = 1 and handover_at = ${handoverTimestamp} for order ${orderId}`);
+          } else {
+            // If no timestamp provided, use current time
+            updateQuery += `, handover_at = NOW()`;
+            console.log(`🚚 Setting is_handover = 1 and handover_at = NOW() for order ${orderId}`);
+          }
+        } else {
+          console.log(`🚚 Order ${orderId} already has handover_at = ${existingHandoverAt}, preserving original timestamp`);
+        }
+        
+        console.log(`🚚 Order ${orderId} status changed to In Transit (handed over)`);
       }
 
       updateQuery += ` WHERE order_id = ?`;
@@ -3393,23 +3955,97 @@ class Database {
       
       console.log(`✅ Updated labels table for order ${orderId}: status=${currentStatus}, handover=${isHandover ? '1' : 'unchanged'}`);
       
-      // If we just set is_handover = 1, trigger auto-manifest check
-      if (handoverJustSet) {
-        console.log(`🔄 [Auto-Manifest] Order ${orderId} just became handed over, checking if auto-manifest is needed...`);
-        
-        // Import auto-manifest service and trigger it asynchronously
-        setImmediate(async () => {
-          try {
-            const autoManifestService = require('../services/autoManifestService');
-            await autoManifestService.processAutoManifest();
-          } catch (error) {
-            console.error('❌ [Auto-Manifest] Error in auto-manifest process:', error.message);
-          }
-        });
-      }
-      
     } catch (error) {
       console.error(`❌ Error updating labels table for order ${orderId}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Validate handover/tracking logic - checks which orders should be in handover vs tracking tab
+   * This is called hourly along with current_shipment_status updates
+   * @returns {Object} Summary of validation results
+   */
+  async validateHandoverTrackingLogic() {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      console.log('🔍 [Handover/Tracking Validation] Starting validation check...');
+      
+      // Get all orders with handover_at timestamp and is_manifest = 1
+      const [orders] = await this.mysqlConnection.execute(`
+        SELECT 
+          l.order_id,
+          l.handover_at,
+          l.is_manifest,
+          TIMESTAMPDIFF(HOUR, l.handover_at, NOW()) as hours_since_handover,
+          CASE 
+            WHEN l.handover_at IS NULL THEN 'handover'
+            WHEN TIMESTAMPDIFF(HOUR, l.handover_at, NOW()) < 24 THEN 'handover'
+            WHEN TIMESTAMPDIFF(HOUR, l.handover_at, NOW()) >= 24 THEN 'tracking'
+            ELSE 'unknown'
+          END as expected_tab
+        FROM labels l
+        INNER JOIN orders o ON o.order_id = l.order_id
+        INNER JOIN claims c ON o.unique_id = c.order_unique_id
+        WHERE l.is_manifest = 1
+        AND (l.handover_at IS NOT NULL OR c.status IN ('claimed', 'ready_for_handover'))
+        ORDER BY l.handover_at DESC
+      `);
+
+      const handoverOrders = orders.filter(o => o.expected_tab === 'handover');
+      const trackingOrders = orders.filter(o => o.expected_tab === 'tracking');
+      const ordersWithoutHandover = orders.filter(o => o.handover_at === null);
+
+      console.log(`📊 [Handover/Tracking Validation] Validation Summary:`);
+      console.log(`   - Total orders checked: ${orders.length}`);
+      console.log(`   - Orders in Handover tab: ${handoverOrders.length} (handover_at IS NULL or < 24 hours)`);
+      console.log(`   - Orders in Tracking tab: ${trackingOrders.length} (handover_at >= 24 hours)`);
+      console.log(`   - Orders without handover_at: ${ordersWithoutHandover.length}`);
+
+      // Log orders that are close to the 24-hour threshold (within 1 hour)
+      const nearThreshold = orders.filter(o => 
+        o.handover_at !== null && 
+        o.hours_since_handover >= 23 && 
+        o.hours_since_handover < 24
+      );
+      
+      if (nearThreshold.length > 0) {
+        console.log(`⚠️ [Handover/Tracking Validation] ${nearThreshold.length} order(s) approaching 24-hour threshold:`);
+        nearThreshold.forEach(order => {
+          console.log(`   - Order ${order.order_id}: ${order.hours_since_handover.toFixed(1)} hours since handover (will move to tracking soon)`);
+        });
+      }
+
+      // Log orders that just crossed the 24-hour threshold (within last hour)
+      const justCrossed = orders.filter(o => 
+        o.handover_at !== null && 
+        o.hours_since_handover >= 24 && 
+        o.hours_since_handover < 25
+      );
+      
+      if (justCrossed.length > 0) {
+        console.log(`🔄 [Handover/Tracking Validation] ${justCrossed.length} order(s) recently moved to tracking tab:`);
+        justCrossed.forEach(order => {
+          console.log(`   - Order ${order.order_id}: ${order.hours_since_handover.toFixed(1)} hours since handover (now in tracking)`);
+        });
+      }
+
+      return {
+        success: true,
+        totalOrders: orders.length,
+        handoverTab: handoverOrders.length,
+        trackingTab: trackingOrders.length,
+        withoutHandover: ordersWithoutHandover.length,
+        nearThreshold: nearThreshold.length,
+        justCrossed: justCrossed.length,
+        timestamp: new Date().toISOString()
+      };
+      
+    } catch (error) {
+      console.error('❌ [Handover/Tracking Validation] Validation failed:', error);
       throw error;
     }
   }
@@ -3481,60 +4117,83 @@ class Database {
   }
 
   /**
-   * Get orders that need auto-manifest (is_handover = 1 but is_manifest = 0)
+   * Get utility parameter value from database
+   * @param {string} parameter - The parameter name to retrieve
+   * @returns {Promise<string|null>} The parameter value or null if not found
    */
-  async getOrdersNeedingAutoManifest() {
+  async getUtilityParameter(parameter) {
     if (!this.mysqlConnection) {
       throw new Error('MySQL connection not available');
     }
 
     try {
-      const [rows] = await this.mysqlConnection.execute(`
-        SELECT 
-          l.order_id,
-          l.label_url,
-          l.awb,
-          l.carrier_name,
-          l.current_shipment_status,
-          l.updated_at,
-          o.customer_name,
-          o.product_name
-        FROM labels l
-        LEFT JOIN orders o ON l.order_id = o.order_id
-        WHERE l.is_handover = 1 AND l.is_manifest = 0
-        ORDER BY l.updated_at DESC
-      `);
+      const [rows] = await this.mysqlConnection.execute(
+        'SELECT value FROM utility WHERE parameter = ?',
+        [parameter]
+      );
       
-      return rows;
+      if (rows.length > 0) {
+        return rows[0].value;
+      }
+      
+      return null;
     } catch (error) {
-      console.error('Error getting orders needing auto-manifest:', error);
+      console.error(`Error getting utility parameter '${parameter}':`, error);
       throw error;
     }
   }
 
   /**
-   * Update is_manifest status for an order
-   * @param {string} orderId - The order ID
-   * @param {boolean} isManifest - Whether manifest is created
+   * Update utility parameter value in database
+   * @param {string} parameter - The parameter name to update
+   * @param {string} value - The new value
+   * @param {string} modifiedBy - Who modified this parameter (default: 'system')
+   * @returns {Promise<boolean>} True if updated successfully
    */
-  async updateManifestStatus(orderId, isManifest = true) {
+  async updateUtilityParameter(parameter, value, modifiedBy = 'system') {
     if (!this.mysqlConnection) {
       throw new Error('MySQL connection not available');
     }
 
     try {
       await this.mysqlConnection.execute(
-        'UPDATE labels SET is_manifest = ? WHERE order_id = ?',
-        [isManifest ? 1 : 0, orderId]
+        `INSERT INTO utility (parameter, value, created_by, created_at, modified_at)
+         VALUES (?, ?, ?, NOW(), NOW())
+         ON DUPLICATE KEY UPDATE 
+           value = VALUES(value),
+           modified_at = NOW()`,
+        [parameter, value, modifiedBy]
       );
       
-      console.log(`✅ Updated manifest status for order ${orderId}: is_manifest = ${isManifest ? 1 : 0}`);
-      
+      console.log(`✅ Updated utility parameter: ${parameter} = ${value} (by ${modifiedBy})`);
+      return true;
     } catch (error) {
-      console.error(`❌ Error updating manifest status for order ${orderId}:`, error);
+      console.error(`Error updating utility parameter '${parameter}':`, error);
       throw error;
     }
   }
+
+  /**
+   * Get all utility parameters
+   * @returns {Promise<Array>} Array of all utility parameters
+   */
+  async getAllUtilityParameters() {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      const [rows] = await this.mysqlConnection.execute(
+        'SELECT * FROM utility ORDER BY parameter'
+      );
+      
+      return rows;
+    } catch (error) {
+      console.error('Error getting all utility parameters:', error);
+      throw error;
+    }
+  }
+
 }
 
 module.exports = new Database(); 

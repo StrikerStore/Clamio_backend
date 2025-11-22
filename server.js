@@ -558,6 +558,38 @@ app.listen(PORT, async () => {
     }
   });
 
+  // Product Refresh - daily at 2 AM
+  cron.schedule('0 2 * * *', async () => {
+    try {
+      console.log('[Product Sync] Starting daily product refresh from Shopify...');
+      await fetchAndSaveShopifyProducts(
+        process.env.SHOPIFY_PRODUCTS_API_URL || 'https://seq5t1-mz.myshopify.com/admin/api/2025-07/graphql.json',
+        {
+          'X-Shopify-Access-Token': process.env.SHOPIFY_ACCESS_TOKEN,
+          'Content-Type': 'application/json',
+        },
+        true // forceNew = true to ensure fresh data
+      );
+      console.log('[Product Sync] Daily product refresh completed.');
+    } catch (err) {
+      console.error('[Product Sync] Daily product refresh failed:', err.message);
+    }
+  });
+
+  // Product Monitor - Check for new products every 24 hours (daily at 3 AM)
+  const productMonitorService = require('./services/productMonitorService');
+  cron.schedule('0 3 * * *', async () => {
+    try {
+      console.log('[Product Monitor] Starting daily check for new products...');
+      const result = await productMonitorService.checkNewProducts();
+      if (result.success) {
+        console.log(`[Product Monitor] Check completed. Found ${result.count} new product(s).`);
+      }
+    } catch (err) {
+      console.error('[Product Monitor] Daily check failed:', err.message);
+    }
+  });
+
   // Run active orders tracking once immediately on startup (optional)
   (async () => {
     try {

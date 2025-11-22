@@ -186,8 +186,19 @@ async function uploadRTODetails(req, res) {
 
     const csvData = req.file.buffer.toString('utf-8');
     
-    // Parse CSV (simple parsing - can be enhanced with csv-parser library)
-    const lines = csvData.split('\n').filter(line => line.trim());
+    // Parse CSV (simple parsing - handle both \n and \r\n line endings)
+    const lines = csvData
+      .split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(line => line.length > 0); // Remove empty lines
+    
+    if (lines.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'CSV file is empty'
+      });
+    }
+    
     const headers = lines[0].split(',').map(h => h.trim());
     
     // Map column indices based on CSV structure
@@ -200,19 +211,33 @@ async function uploadRTODetails(req, res) {
     console.log('📋 CSV Headers:', headers);
     console.log('📋 Column indices:', { productNameIndex, variantSkuIndex, sizeIndex, quantityIndex, locationIndex });
     
+    // Validate required columns
+    if (productNameIndex < 0 || sizeIndex < 0 || quantityIndex < 0 || locationIndex < 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required columns. Expected: Product_Name, Size, Quantity, Location'
+      });
+    }
+    
     const rtoData = [];
     
     for (let i = 1; i < lines.length; i++) {
       const values = lines[i].split(',').map(v => v.trim());
       
-      if (values.length >= 4) {
-        const row = {
-          Product_Name: productNameIndex >= 0 ? (values[productNameIndex] || '') : '',
-          Location: locationIndex >= 0 ? (values[locationIndex] || '') : '',
-          Size: sizeIndex >= 0 ? (values[sizeIndex] || '') : '',
-          Quantity: quantityIndex >= 0 ? (values[quantityIndex] || '') : ''
-        };
-        
+      // Skip empty rows
+      if (values.length < 4 || values.every(v => !v)) {
+        continue;
+      }
+      
+      const row = {
+        Product_Name: values[productNameIndex] || '',
+        Location: values[locationIndex] || '',
+        Size: values[sizeIndex] || '',
+        Quantity: values[quantityIndex] || ''
+      };
+      
+      // Only add row if it has at least Product_Name and Location
+      if (row.Product_Name || row.Location) {
         rtoData.push(row);
       }
     }

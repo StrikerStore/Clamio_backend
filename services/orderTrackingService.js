@@ -70,6 +70,16 @@ class OrderTrackingService {
 
       console.log(`✅ [Active Tracking] Sync completed: ${successCount} success, ${errorCount} errors`);
       
+      // Validate handover/tracking logic after sync (runs hourly along with current_shipment_status update)
+      try {
+        console.log('[Handover/Tracking Validation] Running validation check after tracking sync...');
+        const validationResult = await database.validateHandoverTrackingLogic();
+        console.log(`✅ [Handover/Tracking Validation] Validation completed: ${validationResult.handoverTab} in handover, ${validationResult.trackingTab} in tracking`);
+      } catch (validationError) {
+        console.error('[Handover/Tracking Validation] Validation check failed:', validationError.message);
+        // Don't fail the entire sync if validation fails
+      }
+      
       return {
         success: true,
         message: 'Active tracking sync completed',
@@ -199,7 +209,19 @@ class OrderTrackingService {
       const latestStatus = trackingData.shipment_status_history[trackingData.shipment_status_history.length - 1];
       const isHandover = latestStatus.name === 'In Transit';
       
-      await database.updateLabelsShipmentStatus(orderId, latestStatus.name, isHandover);
+      // Get the timestamp for handover event (if available)
+      // IMPORTANT: We want the FIRST "In Transit" event, not the latest
+      let handoverTimestamp = null;
+      if (isHandover) {
+        // Find the first occurrence of "In Transit" status
+        const firstInTransitEvent = trackingData.shipment_status_history.find(event => event.name === 'In Transit');
+        if (firstInTransitEvent && firstInTransitEvent.time) {
+          handoverTimestamp = firstInTransitEvent.time;
+          console.log(`🚚 [Tracking] Found first "In Transit" event for order ${orderId} at timestamp: ${handoverTimestamp}`);
+        }
+      }
+      
+      await database.updateLabelsShipmentStatus(orderId, latestStatus.name, isHandover, handoverTimestamp);
       
       return {
         success: true,

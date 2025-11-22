@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const orderEnhancementService = require('./orderEnhancementService');
+const database = require('../config/database');
 
 /**
  * Generate stable unique_id from order and product data
@@ -294,6 +295,15 @@ class ShipwayService {
           currentPageOrders = response.data.message;
         } else if (typeof response.data === 'object' && response.data.order_id) {
           currentPageOrders = [response.data];
+        } else if (typeof response.data === 'object' && response.data.message === 'No orders found') {
+          // Handle "No orders found" response gracefully
+          currentPageOrders = [];
+          console.log(`  ℹ️ Page ${page}: No orders found, stopping pagination`);
+        } else if (typeof response.data === 'object' && !response.data.order_id && !Array.isArray(response.data.orders) && !Array.isArray(response.data.message)) {
+          // Handle empty/unexpected response - treat as no orders instead of erroring
+          this.logApiActivity({ type: 'shipway-empty-or-unexpected-format', data: response.data });
+          currentPageOrders = [];
+          console.log(`  ⚠️ Page ${page}: Empty or unexpected response, treating as no orders - stopping pagination`);
         } else {
           this.logApiActivity({ type: 'shipway-unexpected-format', data: response.data });
           throw new Error('Unexpected Shipway API response format');
@@ -304,8 +314,11 @@ class ShipwayService {
         // Add orders from this page to our collection
         allOrders = allOrders.concat(currentPageOrders);
         
-        // If we got fewer than 100 orders, we've reached the last page
-        if (currentPageOrders.length < 100) {
+        // If we got 0 orders or fewer than 100 orders, we've reached the last page
+        if (currentPageOrders.length === 0) {
+          hasMorePages = false;
+          console.log(`  🏁 Last page reached (0 orders found, no more data)`);
+        } else if (currentPageOrders.length < 100) {
           hasMorePages = false;
           console.log(`  🏁 Last page reached (${currentPageOrders.length} < 100 orders)`);
         } else {
@@ -331,24 +344,38 @@ class ShipwayService {
       
       console.log(`🎉 Pagination complete! Total orders fetched: ${allOrders.length}`);
       
-      // Filter orders to only include last 60 days
-      const sixtyDaysAgo = new Date();
-      sixtyDaysAgo.setDate(sixtyDaysAgo.getDate() - 60);
+      // Get number of days from utility table (defaults to 60 if not found or database unavailable)
+      let numberOfDays = 60;
+      try {
+        const daysValue = await database.getUtilityParameter('number_of_day_of_order_include');
+        if (daysValue) {
+          numberOfDays = parseInt(daysValue, 10);
+          console.log(`📅 Using ${numberOfDays} days from utility configuration`);
+        } else {
+          console.log(`⚠️ Utility parameter not found, using default: ${numberOfDays} days`);
+        }
+      } catch (dbError) {
+        console.log(`⚠️ Could not fetch utility parameter, using default: ${numberOfDays} days`, dbError.message);
+      }
+      
+      // Filter orders to only include orders within the configured number of days
+      const cutoffDate = new Date();
+      cutoffDate.setDate(cutoffDate.getDate() - numberOfDays);
       
       const filteredOrders = allOrders.filter(order => {
         if (!order.order_date) return false;
         
         const orderDate = new Date(order.order_date);
-        const isWithin40Days = orderDate >= sixtyDaysAgo;
+        const isWithinDays = orderDate >= cutoffDate;
         
-        if (!isWithin40Days) {
+        if (!isWithinDays) {
           console.log(`  ⏰ Filtering out old order: ${order.order_id} (${order.order_date})`);
         }
         
-        return isWithin40Days;
+        return isWithinDays;
       });
       
-      console.log(`📅 Date filter applied: ${filteredOrders.length} orders within last 40 days (filtered out ${allOrders.length - filteredOrders.length} old orders)`);
+      console.log(`📅 Date filter applied: ${filteredOrders.length} orders within last ${numberOfDays} days (filtered out ${allOrders.length - filteredOrders.length} old orders)`);
       
       shipwayOrders = filteredOrders;
       rawApiResponse = { success: 1, message: allOrders }; // Keep all orders in raw JSON
@@ -640,6 +667,15 @@ class ShipwayService {
           currentPageOrders = response.data.message;
         } else if (typeof response.data === 'object' && response.data.order_id) {
           currentPageOrders = [response.data];
+        } else if (typeof response.data === 'object' && response.data.message === 'No orders found') {
+          // Handle "No orders found" response gracefully
+          currentPageOrders = [];
+          console.log(`  ℹ️ Page ${page}: No orders found, stopping pagination`);
+        } else if (typeof response.data === 'object' && !response.data.order_id && !Array.isArray(response.data.orders) && !Array.isArray(response.data.message)) {
+          // Handle empty/unexpected response - treat as no orders instead of erroring
+          this.logApiActivity({ type: 'shipway-empty-or-unexpected-format', data: response.data });
+          currentPageOrders = [];
+          console.log(`  ⚠️ Page ${page}: Empty or unexpected response, treating as no orders - stopping pagination`);
         } else {
           this.logApiActivity({ type: 'shipway-unexpected-format', data: response.data });
           throw new Error('Unexpected Shipway API response format');
@@ -650,8 +686,11 @@ class ShipwayService {
         // Add orders from this page to our collection
         allOrders = allOrders.concat(currentPageOrders);
         
-        // If we got fewer than 100 orders, we've reached the last page
-        if (currentPageOrders.length < 100) {
+        // If we got 0 orders or fewer than 100 orders, we've reached the last page
+        if (currentPageOrders.length === 0) {
+          hasMorePages = false;
+          console.log(`  🏁 Last page reached (0 orders found, no more data)`);
+        } else if (currentPageOrders.length < 100) {
           hasMorePages = false;
           console.log(`  🏁 Last page reached (${currentPageOrders.length} < 100 orders)`);
         } else {
@@ -677,24 +716,38 @@ class ShipwayService {
       
       console.log(`🎉 Pagination complete! Total orders fetched: ${allOrders.length}`);
       
-      // Filter orders to only include last 40 days
-      const sixtyDaysAgo = new Date();
-      sixtyDaysAgo.setDate(sixtyDaysAgo.getDate() - 60);
+      // Get number of days from utility table (defaults to 60 if not found or database unavailable)
+      let numberOfDays = 60;
+      try {
+        const daysValue = await database.getUtilityParameter('number_of_day_of_order_include');
+        if (daysValue) {
+          numberOfDays = parseInt(daysValue, 10);
+          console.log(`📅 Using ${numberOfDays} days from utility configuration`);
+        } else {
+          console.log(`⚠️ Utility parameter not found, using default: ${numberOfDays} days`);
+        }
+      } catch (dbError) {
+        console.log(`⚠️ Could not fetch utility parameter, using default: ${numberOfDays} days`, dbError.message);
+      }
+      
+      // Filter orders to only include orders within the configured number of days
+      const cutoffDate = new Date();
+      cutoffDate.setDate(cutoffDate.getDate() - numberOfDays);
       
       const filteredOrders = allOrders.filter(order => {
         if (!order.order_date) return false;
         
         const orderDate = new Date(order.order_date);
-        const isWithin40Days = orderDate >= sixtyDaysAgo;
+        const isWithinDays = orderDate >= cutoffDate;
         
-        if (!isWithin40Days) {
+        if (!isWithinDays) {
           console.log(`  ⏰ Filtering out old order: ${order.order_id} (${order.order_date})`);
         }
         
-        return isWithin40Days;
+        return isWithinDays;
       });
       
-      console.log(`📅 Date filter applied: ${filteredOrders.length} orders within last 40 days (filtered out ${allOrders.length - filteredOrders.length} old orders)`);
+      console.log(`📅 Date filter applied: ${filteredOrders.length} orders within last ${numberOfDays} days (filtered out ${allOrders.length - filteredOrders.length} old orders)`);
       
       shipwayOrders = filteredOrders;
       rawApiResponse = { success: 1, message: allOrders }; // Keep all orders in raw JSON
@@ -895,6 +948,7 @@ class ShipwayService {
           collectable_amount: collectableAmount,
           // Add pincode from s_zipcode, preserve existing if available
           pincode: existingClaim ? existingClaim.pincode : (order.s_zipcode || ''),
+          // Note: store_code is stored in customer_info table (order-level), not in orders table (product-level)
           // Preserve existing claim data or use defaults for new orders
           status: existingClaim ? existingClaim.status : 'unclaimed',
           claimed_by: existingClaim ? existingClaim.claimed_by : '',
@@ -1090,6 +1144,63 @@ class ShipwayService {
             error: carrierError.message 
           });
         }
+
+        // Automatically populate customer_info table from orders
+        try {
+          console.log('📋 Populating customer_info table...');
+          let customerInfoCount = 0;
+          
+          // Get unique order_ids from shipway orders
+          const uniqueOrderIds = [...new Set(shipwayOrders.map(order => order.order_id))];
+          
+          for (const order of shipwayOrders) {
+            // Upsert customer info (create or update)
+            const customerData = {
+              order_id: order.order_id,
+              store_code: order.store_code || '1',
+              email: order.email || null,
+              billing_firstname: order.b_firstname || null,
+              billing_lastname: order.b_lastname || null,
+              billing_phone: order.b_phone || null,
+              billing_address: order.b_address || null,
+              billing_address2: order.b_address_2 || null,
+              billing_city: order.b_city || null,
+              billing_state: order.b_state || null,
+              billing_country: order.b_country || null,
+              billing_zipcode: order.b_zipcode || null,
+              billing_latitude: order.b_latitude || null,
+              billing_longitude: order.b_longitude || null,
+              shipping_firstname: order.s_firstname || null,
+              shipping_lastname: order.s_lastname || null,
+              shipping_phone: order.s_phone || null,
+              shipping_address: order.s_address || null,
+              shipping_address2: order.s_address_2 || null,
+              shipping_city: order.s_city || null,
+              shipping_state: order.s_state || null,
+              shipping_country: order.s_country || null,
+              shipping_zipcode: order.s_zipcode || null,
+              shipping_latitude: order.s_latitude || null,
+              shipping_longitude: order.s_longitude || null
+            };
+            
+            await database.upsertCustomerInfo(customerData);
+            customerInfoCount++;
+          }
+          
+          console.log(`✅ Customer info populated: ${customerInfoCount} new records`);
+          this.logApiActivity({ 
+            type: 'customer-info-sync', 
+            success: true,
+            customerInfoCount: customerInfoCount,
+            message: `Successfully populated ${customerInfoCount} customer info records`
+          });
+        } catch (customerInfoError) {
+          console.error('⚠️ Failed to populate customer_info:', customerInfoError.message);
+          this.logApiActivity({ 
+            type: 'customer-info-sync-error', 
+            error: customerInfoError.message 
+          });
+        }
       } else {
         this.logApiActivity({ type: 'mysql-no-change-but-flags-updated', rows: flatOrders.length });
       }
@@ -1163,6 +1274,15 @@ class ShipwayService {
           currentPageOrders = response.data.message;
         } else if (typeof response.data === 'object' && response.data.order_id) {
           currentPageOrders = [response.data];
+        } else if (typeof response.data === 'object' && response.data.message === 'No orders found') {
+          // Handle "No orders found" response gracefully
+          currentPageOrders = [];
+          console.log(`  ℹ️ Page ${page}: No orders found, stopping pagination`);
+        } else if (typeof response.data === 'object' && !response.data.order_id && !Array.isArray(response.data.orders) && !Array.isArray(response.data.message)) {
+          // Handle empty/unexpected response - treat as no orders instead of erroring
+          this.logApiActivity({ type: 'shipway-empty-or-unexpected-format', data: response.data });
+          currentPageOrders = [];
+          console.log(`  ⚠️ Page ${page}: Empty or unexpected response, treating as no orders - stopping pagination`);
         } else {
           throw new Error('Unexpected Shipway API response format');
         }
@@ -1172,8 +1292,11 @@ class ShipwayService {
         // Add orders from this page to our collection
         allOrders = allOrders.concat(currentPageOrders);
         
-        // If we got fewer than 100 orders, we've reached the last page
-        if (currentPageOrders.length < 100) {
+        // If we got 0 orders or fewer than 100 orders, we've reached the last page
+        if (currentPageOrders.length === 0) {
+          hasMorePages = false;
+          console.log(`  🏁 Last page reached (0 orders found, no more data)`);
+        } else if (currentPageOrders.length < 100) {
           hasMorePages = false;
           console.log(`  🏁 Last page reached (${currentPageOrders.length} < 100 orders)`);
         } else {
