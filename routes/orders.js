@@ -233,7 +233,7 @@ router.get('/last-updated', async (req, res) => {
  * @access  Vendor (token required)
  */
 router.post('/claim', async (req, res) => {
-  const { unique_id } = req.body;
+  const { unique_id, quantity_to_claim } = req.body;
   let token = req.headers['authorization'];
   
   // Handle case where token might be an object
@@ -257,6 +257,7 @@ router.post('/claim', async (req, res) => {
   
   console.log('🔵 CLAIM REQUEST START');
   console.log('  - unique_id:', unique_id);
+  console.log('  - quantity_to_claim:', quantity_to_claim);
   console.log('  - token received:', token ? 'YES' : 'NO');
   console.log('  - token value:', token ? token.substring(0, 8) + '...' : 'null');
   
@@ -331,6 +332,7 @@ router.post('/claim', async (req, res) => {
     console.log('  - order_id:', order.order_id);
     console.log('  - product_name:', order.product_name);
     console.log('  - current status:', order.status);
+    console.log('  - current quantity:', order.quantity);
     console.log('  - current claimed_by:', order.claimed_by);
     
     if (order.status !== 'unclaimed') {
@@ -339,22 +341,24 @@ router.post('/claim', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Order row is not unclaimed' });
     }
     
-    // Update order
-    const now = new Date().toISOString().replace('T', ' ').substring(0, 19);
-    console.log('🔄 UPDATING ORDER');
-    console.log('  - Setting status to: claimed');
-    console.log('  - Setting claimed_by to:', warehouseId);
-    console.log('  - Setting timestamp to:', now);
+    // Determine quantity to claim (default to full quantity if not specified)
+    const quantityClaim = quantity_to_claim || order.quantity;
     
-    // Update order object in memory (like Excel behavior)
-    const updatedOrder = {
-      ...order,
-      status: 'claimed',
-      claimed_by: warehouseId,
-      claimed_at: now,
-      last_claimed_by: warehouseId,
-      last_claimed_at: now
-    };
+    // Validate quantity_to_claim
+    if (quantityClaim <= 0 || quantityClaim > order.quantity) {
+      console.log('❌ INVALID QUANTITY');
+      console.log('  - Requested:', quantityClaim);
+      console.log('  - Available:', order.quantity);
+      return res.status(400).json({ success: false, message: 'Invalid quantity to claim' });
+    }
+    
+    const now = new Date().toISOString().replace('T', ' ').substring(0, 19);
+    const isPartialClaim = quantityClaim < order.quantity;
+    
+    console.log('🔄 PROCESSING CLAIM');
+    console.log('  - Partial claim:', isPartialClaim);
+    console.log('  - Quantity to claim:', quantityClaim);
+    console.log('  - Remaining quantity:', order.quantity - quantityClaim);
     
     // Assign top 3 priority carriers during claim
     console.log('🚚 ASSIGNING TOP 3 PRIORITY CARRIERS...');
@@ -362,36 +366,110 @@ router.post('/claim', async (req, res) => {
     try {
       priorityCarrier = await carrierServiceabilityService.getTop3PriorityCarriers(order);
       console.log(`✅ Top 3 carriers assigned: ${priorityCarrier}`);
-      updatedOrder.priority_carrier = priorityCarrier;
     } catch (carrierError) {
       console.log(`⚠️ Carrier assignment failed: ${carrierError.message}`);
       console.log('  - Order will be claimed without priority carriers');
-      updatedOrder.priority_carrier = '';
+      priorityCarrier = '';
     }
     
-    // Now save everything to MySQL in one go
-    console.log('💾 SAVING TO MYSQL');
-    const finalUpdatedOrder = await database.updateOrder(unique_id, {
-      status: updatedOrder.status,
-      claimed_by: updatedOrder.claimed_by,
-      claimed_at: updatedOrder.claimed_at,
-      last_claimed_by: updatedOrder.last_claimed_by,
-      last_claimed_at: updatedOrder.last_claimed_at,
-      priority_carrier: updatedOrder.priority_carrier
-    });
+    let claimedOrder;
     
-    if (!finalUpdatedOrder) {
-      console.log('❌ FAILED TO UPDATE ORDER IN MYSQL');
-      return res.status(500).json({ success: false, message: 'Failed to update order' });
+    if (isPartialClaim) {
+      console.log('📦 HANDLING PARTIAL CLAIM');
+      
+      // Generate a new unique_id for the claimed portion
+      const crypto = require('crypto');
+      const timestamp = Date.now();
+      const newUniqueId = `${order.unique_id}_claimed_${timestamp}_${crypto.randomBytes(4).toString('hex')}`;
+      
+      console.log('  - New unique_id for claimed portion:', newUniqueId);
+      
+      // Create a new order row for the claimed quantity
+      const claimedOrderData = {
+        id: `${order.id}_claimed_${timestamp}`,
+        unique_id: newUniqueId,
+        order_id: order.order_id,
+        customer_name: order.customer_name,
+        order_date: order.order_date,
+        product_name: order.product_name,
+        product_code: order.product_code,
+        quantity: quantityClaim,
+        selling_price: order.selling_price,
+        order_total: order.order_total,
+        payment_type: order.payment_type,
+        is_partial_paid: order.is_partial_paid,
+        prepaid_amount: order.prepaid_amount,
+        order_total_ratio: order.order_total_ratio,
+        order_total_split: order.order_total_split,
+        collectable_amount: order.collectable_amount,
+        pincode: order.pincode,
+        status: 'claimed',
+        claimed_by: warehouseId,
+        claimed_at: now,
+        last_claimed_by: warehouseId,
+        last_claimed_at: now,
+        clone_status: 'not_cloned',
+        cloned_order_id: '',
+        is_cloned_row: false,
+        label_downloaded: false,
+        priority_carrier: priorityCarrier,
+        is_in_new_order: true
+      };
+      
+      console.log('➕ Creating new order row for claimed quantity');
+      claimedOrder = await database.createOrder(claimedOrderData);
+      
+      // Update the original order to reduce its quantity
+      const remainingQuantity = order.quantity - quantityClaim;
+      console.log('🔄 Updating original order quantity to:', remainingQuantity);
+      
+      await database.updateOrder(unique_id, {
+        quantity: remainingQuantity
+      });
+      
+      console.log('✅ PARTIAL CLAIM SUCCESSFUL');
+      console.log('  - Claimed quantity:', quantityClaim);
+      console.log('  - Remaining quantity:', remainingQuantity);
+      console.log('  - Claimed order unique_id:', newUniqueId);
+      
+    } else {
+      console.log('📦 HANDLING FULL CLAIM');
+      
+      // Update order object in memory (like Excel behavior)
+      const updatedOrder = {
+        ...order,
+        status: 'claimed',
+        claimed_by: warehouseId,
+        claimed_at: now,
+        last_claimed_by: warehouseId,
+        last_claimed_at: now,
+        priority_carrier: priorityCarrier
+      };
+      
+      // Now save everything to MySQL in one go
+      console.log('💾 SAVING TO MYSQL');
+      claimedOrder = await database.updateOrder(unique_id, {
+        status: updatedOrder.status,
+        claimed_by: updatedOrder.claimed_by,
+        claimed_at: updatedOrder.claimed_at,
+        last_claimed_by: updatedOrder.last_claimed_by,
+        last_claimed_at: updatedOrder.last_claimed_at,
+        priority_carrier: updatedOrder.priority_carrier
+      });
+      
+      if (!claimedOrder) {
+        console.log('❌ FAILED TO UPDATE ORDER IN MYSQL');
+        return res.status(500).json({ success: false, message: 'Failed to update order' });
+      }
+      
+      console.log('✅ MYSQL SAVED SUCCESSFULLY');
     }
-    
-    console.log('✅ MYSQL SAVED SUCCESSFULLY');
     
     console.log('🟢 CLAIM SUCCESS');
     console.log('  - Order claimed by:', warehouseId);
-    console.log('  - Updated order:', { unique_id: updatedOrder.unique_id, status: updatedOrder.status, claimed_by: updatedOrder.claimed_by });
+    console.log('  - Claimed order:', { unique_id: claimedOrder.unique_id, status: claimedOrder.status, claimed_by: claimedOrder.claimed_by, quantity: claimedOrder.quantity });
     
-    return res.json({ success: true, data: updatedOrder });
+    return res.json({ success: true, data: claimedOrder });
     
   } catch (error) {
     console.log('💥 CLAIM ERROR:', error.message);
