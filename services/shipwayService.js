@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const orderEnhancementService = require('./orderEnhancementService');
+const database = require('../config/database');
 
 /**
  * Generate stable unique_id from order and product data
@@ -343,24 +344,38 @@ class ShipwayService {
       
       console.log(`🎉 Pagination complete! Total orders fetched: ${allOrders.length}`);
       
-      // Filter orders to only include last 60 days
-      const sixtyDaysAgo = new Date();
-      sixtyDaysAgo.setDate(sixtyDaysAgo.getDate() - 60);
+      // Get number of days from utility table (defaults to 60 if not found or database unavailable)
+      let numberOfDays = 60;
+      try {
+        const daysValue = await database.getUtilityParameter('number_of_day_of_order_include');
+        if (daysValue) {
+          numberOfDays = parseInt(daysValue, 10);
+          console.log(`📅 Using ${numberOfDays} days from utility configuration`);
+        } else {
+          console.log(`⚠️ Utility parameter not found, using default: ${numberOfDays} days`);
+        }
+      } catch (dbError) {
+        console.log(`⚠️ Could not fetch utility parameter, using default: ${numberOfDays} days`, dbError.message);
+      }
+      
+      // Filter orders to only include orders within the configured number of days
+      const cutoffDate = new Date();
+      cutoffDate.setDate(cutoffDate.getDate() - numberOfDays);
       
       const filteredOrders = allOrders.filter(order => {
         if (!order.order_date) return false;
         
         const orderDate = new Date(order.order_date);
-        const isWithin60Days = orderDate >= sixtyDaysAgo;
+        const isWithinDays = orderDate >= cutoffDate;
         
-        if (!isWithin60Days) {
+        if (!isWithinDays) {
           console.log(`  ⏰ Filtering out old order: ${order.order_id} (${order.order_date})`);
         }
         
-        return isWithin60Days;
+        return isWithinDays;
       });
       
-      console.log(`📅 Date filter applied: ${filteredOrders.length} orders within last 60 days (filtered out ${allOrders.length - filteredOrders.length} old orders)`);
+      console.log(`📅 Date filter applied: ${filteredOrders.length} orders within last ${numberOfDays} days (filtered out ${allOrders.length - filteredOrders.length} old orders)`);
       
       shipwayOrders = filteredOrders;
       rawApiResponse = { success: 1, message: allOrders }; // Keep all orders in raw JSON
@@ -701,24 +716,38 @@ class ShipwayService {
       
       console.log(`🎉 Pagination complete! Total orders fetched: ${allOrders.length}`);
       
-      // Filter orders to only include last 60 days
-      const sixtyDaysAgo = new Date();
-      sixtyDaysAgo.setDate(sixtyDaysAgo.getDate() - 60);
+      // Get number of days from utility table (defaults to 60 if not found or database unavailable)
+      let numberOfDays = 60;
+      try {
+        const daysValue = await database.getUtilityParameter('number_of_day_of_order_include');
+        if (daysValue) {
+          numberOfDays = parseInt(daysValue, 10);
+          console.log(`📅 Using ${numberOfDays} days from utility configuration`);
+        } else {
+          console.log(`⚠️ Utility parameter not found, using default: ${numberOfDays} days`);
+        }
+      } catch (dbError) {
+        console.log(`⚠️ Could not fetch utility parameter, using default: ${numberOfDays} days`, dbError.message);
+      }
+      
+      // Filter orders to only include orders within the configured number of days
+      const cutoffDate = new Date();
+      cutoffDate.setDate(cutoffDate.getDate() - numberOfDays);
       
       const filteredOrders = allOrders.filter(order => {
         if (!order.order_date) return false;
         
         const orderDate = new Date(order.order_date);
-        const isWithin60Days = orderDate >= sixtyDaysAgo;
+        const isWithinDays = orderDate >= cutoffDate;
         
-        if (!isWithin60Days) {
+        if (!isWithinDays) {
           console.log(`  ⏰ Filtering out old order: ${order.order_id} (${order.order_date})`);
         }
         
-        return isWithin60Days;
+        return isWithinDays;
       });
       
-      console.log(`📅 Date filter applied: ${filteredOrders.length} orders within last 60 days (filtered out ${allOrders.length - filteredOrders.length} old orders)`);
+      console.log(`📅 Date filter applied: ${filteredOrders.length} orders within last ${numberOfDays} days (filtered out ${allOrders.length - filteredOrders.length} old orders)`);
       
       shipwayOrders = filteredOrders;
       rawApiResponse = { success: 1, message: allOrders }; // Keep all orders in raw JSON
