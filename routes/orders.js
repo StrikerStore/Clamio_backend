@@ -12,112 +12,19 @@ const carrierServiceabilityService = require('../services/carrierServiceabilityS
  * @param {string} errorMessage - The error message from Shipway API
  * @param {string} orderId - The order ID that failed
  * @param {Object} vendor - The vendor object with id, name, warehouseId
- * @param {string} errorCategory - The error category (e.g., CRITICAL_AUTH, RETRIABLE_PINCODE)
- * @param {string} errorType - The error type (CRITICAL, RETRIABLE, UNKNOWN)
  */
-async function createLabelGenerationNotification(errorMessage, orderId, vendor, errorCategory = 'UNKNOWN_ERROR', errorType = 'UNKNOWN') {
+async function createLabelGenerationNotification(errorMessage, orderId, vendor) {
   try {
     console.log('📢 Creating notification for label generation error...');
     console.log('  - Error:', errorMessage);
     console.log('  - Order ID:', orderId);
     console.log('  - Vendor:', vendor.name);
-    console.log('  - Error Category:', errorCategory);
-    console.log('  - Error Type:', errorType);
     
     const database = require('../config/database');
     let notificationData = null;
 
-    // Use errorCategory for better notification categorization
-    if (errorCategory && errorCategory !== 'UNKNOWN_ERROR') {
-      console.log('✅ Using error category for notification:', errorCategory);
-      
-      // Map error categories to notification data
-      const categoryMappings = {
-        'CRITICAL_AUTH': {
-          type: 'authentication_error',
-          severity: 'critical',
-          title: `Authentication Failed - Order ${orderId}`,
-          error_details: 'Critical: Shipway authentication failed. Check API credentials immediately.'
-        },
-        'CRITICAL_DATA': {
-          type: 'data_error',
-          severity: 'critical',
-          title: `Invalid Order Data - Order ${orderId}`,
-          error_details: 'Critical: Order data is missing or invalid. Check order details and sync from Shipway.'
-        },
-        'CRITICAL_CONFIG': {
-          type: 'configuration_error',
-          severity: 'critical',
-          title: `Configuration Error - Order ${orderId}`,
-          error_details: 'Critical: No carriers configured. Assign priority carriers to this order.'
-        },
-        'RETRIABLE_PINCODE': {
-          type: 'carrier_unavailable',
-          severity: 'high',
-          title: `Pincode Not Serviceable - Order ${orderId}`,
-          error_details: 'All carriers failed due to pincode not serviceable. Check carrier serviceability manually.'
-        },
-        'RETRIABLE_CARRIER': {
-          type: 'carrier_unavailable',
-          severity: 'high',
-          title: `Carrier Unavailable - Order ${orderId}`,
-          error_details: 'Carrier temporarily unavailable. Retry later or reassign to vendor.'
-        },
-        'RETRIABLE_WEIGHT': {
-          type: 'carrier_unavailable',
-          severity: 'medium',
-          title: `Weight Limit Exceeded - Order ${orderId}`,
-          error_details: 'Package weight exceeds carrier limit. Check product weight or use different carrier.'
-        },
-        'RETRIABLE_NETWORK': {
-          type: 'network_error',
-          severity: 'medium',
-          title: `Network Error - Order ${orderId}`,
-          error_details: 'Network timeout/error occurred. Retry the operation.'
-        },
-        'RETRIABLE_RATE_LIMIT': {
-          type: 'rate_limit_error',
-          severity: 'medium',
-          title: `Rate Limit Reached - Order ${orderId}`,
-          error_details: 'API rate limit reached. Wait a few minutes and retry.'
-        },
-        'ALL_CARRIERS_FAILED': {
-          type: 'carrier_unavailable',
-          severity: 'critical',
-          title: `All Carriers Failed - Order ${orderId}`,
-          error_details: 'All priority carriers failed. Check error summary and resolve issues.'
-        },
-        'UNEXPECTED_ERROR': {
-          type: 'system_error',
-          severity: 'critical',
-          title: `Unexpected Error - Order ${orderId}`,
-          error_details: 'Unexpected system error occurred. Check logs immediately.'
-        }
-      };
-      
-      const mapping = categoryMappings[errorCategory];
-      if (mapping) {
-        notificationData = {
-          type: mapping.type,
-          severity: mapping.severity,
-          title: mapping.title,
-          message: errorMessage,
-          order_id: orderId,
-          vendor_id: vendor.id,
-          vendor_name: vendor.name,
-          vendor_warehouse_id: vendor.warehouseId,
-          metadata: JSON.stringify({
-            error_category: errorCategory,
-            error_type: errorType,
-            timestamp: new Date().toISOString()
-          }),
-          error_details: mapping.error_details
-        };
-      }
-    }
-
-    // Fallback to pattern matching if no category match
-    if (!notificationData && errorMessage.toLowerCase().includes('insufficient') && errorMessage.toLowerCase().includes('balance')) {
+    // Pattern 1: Insufficient Shipping Balance
+    if (errorMessage.toLowerCase().includes('insufficient') && errorMessage.toLowerCase().includes('balance')) {
       console.log('✅ Detected: Insufficient Shipping Balance error');
       
       // Extract carrier_id from message (format: "carrier id {carrier_id}")
@@ -326,7 +233,7 @@ router.get('/last-updated', async (req, res) => {
  * @access  Vendor (token required)
  */
 router.post('/claim', async (req, res) => {
-  const { unique_id, quantity_to_claim } = req.body;
+  const { unique_id } = req.body;
   let token = req.headers['authorization'];
   
   // Handle case where token might be an object
@@ -350,7 +257,6 @@ router.post('/claim', async (req, res) => {
   
   console.log('🔵 CLAIM REQUEST START');
   console.log('  - unique_id:', unique_id);
-  console.log('  - quantity_to_claim:', quantity_to_claim);
   console.log('  - token received:', token ? 'YES' : 'NO');
   console.log('  - token value:', token ? token.substring(0, 8) + '...' : 'null');
   
@@ -413,20 +319,11 @@ router.post('/claim', async (req, res) => {
     // Get order from MySQL
     console.log('📂 Loading order from MySQL...');
     console.log('🔍 Looking for unique_id:', unique_id);
-    console.log('🔍 Request body details:', {
-      unique_id,
-      quantity_to_claim,
-      has_quantity_param: quantity_to_claim !== undefined
-    });
     
     const order = await database.getOrderByUniqueId(unique_id);
     
     if (!order) {
-      console.log('❌ ORDER NOT FOUND IN DATABASE');
-      console.log('  - Searched for unique_id:', unique_id);
-      console.log('  - Make sure the unique_id exists in the orders table');
-      console.log('  - Note: If frontend sent a modified unique_id (e.g., with _unit_1 suffix),');
-      console.log('         it should have been converted to original_unique_id before sending');
+      console.log('❌ ORDER NOT FOUND');
       return res.status(404).json({ success: false, message: 'Order row not found' });
     }
     
@@ -434,7 +331,6 @@ router.post('/claim', async (req, res) => {
     console.log('  - order_id:', order.order_id);
     console.log('  - product_name:', order.product_name);
     console.log('  - current status:', order.status);
-    console.log('  - current quantity:', order.quantity);
     console.log('  - current claimed_by:', order.claimed_by);
     
     if (order.status !== 'unclaimed') {
@@ -443,24 +339,22 @@ router.post('/claim', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Order row is not unclaimed' });
     }
     
-    // Determine quantity to claim (default to full quantity if not specified)
-    const quantityClaim = quantity_to_claim || order.quantity;
-    
-    // Validate quantity_to_claim
-    if (quantityClaim <= 0 || quantityClaim > order.quantity) {
-      console.log('❌ INVALID QUANTITY');
-      console.log('  - Requested:', quantityClaim);
-      console.log('  - Available:', order.quantity);
-      return res.status(400).json({ success: false, message: 'Invalid quantity to claim' });
-    }
-    
+    // Update order
     const now = new Date().toISOString().replace('T', ' ').substring(0, 19);
-    const isPartialClaim = quantityClaim < order.quantity;
+    console.log('🔄 UPDATING ORDER');
+    console.log('  - Setting status to: claimed');
+    console.log('  - Setting claimed_by to:', warehouseId);
+    console.log('  - Setting timestamp to:', now);
     
-    console.log('🔄 PROCESSING CLAIM');
-    console.log('  - Partial claim:', isPartialClaim);
-    console.log('  - Quantity to claim:', quantityClaim);
-    console.log('  - Remaining quantity:', order.quantity - quantityClaim);
+    // Update order object in memory (like Excel behavior)
+    const updatedOrder = {
+      ...order,
+      status: 'claimed',
+      claimed_by: warehouseId,
+      claimed_at: now,
+      last_claimed_by: warehouseId,
+      last_claimed_at: now
+    };
     
     // Assign top 3 priority carriers during claim
     console.log('🚚 ASSIGNING TOP 3 PRIORITY CARRIERS...');
@@ -468,110 +362,36 @@ router.post('/claim', async (req, res) => {
     try {
       priorityCarrier = await carrierServiceabilityService.getTop3PriorityCarriers(order);
       console.log(`✅ Top 3 carriers assigned: ${priorityCarrier}`);
+      updatedOrder.priority_carrier = priorityCarrier;
     } catch (carrierError) {
       console.log(`⚠️ Carrier assignment failed: ${carrierError.message}`);
       console.log('  - Order will be claimed without priority carriers');
-      priorityCarrier = '';
+      updatedOrder.priority_carrier = '';
     }
     
-    let claimedOrder;
+    // Now save everything to MySQL in one go
+    console.log('💾 SAVING TO MYSQL');
+    const finalUpdatedOrder = await database.updateOrder(unique_id, {
+      status: updatedOrder.status,
+      claimed_by: updatedOrder.claimed_by,
+      claimed_at: updatedOrder.claimed_at,
+      last_claimed_by: updatedOrder.last_claimed_by,
+      last_claimed_at: updatedOrder.last_claimed_at,
+      priority_carrier: updatedOrder.priority_carrier
+    });
     
-    if (isPartialClaim) {
-      console.log('📦 HANDLING PARTIAL CLAIM');
-      
-      // Generate a new unique_id for the claimed portion
-      const crypto = require('crypto');
-      const timestamp = Date.now();
-      const newUniqueId = `${order.unique_id}_claimed_${timestamp}_${crypto.randomBytes(4).toString('hex')}`;
-      
-      console.log('  - New unique_id for claimed portion:', newUniqueId);
-      
-      // Create a new order row for the claimed quantity
-      const claimedOrderData = {
-        id: `${order.id}_claimed_${timestamp}`,
-        unique_id: newUniqueId,
-        order_id: order.order_id,
-        customer_name: order.customer_name,
-        order_date: order.order_date,
-        product_name: order.product_name,
-        product_code: order.product_code,
-        quantity: quantityClaim,
-        selling_price: order.selling_price,
-        order_total: order.order_total,
-        payment_type: order.payment_type,
-        is_partial_paid: order.is_partial_paid,
-        prepaid_amount: order.prepaid_amount,
-        order_total_ratio: order.order_total_ratio,
-        order_total_split: order.order_total_split,
-        collectable_amount: order.collectable_amount,
-        pincode: order.pincode,
-        status: 'claimed',
-        claimed_by: warehouseId,
-        claimed_at: now,
-        last_claimed_by: warehouseId,
-        last_claimed_at: now,
-        clone_status: 'not_cloned',
-        cloned_order_id: '',
-        is_cloned_row: false,
-        label_downloaded: false,
-        priority_carrier: priorityCarrier,
-        is_in_new_order: true
-      };
-      
-      console.log('➕ Creating new order row for claimed quantity');
-      claimedOrder = await database.createOrder(claimedOrderData);
-      
-      // Update the original order to reduce its quantity
-      const remainingQuantity = order.quantity - quantityClaim;
-      console.log('🔄 Updating original order quantity to:', remainingQuantity);
-      
-      await database.updateOrder(unique_id, {
-        quantity: remainingQuantity
-      });
-      
-      console.log('✅ PARTIAL CLAIM SUCCESSFUL');
-      console.log('  - Claimed quantity:', quantityClaim);
-      console.log('  - Remaining quantity:', remainingQuantity);
-      console.log('  - Claimed order unique_id:', newUniqueId);
-      
-    } else {
-      console.log('📦 HANDLING FULL CLAIM');
-      
-      // Update order object in memory (like Excel behavior)
-      const updatedOrder = {
-        ...order,
-        status: 'claimed',
-        claimed_by: warehouseId,
-        claimed_at: now,
-        last_claimed_by: warehouseId,
-        last_claimed_at: now,
-        priority_carrier: priorityCarrier
-      };
-      
-      // Now save everything to MySQL in one go
-      console.log('💾 SAVING TO MYSQL');
-      claimedOrder = await database.updateOrder(unique_id, {
-        status: updatedOrder.status,
-        claimed_by: updatedOrder.claimed_by,
-        claimed_at: updatedOrder.claimed_at,
-        last_claimed_by: updatedOrder.last_claimed_by,
-        last_claimed_at: updatedOrder.last_claimed_at,
-        priority_carrier: updatedOrder.priority_carrier
-      });
-      
-      if (!claimedOrder) {
-        console.log('❌ FAILED TO UPDATE ORDER IN MYSQL');
-        return res.status(500).json({ success: false, message: 'Failed to update order' });
-      }
-      
-      console.log('✅ MYSQL SAVED SUCCESSFULLY');
+    if (!finalUpdatedOrder) {
+      console.log('❌ FAILED TO UPDATE ORDER IN MYSQL');
+      return res.status(500).json({ success: false, message: 'Failed to update order' });
     }
+    
+    console.log('✅ MYSQL SAVED SUCCESSFULLY');
     
     console.log('🟢 CLAIM SUCCESS');
     console.log('  - Order claimed by:', warehouseId);
-    console.log('  - Claimed order:', { unique_id: claimedOrder.unique_id, status: claimedOrder.status, claimed_by: claimedOrder.claimed_by, quantity: claimedOrder.quantity });
+    console.log('  - Updated order:', { unique_id: updatedOrder.unique_id, status: updatedOrder.status, claimed_by: updatedOrder.claimed_by });
     
-    return res.json({ success: true, data: claimedOrder });
+    return res.json({ success: true, data: updatedOrder });
     
   } catch (error) {
     console.log('💥 CLAIM ERROR:', error.message);
@@ -2443,106 +2263,24 @@ router.post('/download-label', async (req, res) => {
 });
 
 /**
- * Helper: Categorize errors for better handling
- */
-function categorizeError(errorMessage) {
-  const lowerMsg = errorMessage.toLowerCase();
-  
-  // Critical errors - stop immediately, don't try other carriers
-  const criticalErrors = [
-    { pattern: 'authentication', category: 'CRITICAL_AUTH', userMessage: 'Authentication failed with shipping provider' },
-    { pattern: 'unauthorized', category: 'CRITICAL_AUTH', userMessage: 'Authentication failed with shipping provider' },
-    { pattern: 'invalid credentials', category: 'CRITICAL_AUTH', userMessage: 'Authentication failed with shipping provider' },
-    { pattern: 'invalid order data', category: 'CRITICAL_DATA', userMessage: 'Invalid order information' },
-    { pattern: 'customer info not found', category: 'CRITICAL_DATA', userMessage: 'Customer information missing' },
-    { pattern: 'no priority carriers', category: 'CRITICAL_CONFIG', userMessage: 'No carriers configured for this order' },
-  ];
-  
-  // Retriable errors - try next carrier
-  const retriableErrors = [
-    { pattern: 'pincode is not serviceable', category: 'RETRIABLE_PINCODE', userMessage: 'Delivery location not serviceable' },
-    { pattern: 'pincode not serviceable', category: 'RETRIABLE_PINCODE', userMessage: 'Delivery location not serviceable' },
-    { pattern: 'delivery pincode is not serviceable', category: 'RETRIABLE_PINCODE', userMessage: 'Delivery location not serviceable' },
-    { pattern: 'carrier not available', category: 'RETRIABLE_CARRIER', userMessage: 'Carrier temporarily unavailable' },
-    { pattern: 'weight exceeds limit', category: 'RETRIABLE_WEIGHT', userMessage: 'Package weight exceeds carrier limit' },
-    { pattern: 'timeout', category: 'RETRIABLE_NETWORK', userMessage: 'Network timeout occurred' },
-    { pattern: 'network error', category: 'RETRIABLE_NETWORK', userMessage: 'Network error occurred' },
-    { pattern: 'connection refused', category: 'RETRIABLE_NETWORK', userMessage: 'Connection error occurred' },
-    { pattern: 'rate limit', category: 'RETRIABLE_RATE_LIMIT', userMessage: 'Rate limit reached' },
-    { pattern: 'service temporarily unavailable', category: 'RETRIABLE_SERVICE', userMessage: 'Service temporarily unavailable' },
-  ];
-  
-  // Check for critical errors first
-  for (const error of criticalErrors) {
-    if (lowerMsg.includes(error.pattern)) {
-      return {
-        type: 'CRITICAL',
-        category: error.category,
-        userMessage: error.userMessage,
-        shouldRetry: false,
-        shouldTryNextCarrier: false
-      };
-    }
-  }
-  
-  // Check for retriable errors
-  for (const error of retriableErrors) {
-    if (lowerMsg.includes(error.pattern)) {
-      return {
-        type: 'RETRIABLE',
-        category: error.category,
-        userMessage: error.userMessage,
-        shouldRetry: true,
-        shouldTryNextCarrier: true
-      };
-    }
-  }
-  
-  // Unknown error - treat as retriable to try other carriers
-  return {
-    type: 'UNKNOWN',
-    category: 'UNKNOWN_ERROR',
-    userMessage: 'An unexpected error occurred',
-    shouldRetry: false,
-    shouldTryNextCarrier: true // Try next carrier for unknown errors
-  };
-}
-
-/**
  * Generate label for an order (Condition 1: Direct download)
  */
 async function generateLabelForOrder(orderId, products, vendor, format = 'thermal') {
-  // Outer try-catch to handle truly unexpected errors
   try {
-    console.log('\n═══════════════════════════════════════════════════════');
-    console.log('🚀 LABEL GENERATION STARTED');
-    console.log('═══════════════════════════════════════════════════════');
-    console.log('📋 Order Details:');
-    console.log(`  - Order ID: ${orderId}`);
-    console.log(`  - Format: ${format}`);
-    console.log(`  - Products: ${products.length}`);
-    console.log(`  - Vendor: ${vendor.name} (${vendor.warehouseId})`);
-    console.log(`  - Timestamp: ${new Date().toISOString()}`);
+    console.log('🔄 Generating label for order:', orderId);
     
     // Get customer info from database
     const database = require('../config/database');
-    console.log('\n🔍 STEP 1: Fetching customer information...');
     const customerInfo = await database.getCustomerInfoByOrderId(orderId);
     
     if (!customerInfo) {
-      const error = new Error(`Customer info not found for order ID: ${orderId}. Please sync orders from Shipway first.`);
-      console.error('❌ CRITICAL ERROR: Customer info not found');
-      console.error(`  - Order ID: ${orderId}`);
-      console.error(`  - This is a critical data error - cannot proceed`);
-      throw error;
+      throw new Error(`Customer info not found for order ID: ${orderId}. Please sync orders from Shipway first.`);
     }
-    
-    console.log('✅ Customer information retrieved successfully');
     
     // Convert customer_info to originalOrder format expected by prepareShipwayRequestBody
     const originalOrder = {
       order_id: orderId,
-      store_code: customerInfo.store_code || '1',
+      store_code: customerInfo.store_code || '1', // Use dynamic store_code from database
       email: customerInfo.email,
       b_address: customerInfo.billing_address,
       b_address_2: customerInfo.billing_address2,
@@ -2568,8 +2306,8 @@ async function generateLabelForOrder(orderId, products, vendor, format = 'therma
       s_longitude: customerInfo.shipping_longitude
     };
 
-    // STEP 2: Get top 3 priority carriers from the first product
-    console.log('\n🚚 STEP 2: Retrieving priority carriers...');
+    // STEP 1: Get top 3 priority carriers from the first product
+    console.log(`🚚 RETRIEVING TOP 3 PRIORITY CARRIERS for order ${orderId}...`);
     const firstProduct = products[0];
     const priorityCarrierStr = firstProduct.priority_carrier || '[]';
     
@@ -2579,23 +2317,18 @@ async function generateLabelForOrder(orderId, products, vendor, format = 'therma
     try {
       priorityCarriers = JSON.parse(priorityCarrierStr);
       if (!Array.isArray(priorityCarriers)) {
-        console.log('  ⚠️ priority_carrier is not an array, resetting to empty array');
         priorityCarriers = [];
       }
     } catch (parseError) {
-      console.log(`  ⚠️ Failed to parse priority_carrier: ${parseError.message}`);
+      console.log(`⚠️ Failed to parse priority_carrier: ${parseError.message}`);
       priorityCarriers = [];
     }
     
     console.log(`  - Parsed carriers: ${JSON.stringify(priorityCarriers)}`);
-    console.log(`  - Total carriers available: ${priorityCarriers.length}`);
     
     if (priorityCarriers.length === 0) {
-      const error = new Error('No priority carriers assigned to this order. Please contact admin.');
-      console.error('❌ CRITICAL ERROR: No priority carriers configured');
-      console.error(`  - Order ID: ${orderId}`);
-      console.error(`  - This is a critical configuration error - cannot proceed`);
-      throw error;
+      console.log(`❌ No priority carriers available for order ${orderId}`);
+      throw new Error('No priority carriers assigned to this order. Please contact admin.');
     }
     
     // Get carrier details from database for name lookup
@@ -2603,26 +2336,19 @@ async function generateLabelForOrder(orderId, products, vendor, format = 'therma
     const allCarriers = await carrierServiceabilityService.readCarriersFromDatabase();
     const carrierMap = new Map(allCarriers.map(c => [c.carrier_id, c]));
     
-    console.log(`✅ ${priorityCarriers.length} priority carriers loaded`);
-    
-    // STEP 3: Try each carrier in sequence with improved error handling
-    console.log('\n🔄 STEP 3: Attempting label generation with carriers...');
-    console.log('───────────────────────────────────────────────────────');
+    // STEP 2: Try each carrier in sequence with fallback logic
+    console.log(`🔄 Attempting label generation with ${priorityCarriers.length} carriers...`);
     
     let assignedCarrier = null;
     let response = null;
     let lastError = null;
-    let carrierErrors = []; // Track all carrier errors for detailed logging
     
     for (let i = 0; i < priorityCarriers.length; i++) {
       const carrierId = priorityCarriers[i];
       const carrierInfo = carrierMap.get(carrierId);
       const carrierName = carrierInfo ? carrierInfo.carrier_name : `Carrier ${carrierId}`;
       
-      console.log(`\n🔹 CARRIER ATTEMPT ${i + 1}/${priorityCarriers.length}`);
-      console.log(`  - Carrier ID: ${carrierId}`);
-      console.log(`  - Carrier Name: ${carrierName}`);
-      console.log(`  - Timestamp: ${new Date().toISOString()}`);
+      console.log(`\n🔹 ATTEMPT ${i + 1}/${priorityCarriers.length}: Trying carrier ${carrierId} (${carrierName})`);
       
       try {
         // Create a modified products array with this specific carrier
@@ -2634,7 +2360,7 @@ async function generateLabelForOrder(orderId, products, vendor, format = 'therma
         // Prepare request body with this carrier
         const requestBody = prepareShipwayRequestBody(orderId, modifiedProducts, originalOrder, vendor, true);
         
-        console.log(`  📤 Calling Shipway API...`);
+        console.log(`  - Calling Shipway API with carrier ${carrierId}...`);
         
         // Call Shipway API
         response = await callShipwayPushOrderAPI(requestBody, true);
@@ -2645,104 +2371,62 @@ async function generateLabelForOrder(orderId, products, vendor, format = 'therma
           carrier_name: carrierName
         };
         
-        console.log(`  ✅ SUCCESS: Label generated with carrier ${carrierId} (${carrierName})`);
-        console.log(`  - Succeeded on attempt ${i + 1}/${priorityCarriers.length}`);
+        console.log(`✅ SUCCESS: Label generated with carrier ${carrierId} (${carrierName})`);
         break; // Exit loop on success
         
       } catch (error) {
         lastError = error;
-        const errorMessage = error.message || 'Unknown error';
+        const errorMessage = error.message || '';
         
-        console.log(`  ❌ FAILED with carrier ${carrierId}`);
-        console.log(`  - Error message: ${errorMessage}`);
-        console.log(`  - Error type: ${error.constructor.name}`);
+        console.log(`  ❌ FAILED with carrier ${carrierId}: ${errorMessage}`);
         
-        // Categorize the error
-        const errorCategory = categorizeError(errorMessage);
-        
-        console.log(`  📊 Error Analysis:`);
-        console.log(`    - Type: ${errorCategory.type}`);
-        console.log(`    - Category: ${errorCategory.category}`);
-        console.log(`    - Should try next carrier: ${errorCategory.shouldTryNextCarrier}`);
-        console.log(`    - User message: ${errorCategory.userMessage}`);
-        
-        // Store error details for later reference
-        carrierErrors.push({
-          carrierId,
-          carrierName,
-          errorMessage,
-          errorCategory,
-          attemptNumber: i + 1,
-          timestamp: new Date().toISOString()
-        });
-        
-        // Handle critical errors - stop immediately
-        if (errorCategory.type === 'CRITICAL') {
-          console.log(`  🛑 CRITICAL ERROR DETECTED - Stopping all carrier attempts`);
-          console.log(`  - Category: ${errorCategory.category}`);
-          console.log(`  - Reason: Critical errors should not try other carriers`);
+        // Check if error is "Delivery pincode is not serviceable"
+        if (errorMessage.toLowerCase().includes('delivery pincode is not serviceable') || 
+            errorMessage.toLowerCase().includes('pincode is not serviceable') ||
+            errorMessage.toLowerCase().includes('pincode not serviceable')) {
           
-          // Create notification for admin with error category
-          try {
-            await createLabelGenerationNotification(
-              errorMessage,
-              orderId,
-              vendor,
-              errorCategory.category,
-              'CRITICAL'
-            );
-          } catch (notifError) {
-            console.log(`  ⚠️ Failed to create notification: ${notifError.message}`);
-          }
+          console.log(`  ⚠️ Pincode not serviceable with carrier ${carrierId}, trying next carrier...`);
           
-          throw new Error(errorCategory.userMessage || 'Unable to perform action. Kindly contact Admin');
-        }
-        
-        // Handle retriable/unknown errors - try next carrier
-        if (errorCategory.shouldTryNextCarrier) {
+          // Continue to next carrier
           if (i < priorityCarriers.length - 1) {
-            console.log(`  ⏭️ Trying next carrier (${i + 2}/${priorityCarriers.length})...`);
             continue;
           } else {
-            console.log(`  ❌ All ${priorityCarriers.length} carriers exhausted`);
-            console.log(`  📋 Error Summary:`);
-            carrierErrors.forEach((err, idx) => {
-              console.log(`    ${idx + 1}. ${err.carrierName}: [${err.errorCategory.category}] ${err.errorMessage}`);
-            });
-            
-            // Create comprehensive notification for admin
+            console.log(`  ❌ All carriers exhausted for pincode serviceability`);
+            // Create notification for admin
             try {
-              const errorSummary = carrierErrors.map(err => 
-                `${err.carrierName}: [${err.errorCategory.category}] ${err.errorMessage}`
-              ).join(' | ');
-              
               await createLabelGenerationNotification(
-                `All ${priorityCarriers.length} carriers failed: ${errorSummary}`,
+                `All ${priorityCarriers.length} priority carriers failed for order ${orderId} due to pincode not serviceable`,
                 orderId,
-                vendor,
-                'ALL_CARRIERS_FAILED',
-                'RETRIABLE'
+                vendor
               );
             } catch (notifError) {
-              console.log(`  ⚠️ Failed to create notification: ${notifError.message}`);
+              console.log(`⚠️ Failed to create notification: ${notifError.message}`);
             }
-            
             throw new Error('Unable to perform action. Kindly contact Admin');
           }
+        } else {
+          // Different error - stop trying and throw
+          console.log(`  ❌ Non-serviceable error encountered, stopping attempts`);
+          console.log(`  - Error details: ${errorMessage}`);
+          
+          // Create notification for admin
+          try {
+            await createLabelGenerationNotification(errorMessage, orderId, vendor);
+          } catch (notifError) {
+            console.log(`⚠️ Failed to create notification: ${notifError.message}`);
+          }
+          
+          throw new Error('Unable to perform action. Kindly contact Admin');
         }
       }
     }
     
     // If we exhausted all carriers without success
     if (!assignedCarrier || !response) {
-      console.log('\n❌ LABEL GENERATION FAILED');
-      console.log(`  - All ${priorityCarriers.length} carriers failed for order ${orderId}`);
-      console.log(`  - Total attempts: ${carrierErrors.length}`);
+      console.log(`❌ All ${priorityCarriers.length} carriers failed for order ${orderId}`);
       throw new Error('Unable to perform action. Kindly contact Admin');
     }
     
-    // STEP 4: Process successful response
-    console.log('\n✅ STEP 4: Processing successful response...');
     console.log('🔍 Shipway API Response Structure:');
     console.log('  - Full response:', JSON.stringify(response, null, 2));
     console.log('  - Response keys:', Object.keys(response));
@@ -2765,29 +2449,16 @@ async function generateLabelForOrder(orderId, products, vendor, format = 'therma
     } else {
       console.log('❌ Could not find shipping_url in response structure');
       console.log('  - Available keys:', Object.keys(response));
-      const error = new Error('Invalid response structure from Shipway API - missing shipping_url');
-      console.error('❌ Response parsing error - this is unexpected');
-      throw error;
+      throw new Error('Invalid response structure from Shipway API - missing shipping_url');
     }
     
-    console.log('✅ Label data extracted successfully:');
-    console.log(`  - Shipping URL: ${shipping_url}`);
-    console.log(`  - AWB: ${awb}`);
-    console.log(`  - Carrier: ${assignedCarrier.carrier_name} (${assignedCarrier.carrier_id})`);
+    console.log('✅ Label generated successfully');
+    console.log('  - Shipping URL:', shipping_url);
+    console.log('  - AWB:', awb);
     
     // Handle different formats
     if (format === 'thermal') {
       // For thermal format, return the original label URL
-      console.log('\n═══════════════════════════════════════════════════════');
-      console.log('🎉 LABEL GENERATION COMPLETED SUCCESSFULLY');
-      console.log('═══════════════════════════════════════════════════════');
-      console.log(`  - Order ID: ${orderId}`);
-      console.log(`  - Format: ${format}`);
-      console.log(`  - Carrier: ${assignedCarrier.carrier_name}`);
-      console.log(`  - AWB: ${awb}`);
-      console.log(`  - Timestamp: ${new Date().toISOString()}`);
-      console.log('═══════════════════════════════════════════════════════\n');
-      
       return {
         success: true,
         message: 'Label generated successfully',
@@ -2801,53 +2472,29 @@ async function generateLabelForOrder(orderId, products, vendor, format = 'therma
       };
     } else {
       // For A4 and four-in-one formats, generate a PDF with appropriate layout
-      console.log(`\n🔄 STEP 5: Generating ${format} format PDF...`);
+      console.log(`🔄 Generating ${format} format PDF...`);
       
       try {
         const formattedPdfBuffer = await generateFormattedLabelPDF(shipping_url, format);
         
-        console.log(`✅ PDF formatted successfully`);
-        console.log('\n═══════════════════════════════════════════════════════');
-        console.log('🎉 LABEL GENERATION COMPLETED SUCCESSFULLY');
-        console.log('═══════════════════════════════════════════════════════');
-        console.log(`  - Order ID: ${orderId}`);
-        console.log(`  - Format: ${format}`);
-        console.log(`  - Carrier: ${assignedCarrier.carrier_name}`);
-        console.log(`  - AWB: ${awb}`);
-        console.log(`  - Timestamp: ${new Date().toISOString()}`);
-        console.log('═══════════════════════════════════════════════════════\n');
-        
+        // Create a temporary file or return the buffer directly
+        // For now, we'll return the buffer and let the frontend handle it
         return {
           success: true,
           message: `${format} format label generated successfully`,
           data: {
-            shipping_url: shipping_url,
+            shipping_url: shipping_url, // Keep original for reference
             awb: awb,
             order_id: orderId,
             carrier_id: assignedCarrier.carrier_id,
             carrier_name: assignedCarrier.carrier_name,
-            formatted_pdf: formattedPdfBuffer.toString('base64'),
+            formatted_pdf: formattedPdfBuffer.toString('base64'), // Base64 encoded PDF
             format: format
           }
         };
       } catch (pdfError) {
         console.error('❌ PDF formatting failed:', pdfError);
-        console.error('  - Error message:', pdfError.message);
-        console.error('  - Error stack:', pdfError.stack);
-        console.log('⚠️ Falling back to thermal format');
-        
         // Fallback to original thermal label
-        console.log('\n═══════════════════════════════════════════════════════');
-        console.log('🎉 LABEL GENERATION COMPLETED (FALLBACK TO THERMAL)');
-        console.log('═══════════════════════════════════════════════════════');
-        console.log(`  - Order ID: ${orderId}`);
-        console.log(`  - Requested format: ${format}`);
-        console.log(`  - Actual format: thermal (fallback)`);
-        console.log(`  - Carrier: ${assignedCarrier.carrier_name}`);
-        console.log(`  - AWB: ${awb}`);
-        console.log(`  - Timestamp: ${new Date().toISOString()}`);
-        console.log('═══════════════════════════════════════════════════════\n');
-        
         return {
           success: true,
           message: 'Label generated successfully (fallback to thermal format)',
@@ -2863,29 +2510,7 @@ async function generateLabelForOrder(orderId, products, vendor, format = 'therma
     }
     
   } catch (error) {
-    // Outer catch block for truly unexpected errors
-    console.error('\n💥💥💥 UNEXPECTED ERROR IN LABEL GENERATION 💥💥💥');
-    console.error('═══════════════════════════════════════════════════════');
-    console.error(`Order ID: ${orderId}`);
-    console.error(`Error Type: ${error.constructor.name}`);
-    console.error(`Error Message: ${error.message}`);
-    console.error(`Error Stack:`);
-    console.error(error.stack);
-    console.error('═══════════════════════════════════════════════════════');
-    
-    // Try to create notification even for unexpected errors
-    try {
-      await createLabelGenerationNotification(
-        `Unexpected error during label generation: ${error.message}`,
-        orderId,
-        vendor,
-        'UNEXPECTED_ERROR',
-        'CRITICAL'
-      );
-    } catch (notifError) {
-      console.error(`⚠️ Failed to create notification for unexpected error: ${notifError.message}`);
-    }
-    
+    console.error('❌ Label generation failed:', error);
     throw error;
   }
 }
