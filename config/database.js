@@ -52,6 +52,7 @@ class Database {
       });
       
       console.log('✅ MySQL connection established with IST timezone (+05:30)');
+      await this.createUtilityTable();
       await this.createCarriersTable();
       await this.createProductsTable();
       await this.createUsersTable();
@@ -67,6 +68,43 @@ class Database {
       this.mysqlConnection = null;
       this.mysqlInitialized = true; // Mark as initialized even if failed
       throw new Error(`Database initialization failed: ${error.message}`);
+    }
+  }
+
+  /**
+   * Create utility table if it doesn't exist
+   * This table stores system-wide configuration parameters
+   */
+  async createUtilityTable() {
+    if (!this.mysqlConnection) return;
+
+    try {
+      const createTableQuery = `
+        CREATE TABLE IF NOT EXISTS utility (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          parameter VARCHAR(255) UNIQUE NOT NULL,
+          value TEXT NOT NULL,
+          created_by VARCHAR(255) DEFAULT 'system',
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          modified_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          INDEX idx_parameter (parameter)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+      `;
+      
+      await this.mysqlConnection.execute(createTableQuery);
+      console.log('✅ Utility table created/verified');
+      
+      // Initialize with default parameter
+      const initQuery = `
+        INSERT INTO utility (parameter, value, created_by)
+        VALUES ('number_of_day_of_order_include', '60', 'system')
+        ON DUPLICATE KEY UPDATE modified_at = modified_at
+      `;
+      
+      await this.mysqlConnection.execute(initQuery);
+      console.log('✅ Utility table initialized with default parameters');
+    } catch (error) {
+      console.error('❌ Error creating utility table:', error.message);
     }
   }
 
@@ -1043,6 +1081,74 @@ class Database {
     } catch (error) {
       console.error('Error getting all carriers:', error);
       throw new Error('Failed to get carriers from database');
+    }
+  }
+
+  /**
+   * Get a utility parameter value from the database
+   * @param {string} parameter - The parameter name
+   * @returns {Promise<string|null>} The parameter value or null if not found
+   */
+  async getUtilityParameter(parameter) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      const [rows] = await this.mysqlConnection.execute(
+        'SELECT value FROM utility WHERE parameter = ?',
+        [parameter]
+      );
+      return rows.length > 0 ? rows[0].value : null;
+    } catch (error) {
+      console.error('Error getting utility parameter:', error);
+      throw new Error(`Failed to get utility parameter: ${parameter}`);
+    }
+  }
+
+  /**
+   * Update or insert a utility parameter
+   * @param {string} parameter - The parameter name
+   * @param {string} value - The parameter value
+   * @param {string} modifiedBy - Who is modifying the parameter (default: 'system')
+   * @returns {Promise<boolean>} True if successful
+   */
+  async updateUtilityParameter(parameter, value, modifiedBy = 'system') {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      await this.mysqlConnection.execute(
+        `INSERT INTO utility (parameter, value, created_by)
+         VALUES (?, ?, ?)
+         ON DUPLICATE KEY UPDATE value = ?, created_by = ?, modified_at = CURRENT_TIMESTAMP`,
+        [parameter, value, modifiedBy, value, modifiedBy]
+      );
+      return true;
+    } catch (error) {
+      console.error('Error updating utility parameter:', error);
+      throw new Error(`Failed to update utility parameter: ${parameter}`);
+    }
+  }
+
+  /**
+   * Get all utility parameters from the database
+   * @returns {Promise<Array>} Array of all parameters
+   */
+  async getAllUtilityParameters() {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      const [rows] = await this.mysqlConnection.execute(
+        'SELECT * FROM utility ORDER BY parameter ASC'
+      );
+      return rows;
+    } catch (error) {
+      console.error('Error getting all utility parameters:', error);
+      throw new Error('Failed to get all utility parameters from database');
     }
   }
 

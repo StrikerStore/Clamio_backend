@@ -12,13 +12,17 @@ const carrierServiceabilityService = require('../services/carrierServiceabilityS
  * @param {string} errorMessage - The error message from Shipway API
  * @param {string} orderId - The order ID that failed
  * @param {Object} vendor - The vendor object with id, name, warehouseId
+ * @param {string} errorCategory - The error category (e.g., CRITICAL_AUTH, RETRIABLE_PINCODE)
+ * @param {string} errorType - The error type (e.g., CRITICAL, RETRIABLE, UNKNOWN)
  */
-async function createLabelGenerationNotification(errorMessage, orderId, vendor) {
+async function createLabelGenerationNotification(errorMessage, orderId, vendor, errorCategory = 'UNKNOWN_ERROR', errorType = 'UNKNOWN') {
   try {
     console.log('📢 Creating notification for label generation error...');
     console.log('  - Error:', errorMessage);
     console.log('  - Order ID:', orderId);
     console.log('  - Vendor:', vendor.name);
+    console.log('  - Error Category:', errorCategory);
+    console.log('  - Error Type:', errorType);
     
     const database = require('../config/database');
     let notificationData = null;
@@ -40,7 +44,12 @@ async function createLabelGenerationNotification(errorMessage, orderId, vendor) 
         vendor_id: vendor.id,
         vendor_name: vendor.name,
         vendor_warehouse_id: vendor.warehouseId,
-        metadata: carrierId ? JSON.stringify({ carrier_attempted: carrierId }) : null,
+        metadata: JSON.stringify({
+          carrier_attempted: carrierId,
+          error_category: errorCategory,
+          error_type: errorType,
+          timestamp: new Date().toISOString()
+        }),
         error_details: 'Please add balance to shipway wallet and reassign this order'
       };
     }
@@ -68,7 +77,10 @@ async function createLabelGenerationNotification(errorMessage, orderId, vendor) 
         vendor_warehouse_id: vendor.warehouseId,
         metadata: JSON.stringify({
           carrier_attempted: carrierId,
-          pincode: pincode
+          pincode: pincode,
+          error_category: errorCategory,
+          error_type: errorType,
+          timestamp: new Date().toISOString()
         }),
         error_details: 'Check the serviceability of carrier manually in shipway and assign to vendor'
       };
@@ -87,7 +99,11 @@ async function createLabelGenerationNotification(errorMessage, orderId, vendor) 
         vendor_id: vendor.id,
         vendor_name: vendor.name,
         vendor_warehouse_id: vendor.warehouseId,
-        metadata: null,
+        metadata: JSON.stringify({
+          error_category: errorCategory,
+          error_type: errorType,
+          timestamp: new Date().toISOString()
+        }),
         error_details: 'Enter a valid store code or check if order was previously created. or check if vendor failure rate is high and vendor is blocked'
       };
     }
@@ -106,7 +122,11 @@ async function createLabelGenerationNotification(errorMessage, orderId, vendor) 
         vendor_id: vendor.id,
         vendor_name: vendor.name,
         vendor_warehouse_id: vendor.warehouseId,
-        metadata: null,
+        metadata: JSON.stringify({
+          error_category: errorCategory,
+          error_type: errorType,
+          timestamp: new Date().toISOString()
+        }),
         error_details: 'Admin needs to assign priority carriers to this order before label generation'
       };
     }
@@ -126,7 +146,11 @@ async function createLabelGenerationNotification(errorMessage, orderId, vendor) 
         vendor_id: vendor.id,
         vendor_name: vendor.name,
         vendor_warehouse_id: vendor.warehouseId,
-        metadata: null,
+        metadata: JSON.stringify({
+          error_category: errorCategory,
+          error_type: errorType,
+          timestamp: new Date().toISOString()
+        }),
         error_details: 'Label generation failed. Please check the error details and resolve the issue.'
       };
     }
@@ -2263,6 +2287,123 @@ router.post('/download-label', async (req, res) => {
 });
 
 /**
+ * Categorize error to determine if we should try next carrier or stop immediately
+ * @param {string} errorMessage - The error message from Shipway API
+ * @returns {Object} - { type, category, userMessage, shouldTryNextCarrier }
+ */
+function categorizeError(errorMessage) {
+  const msg = errorMessage.toLowerCase();
+  
+  // CRITICAL ERRORS - Stop immediately, don't try other carriers
+  
+  // Authentication/Authorization errors
+  if (msg.includes('authentication') || 
+      msg.includes('unauthorized') || 
+      msg.includes('invalid credentials') ||
+      msg.includes('invalid token') ||
+      msg.includes('access denied')) {
+    return {
+      type: 'CRITICAL',
+      category: 'CRITICAL_AUTH',
+      userMessage: 'Authentication failed. Please contact admin to verify Shipway credentials.',
+      shouldTryNextCarrier: false
+    };
+  }
+  
+  // Invalid data errors
+  if (msg.includes('invalid order data') || 
+      msg.includes('customer info not found') ||
+      msg.includes('missing required field') ||
+      msg.includes('invalid payload')) {
+    return {
+      type: 'CRITICAL',
+      category: 'CRITICAL_DATA',
+      userMessage: 'Invalid order data. Please contact admin to verify order information.',
+      shouldTryNextCarrier: false
+    };
+  }
+  
+  // Configuration errors
+  if (msg.includes('no priority carriers') || 
+      msg.includes('priority carriers assigned')) {
+    return {
+      type: 'CRITICAL',
+      category: 'CRITICAL_CONFIG',
+      userMessage: 'No priority carriers configured. Please contact admin.',
+      shouldTryNextCarrier: false
+    };
+  }
+  
+  // RETRIABLE ERRORS - Continue to next carrier
+  
+  // Pincode serviceability
+  if (msg.includes('pincode not serviceable') || 
+      msg.includes('pincode is not serviceable') ||
+      msg.includes('delivery pincode is not serviceable')) {
+    return {
+      type: 'RETRIABLE',
+      category: 'RETRIABLE_PINCODE',
+      userMessage: 'Delivery pincode not serviceable by this carrier.',
+      shouldTryNextCarrier: true
+    };
+  }
+  
+  // Network/Connection errors
+  if (msg.includes('timeout') || 
+      msg.includes('network error') ||
+      msg.includes('connection refused') ||
+      msg.includes('econnrefused') ||
+      msg.includes('socket hang up') ||
+      msg.includes('connection reset')) {
+    return {
+      type: 'RETRIABLE',
+      category: 'RETRIABLE_NETWORK',
+      userMessage: 'Network connection error. Trying next carrier...',
+      shouldTryNextCarrier: true
+    };
+  }
+  
+  // Carrier-specific errors
+  if (msg.includes('carrier not available') || 
+      msg.includes('carrier temporarily unavailable') ||
+      msg.includes('weight exceeds limit') ||
+      msg.includes('weight limit exceeded') ||
+      msg.includes('dimensions exceed') ||
+      msg.includes('service not available')) {
+    return {
+      type: 'RETRIABLE',
+      category: 'RETRIABLE_CARRIER',
+      userMessage: 'Carrier cannot handle this shipment. Trying next carrier...',
+      shouldTryNextCarrier: true
+    };
+  }
+  
+  // Rate limiting/Temporary unavailability
+  if (msg.includes('rate limit') || 
+      msg.includes('too many requests') ||
+      msg.includes('service temporarily unavailable') ||
+      msg.includes('server busy') ||
+      msg.includes('503') ||
+      msg.includes('502')) {
+    return {
+      type: 'RETRIABLE',
+      category: 'RETRIABLE_RATE',
+      userMessage: 'Service temporarily unavailable. Trying next carrier...',
+      shouldTryNextCarrier: true
+    };
+  }
+  
+  // UNKNOWN ERRORS - Default to retriable (safety net)
+  // Better to try next carrier than fail prematurely
+  return {
+    type: 'UNKNOWN',
+    category: 'UNKNOWN_ERROR',
+    userMessage: 'Unknown error occurred. Trying next carrier...',
+    shouldTryNextCarrier: true
+  };
+}
+
+/**
  * Generate label for an order (Condition 1: Direct download)
  */
 async function generateLabelForOrder(orderId, products, vendor, format = 'thermal') {
@@ -2336,19 +2477,32 @@ async function generateLabelForOrder(orderId, products, vendor, format = 'therma
     const allCarriers = await carrierServiceabilityService.readCarriersFromDatabase();
     const carrierMap = new Map(allCarriers.map(c => [c.carrier_id, c]));
     
-    // STEP 2: Try each carrier in sequence with fallback logic
-    console.log(`🔄 Attempting label generation with ${priorityCarriers.length} carriers...`);
+    // STEP 2: Try each carrier in sequence with smart fallback logic
+    console.log(`\n${'='.repeat(80)}`);
+    console.log(`🚀 LABEL GENERATION STARTED`);
+    console.log(`   Order ID: ${orderId}`);
+    console.log(`   Format: ${format}`);
+    console.log(`   Vendor: ${vendor.name} (ID: ${vendor.id})`);
+    console.log(`   Timestamp: ${new Date().toISOString()}`);
+    console.log(`   Available Carriers: ${priorityCarriers.length}`);
+    console.log(`${'='.repeat(80)}\n`);
     
     let assignedCarrier = null;
     let response = null;
     let lastError = null;
+    const carrierAttempts = []; // Store all carrier attempts for summary
     
     for (let i = 0; i < priorityCarriers.length; i++) {
       const carrierId = priorityCarriers[i];
       const carrierInfo = carrierMap.get(carrierId);
       const carrierName = carrierInfo ? carrierInfo.carrier_name : `Carrier ${carrierId}`;
+      const attemptTimestamp = new Date().toISOString();
       
-      console.log(`\n🔹 ATTEMPT ${i + 1}/${priorityCarriers.length}: Trying carrier ${carrierId} (${carrierName})`);
+      console.log(`\n🔹 CARRIER ATTEMPT ${i + 1}/${priorityCarriers.length}`);
+      console.log(`   Carrier ID: ${carrierId}`);
+      console.log(`   Carrier Name: ${carrierName}`);
+      console.log(`   Timestamp: ${attemptTimestamp}`);
+      console.log(`   ${'─'.repeat(70)}`);
       
       try {
         // Create a modified products array with this specific carrier
@@ -2360,7 +2514,7 @@ async function generateLabelForOrder(orderId, products, vendor, format = 'therma
         // Prepare request body with this carrier
         const requestBody = prepareShipwayRequestBody(orderId, modifiedProducts, originalOrder, vendor, true);
         
-        console.log(`  - Calling Shipway API with carrier ${carrierId}...`);
+        console.log(`   📡 Calling Shipway API...`);
         
         // Call Shipway API
         response = await callShipwayPushOrderAPI(requestBody, true);
@@ -2371,47 +2525,106 @@ async function generateLabelForOrder(orderId, products, vendor, format = 'therma
           carrier_name: carrierName
         };
         
-        console.log(`✅ SUCCESS: Label generated with carrier ${carrierId} (${carrierName})`);
+        // Log success
+        console.log(`\n${'='.repeat(80)}`);
+        console.log(`✅ LABEL GENERATION SUCCESSFUL!`);
+        console.log(`   Order ID: ${orderId}`);
+        console.log(`   Carrier: ${carrierName} (ID: ${carrierId})`);
+        console.log(`   AWB: ${response.awb_response?.AWB || response.AWB || 'N/A'}`);
+        console.log(`   Timestamp: ${new Date().toISOString()}`);
+        console.log(`${'='.repeat(80)}\n`);
+        
         break; // Exit loop on success
         
       } catch (error) {
         lastError = error;
         const errorMessage = error.message || '';
+        const errorTimestamp = new Date().toISOString();
         
-        console.log(`  ❌ FAILED with carrier ${carrierId}: ${errorMessage}`);
+        // Categorize the error
+        const errorCategory = categorizeError(errorMessage);
         
-        // Check if error is "Delivery pincode is not serviceable"
-        if (errorMessage.toLowerCase().includes('delivery pincode is not serviceable') || 
-            errorMessage.toLowerCase().includes('pincode is not serviceable') ||
-            errorMessage.toLowerCase().includes('pincode not serviceable')) {
-          
-          console.log(`  ⚠️ Pincode not serviceable with carrier ${carrierId}, trying next carrier...`);
-          
-          // Continue to next carrier
-          if (i < priorityCarriers.length - 1) {
-            continue;
-          } else {
-            console.log(`  ❌ All carriers exhausted for pincode serviceability`);
-            // Create notification for admin
-            try {
-              await createLabelGenerationNotification(
-                `All ${priorityCarriers.length} priority carriers failed for order ${orderId} due to pincode not serviceable`,
-                orderId,
-                vendor
-              );
-            } catch (notifError) {
-              console.log(`⚠️ Failed to create notification: ${notifError.message}`);
-            }
-            throw new Error('Unable to perform action. Kindly contact Admin');
-          }
-        } else {
-          // Different error - stop trying and throw
-          console.log(`  ❌ Non-serviceable error encountered, stopping attempts`);
-          console.log(`  - Error details: ${errorMessage}`);
+        // Store attempt details
+        carrierAttempts.push({
+          carrier_id: carrierId,
+          carrier_name: carrierName,
+          error: errorMessage,
+          error_type: errorCategory.type,
+          error_category: errorCategory.category,
+          timestamp: errorTimestamp
+        });
+        
+        console.log(`   ❌ ATTEMPT FAILED`);
+        console.log(`   Error Type: ${errorCategory.type}`);
+        console.log(`   Error Category: ${errorCategory.category}`);
+        console.log(`   Error Message: ${errorMessage}`);
+        console.log(`   User Message: ${errorCategory.userMessage}`);
+        console.log(`   Should Try Next: ${errorCategory.shouldTryNextCarrier}`);
+        console.log(`   Timestamp: ${errorTimestamp}`);
+        
+        // Check if this is a CRITICAL error - stop immediately
+        if (errorCategory.type === 'CRITICAL') {
+          console.log(`\n🛑 CRITICAL ERROR DETECTED - STOPPING ALL ATTEMPTS`);
+          console.log(`   Reason: ${errorCategory.category}`);
+          console.log(`   No further carriers will be tried`);
           
           // Create notification for admin
           try {
-            await createLabelGenerationNotification(errorMessage, orderId, vendor);
+            await createLabelGenerationNotification(
+              errorMessage,
+              orderId,
+              vendor,
+              errorCategory.category,
+              errorCategory.type
+            );
+            console.log(`   ✅ Notification created for admin`);
+          } catch (notifError) {
+            console.log(`   ⚠️ Failed to create notification: ${notifError.message}`);
+          }
+          
+          throw new Error('Unable to perform action. Kindly contact Admin');
+        }
+        
+        // Check if we should try next carrier (RETRIABLE or UNKNOWN errors)
+        if (errorCategory.shouldTryNextCarrier && i < priorityCarriers.length - 1) {
+          console.log(`   ⏭️  Trying next carrier...`);
+          continue; // Try next carrier
+        } else {
+          // Last carrier or non-retriable error
+          if (i < priorityCarriers.length - 1) {
+            console.log(`   🛑 Error not retriable, stopping attempts`);
+          } else {
+            console.log(`   🛑 All ${priorityCarriers.length} carriers exhausted`);
+          }
+          
+          // Create error summary
+          console.log(`\n${'='.repeat(80)}`);
+          console.log(`❌ LABEL GENERATION FAILED - ALL CARRIERS EXHAUSTED`);
+          console.log(`   Order ID: ${orderId}`);
+          console.log(`   Total Attempts: ${carrierAttempts.length}`);
+          console.log(`\n   📋 CARRIER ATTEMPT SUMMARY:`);
+          carrierAttempts.forEach((attempt, idx) => {
+            console.log(`   ${idx + 1}. ${attempt.carrier_name} (ID: ${attempt.carrier_id})`);
+            console.log(`      Error Type: ${attempt.error_type}`);
+            console.log(`      Error Category: ${attempt.error_category}`);
+            console.log(`      Error: ${attempt.error.substring(0, 100)}${attempt.error.length > 100 ? '...' : ''}`);
+          });
+          console.log(`${'='.repeat(80)}\n`);
+          
+          // Create notification for admin with summary
+          const summarizedError = carrierAttempts.length === 1
+            ? errorMessage
+            : `All ${carrierAttempts.length} priority carriers failed for order ${orderId}. Last error: ${errorMessage}`;
+          
+          try {
+            await createLabelGenerationNotification(
+              summarizedError,
+              orderId,
+              vendor,
+              errorCategory.category,
+              errorCategory.type
+            );
+            console.log(`✅ Notification created for admin`);
           } catch (notifError) {
             console.log(`⚠️ Failed to create notification: ${notifError.message}`);
           }
@@ -2510,7 +2723,35 @@ async function generateLabelForOrder(orderId, products, vendor, format = 'therma
     }
     
   } catch (error) {
-    console.error('❌ Label generation failed:', error);
+    // Outer catch for unexpected errors that weren't handled by carrier loop
+    console.log(`\n${'='.repeat(80)}`);
+    console.log(`💥💥💥 UNEXPECTED ERROR IN LABEL GENERATION 💥💥💥`);
+    console.log(`   Order ID: ${orderId}`);
+    console.log(`   Vendor: ${vendor ? vendor.name : 'N/A'} (ID: ${vendor ? vendor.id : 'N/A'})`);
+    console.log(`   Error Type: ${error.constructor.name}`);
+    console.log(`   Error Message: ${error.message}`);
+    console.log(`   Timestamp: ${new Date().toISOString()}`);
+    console.log(`${'─'.repeat(80)}`);
+    console.log(`   📋 STACK TRACE:`);
+    console.log(error.stack || '   (No stack trace available)');
+    console.log(`${'='.repeat(80)}\n`);
+    
+    // Try to create notification even for unexpected errors
+    if (vendor) {
+      try {
+        await createLabelGenerationNotification(
+          `Unexpected error during label generation: ${error.message}`,
+          orderId,
+          vendor,
+          'UNEXPECTED_ERROR',
+          'CRITICAL'
+        );
+        console.log(`✅ Notification created for unexpected error`);
+      } catch (notifError) {
+        console.log(`⚠️ Failed to create notification for unexpected error: ${notifError.message}`);
+      }
+    }
+    
     throw error;
   }
 }
