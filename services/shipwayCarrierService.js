@@ -4,10 +4,52 @@ const fs = require('fs');
 const database = require('../config/database');
 
 class ShipwayCarrierService {
-  constructor() {
+  constructor(accountCode = null) {
     this.apiUrl = 'https://app.shipway.com/api/getcarrier';
-    // Use the same Basic Auth header as other Shipway APIs
-    this.basicAuthHeader = process.env.SHIPWAY_BASIC_AUTH_HEADER;
+    this.accountCode = accountCode;
+    this.basicAuthHeader = null;
+    this.initialized = false;
+  }
+
+  /**
+   * Initialize service by fetching store credentials
+   * @returns {Promise<void>}
+   */
+  async initialize() {
+    if (this.initialized) {
+      return;
+    }
+
+    try {
+      if (this.accountCode) {
+        // Multi-store mode: fetch credentials from database
+        const store = await database.getStoreByAccountCode(this.accountCode);
+        
+        if (!store) {
+          throw new Error(`Store not found for account code: ${this.accountCode}`);
+        }
+        
+        if (store.status !== 'active') {
+          throw new Error(`Store is not active: ${this.accountCode}`);
+        }
+        
+        this.basicAuthHeader = store.auth_token;
+        console.log(`✅ ShipwayCarrierService initialized for store: ${this.accountCode}`);
+      } else {
+        // Legacy mode: use environment variable
+        this.basicAuthHeader = process.env.SHIPWAY_BASIC_AUTH_HEADER;
+        console.log(`✅ ShipwayCarrierService initialized in legacy mode`);
+      }
+
+      if (!this.basicAuthHeader) {
+        throw new Error('Shipway API configuration error. No auth token available.');
+      }
+
+      this.initialized = true;
+    } catch (error) {
+      console.error('❌ ShipwayCarrierService initialization failed:', error.message);
+      throw error;
+    }
   }
 
   /**
@@ -15,8 +57,11 @@ class ShipwayCarrierService {
    * @returns {Promise<Array>} Array of carrier data
    */
   async fetchCarriersFromShipway() {
+    // Initialize service if not already initialized
+    await this.initialize();
+    
     try {
-      console.log('🔵 SHIPWAY CARRIER: Fetching carriers from Shipway API...');
+      console.log(`🔵 SHIPWAY CARRIER: Fetching carriers from Shipway API${this.accountCode ? ` (${this.accountCode})` : ''}...`);
       
       if (!this.basicAuthHeader) {
         throw new Error('Shipway API configuration error. SHIPWAY_BASIC_AUTH_HEADER not found in environment variables.');
@@ -118,7 +163,8 @@ class ShipwayCarrierService {
             carrier_name: carrierName,
             status: status,
             weight_in_kg: weightInKg,
-            priority: priority
+            priority: priority,
+            account_code: this.accountCode || 'STRI' // Multi-store: Tag carrier with account_code
           });
 
           console.log(`  - Extracted: ${carrierId} - ${carrierName} (${status}) - Weight: ${weightInKg || 'N/A'} - Priority: ${priority}`);
@@ -216,25 +262,30 @@ class ShipwayCarrierService {
       const finalCarriers = [];
       
       // 1. Process existing carriers (preserve priorities, update status)
-      existingCarriers.forEach(existingCarrier => {
-        const apiCarrier = newCarrierMap.get(existingCarrier.carrier_id);
-        
-        if (apiCarrier) {
-          // Carrier still exists in API - keep priority, update status
-          finalCarriers.push({
-            ...existingCarrier,
-            status: apiCarrier.status, // Update status from Shipway
-            carrier_name: apiCarrier.carrier_name, // Update name if changed
-            weight_in_kg: apiCarrier.weight_in_kg // Update weight if changed
-          });
-        }
-        // If carrier doesn't exist in API, it will be removed (not added to finalCarriers)
-      });
+      // Only process carriers that belong to this store (filter by account_code)
+      existingCarriers
+        .filter(carrier => !this.accountCode || carrier.account_code === this.accountCode)
+        .forEach(existingCarrier => {
+          const apiCarrier = newCarrierMap.get(existingCarrier.carrier_id);
+          
+          if (apiCarrier) {
+            // Carrier still exists in API - keep priority, update status
+            finalCarriers.push({
+              ...existingCarrier,
+              account_code: this.accountCode || existingCarrier.account_code, // Ensure account_code is set
+              status: apiCarrier.status, // Update status from Shipway
+              carrier_name: apiCarrier.carrier_name, // Update name if changed
+              weight_in_kg: apiCarrier.weight_in_kg // Update weight if changed
+            });
+          }
+          // If carrier doesn't exist in API, it will be removed (not added to finalCarriers)
+        });
       
       // 2. Add new carriers with next available priority
       newCarrierIds.forEach(newCarrier => {
         finalCarriers.push({
           ...newCarrier,
+          account_code: this.accountCode || newCarrier.account_code, // Ensure account_code is set
           priority: nextPriority++
         });
         console.log(`➕ Added new carrier: ${newCarrier.carrier_id} with priority ${nextPriority - 1}`);
@@ -252,14 +303,27 @@ class ShipwayCarrierService {
         carrier.priority = index + 1;
       });
       
-      console.log(`📊 Final carriers: ${finalCarriers.length}`);
-      console.log(`📊 Final priorities: ${finalCarriers.map(c => `${c.carrier_id}:${c.priority}`).join(', ')}`);
+      // Filter final carriers to only include carriers for this store
+      const storeCarriers = finalCarriers.filter(carrier => 
+        !this.accountCode || carrier.account_code === this.accountCode
+      );
       
-      // Save to MySQL database
-      const result = await this.saveCarriersToDatabase(finalCarriers);
+      console.log(`📊 Final carriers for store ${this.accountCode || 'all'}: ${storeCarriers.length}`);
+      console.log(`📊 Final priorities: ${storeCarriers.map(c => `${c.carrier_id}:${c.priority}`).join(', ')}`);
+      
+      // Save to MySQL database (only save carriers for this store)
+      const result = await this.saveCarriersToDatabase(storeCarriers);
+      
+      // Normalize priorities after sync to ensure continuity (1, 2, 3...)
+      if (this.accountCode && storeCarriers.length > 0) {
+        await this.normalizeCarrierPriorities(this.accountCode);
+      }
+      
+      // Update carrierCount to reflect only this store's carriers
+      result.carrierCount = storeCarriers.length;
       
       console.log('✅ SHIPWAY CARRIER: Smart carrier sync completed');
-      console.log(`📊 Summary: ${newCarrierIds.length} added, ${removedCarrierIds.length} removed, ${finalCarriers.length} total`);
+      console.log(`📊 Summary: ${newCarrierIds.length} added, ${removedCarrierIds.length} removed, ${storeCarriers.length} total for store ${this.accountCode || 'all'}`);
       
       return result;
     } catch (error) {
@@ -289,9 +353,17 @@ class ShipwayCarrierService {
         throw new Error('MySQL connection not available. Please ensure MySQL is running and configured.');
       }
 
-      const carriers = await database.getAllCarriers();
+      // Filter carriers by account_code if available (multi-store support)
+      let carriers;
+      if (this.accountCode) {
+        carriers = await database.getCarriersByAccountCode(this.accountCode);
+        console.log(`✅ SHIPWAY CARRIER: Carriers loaded from MySQL for store: ${this.accountCode}`);
+      } else {
+        // Legacy mode: get all carriers
+        carriers = await database.getAllCarriers();
+        console.log('✅ SHIPWAY CARRIER: Carriers loaded from MySQL (all stores)');
+      }
       
-      console.log('✅ SHIPWAY CARRIER: Carriers loaded from MySQL');
       console.log('  - Total carriers:', carriers.length);
       console.log('  - Ordered by priority (admin-set priorities)');
 
@@ -329,8 +401,16 @@ class ShipwayCarrierService {
 
       console.log('📊 CSV Export: Carriers sorted by priority (1, 2, 3...)');
 
-      // Get headers from the first carrier object
-      const headers = Object.keys(sortedCarriers[0]);
+      // Define headers with store info first, then carrier details
+      const headers = [
+        'store_name',
+        'account_code',
+        'carrier_id',
+        'carrier_name',
+        'status',
+        'weight_in_kg',
+        'priority'
+      ];
       
       // Create CSV header row
       const csvHeader = headers.join(',');
@@ -338,7 +418,7 @@ class ShipwayCarrierService {
       // Create CSV data rows
       const csvRows = sortedCarriers.map(carrier => {
         return headers.map(header => {
-          const value = carrier[header];
+          const value = carrier[header] !== undefined && carrier[header] !== null ? carrier[header] : '';
           // Escape quotes and wrap in quotes if contains comma or newline
           const escapedValue = String(value).replace(/"/g, '""');
           return `"${escapedValue}"`;
@@ -369,9 +449,6 @@ class ShipwayCarrierService {
       const normalizedContent = csvContent.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
       const lines = normalizedContent.trim().split('\n');
       console.log('🔍 Number of lines:', lines.length);
-      console.log('🔍 First line:', lines[0]);
-      console.log('🔍 Second line:', lines[1]);
-      console.log('🔍 All lines:', lines);
       
       if (lines.length < 2) {
         throw new Error('CSV file must contain header and at least one data row');
@@ -390,10 +467,10 @@ class ShipwayCarrierService {
         throw new Error(`CSV is missing required columns: ${missingColumns.join(', ')}. Expected columns: ${requiredColumns.join(', ')}`);
       }
 
-      // Check for extra columns
-      const extraColumns = header.filter(col => !requiredColumns.includes(col));
-      if (extraColumns.length > 0) {
-        console.log('⚠️ Warning: CSV contains extra columns:', extraColumns);
+      // account_code is REQUIRED for multi-store upload
+      const accountCodeIndex = header.indexOf('account_code');
+      if (accountCodeIndex === -1) {
+        throw new Error('CSV must include "account_code" column for multi-store carrier priority upload');
       }
 
       const carrierIdIndex = header.indexOf('carrier_id');
@@ -402,17 +479,23 @@ class ShipwayCarrierService {
 
       console.log('🔍 carrier_id index:', carrierIdIndex);
       console.log('🔍 priority index:', priorityIndex);
+      console.log('🔍 account_code index:', accountCodeIndex);
 
-      // Read current carrier data to validate against
-      const currentCarriers = await this.readCarriersFromDatabase();
-      const carrierMap = new Map(currentCarriers.map(carrier => [carrier.carrier_id, carrier]));
-      const existingCarrierIds = new Set(currentCarriers.map(carrier => carrier.carrier_id));
+      // Read ALL carriers from database (for validation across all stores)
+      // Use database directly to get all carriers regardless of accountCode
+      const allCarriers = await database.getAllCarriers();
       
-      console.log('🔍 Existing carrier IDs:', Array.from(existingCarrierIds));
+      // Group carriers by account_code for validation
+      const carriersByStore = new Map();
+      allCarriers.forEach(carrier => {
+        if (!carriersByStore.has(carrier.account_code)) {
+          carriersByStore.set(carrier.account_code, []);
+        }
+        carriersByStore.get(carrier.account_code).push(carrier);
+      });
 
-      // Parse data rows
-      const updates = [];
-      const uploadedCarrierIds = new Set();
+      // Parse data rows and group by store (account_code)
+      const updatesByStore = new Map(); // Map<account_code, Array<update>>
       
       for (let i = 1; i < lines.length; i++) {
         const line = lines[i];
@@ -424,70 +507,115 @@ class ShipwayCarrierService {
         const statusRaw = values[statusIndex] || '';
         const statusNormalized = String(statusRaw).trim().toLowerCase();
         const status = statusNormalized === 'inactive' ? 'inactive' : (statusNormalized === 'active' ? 'active' : statusRaw);
+        const accountCode = values[accountCodeIndex];
 
-        console.log(`🔍 Row ${i}: carrier_id="${carrierId}", priority="${values[priorityIndex]}" -> ${priority}`);
+        console.log(`🔍 Row ${i}: carrier_id="${carrierId}", account_code="${accountCode}", priority="${values[priorityIndex]}" -> ${priority}`);
 
-        if (!carrierId || isNaN(priority) || priority < 1) {
-          throw new Error(`Invalid data in row ${i + 1}: carrier_id="${carrierId}", priority="${values[priorityIndex]}"`);
+        if (!carrierId || !accountCode || isNaN(priority) || priority < 1) {
+          throw new Error(`Invalid data in row ${i + 1}: carrier_id="${carrierId}", account_code="${accountCode}", priority="${values[priorityIndex]}"`);
         }
 
-        // Check if carrier ID exists in current data
-        if (!existingCarrierIds.has(carrierId)) {
-          throw new Error(`Carrier ID "${carrierId}" in row ${i + 1} does not exist in the current carrier data`);
+        // Initialize store group if not exists
+        if (!updatesByStore.has(accountCode)) {
+          updatesByStore.set(accountCode, []);
         }
 
-        // Check for duplicate carrier IDs in uploaded CSV
-        if (uploadedCarrierIds.has(carrierId)) {
-          throw new Error(`Duplicate carrier ID "${carrierId}" found in uploaded CSV`);
+        // Check if carrier ID exists in current data for THIS STORE
+        const storeCarriers = carriersByStore.get(accountCode) || [];
+        const carrierExists = storeCarriers.some(c => String(c.carrier_id) === String(carrierId));
+        
+        if (!carrierExists) {
+          throw new Error(`Carrier ID "${carrierId}" in row ${i + 1} does not exist in the current carrier data for store "${accountCode}"`);
         }
 
-        uploadedCarrierIds.add(carrierId);
-        updates.push({ carrier_id: carrierId, priority, status });
+        // Check for duplicate carrier IDs in uploaded CSV (within the same store)
+        const storeUpdates = updatesByStore.get(accountCode);
+        const duplicateInStore = storeUpdates.some(u => String(u.carrier_id) === String(carrierId));
+        
+        if (duplicateInStore) {
+          throw new Error(`Duplicate carrier ID "${carrierId}" found in uploaded CSV for store "${accountCode}" (row ${i + 1}). Each carrier can only appear once per store.`);
+        }
+
+        storeUpdates.push({ carrier_id: carrierId, account_code: accountCode, priority, status });
       }
 
-      console.log('🔍 Valid updates found:', updates.length);
-      console.log('🔍 Uploaded carrier IDs:', Array.from(uploadedCarrierIds));
+      console.log('🔍 Updates grouped by store:', Array.from(updatesByStore.entries()).map(([code, updates]) => `${code}: ${updates.length} carriers`));
 
-      if (updates.length === 0) {
+      if (updatesByStore.size === 0) {
         throw new Error('No valid data rows found in CSV');
       }
 
-      // Validate that ALL existing carrier IDs are present in the uploaded CSV
-      const missingCarrierIds = Array.from(existingCarrierIds).filter(id => !uploadedCarrierIds.has(id));
-      if (missingCarrierIds.length > 0) {
-        throw new Error(`Uploaded CSV is missing the following carrier IDs: ${missingCarrierIds.join(', ')}. All existing carriers must be included in the CSV.`);
-      }
+      // Validate and update each store separately
+      const results = [];
+      let totalUpdated = 0;
 
-      // Validate priority values are unique
-      const priorityValues = updates.map(update => update.priority);
-      const uniquePriorities = new Set(priorityValues);
-      if (uniquePriorities.size !== priorityValues.length) {
-        throw new Error('Priority values must be unique. Duplicate priority values found in uploaded CSV.');
-      }
+      for (const [accountCode, updates] of updatesByStore.entries()) {
+        const storeCarriers = carriersByStore.get(accountCode) || [];
+        const existingCarrierIds = new Set(storeCarriers.map(c => String(c.carrier_id)));
+        const uploadedCarrierIds = new Set(updates.map(u => String(u.carrier_id)));
 
-      // Update priorities in database
-      let updatedCount = 0;
-      for (const update of updates) {
-        const existing = await database.getCarrierById(update.carrier_id);
-        if (existing) {
-          const updateData = { priority: update.priority };
-          if (update.status) {
-            updateData.status = update.status;
-          }
-          await database.updateCarrier(update.carrier_id, updateData);
-          updatedCount++;
+        // Validate that ALL existing carrier IDs for THIS STORE are present in the uploaded CSV
+        const missingCarrierIds = Array.from(existingCarrierIds).filter(id => !uploadedCarrierIds.has(id));
+        if (missingCarrierIds.length > 0) {
+          throw new Error(`Uploaded CSV is missing the following carrier IDs for store "${accountCode}": ${missingCarrierIds.join(', ')}. All existing carriers for this store must be included in the CSV.`);
         }
+
+        // Validate priority values are unique within this store
+        const priorityValues = updates.map(update => update.priority);
+        const uniquePriorities = new Set(priorityValues);
+        if (uniquePriorities.size !== priorityValues.length) {
+          throw new Error(`Priority values must be unique within store "${accountCode}". Duplicate priority values found in uploaded CSV.`);
+        }
+
+        // Update priorities in database for this store (store-specific)
+        let storeUpdatedCount = 0;
+        for (const update of updates) {
+          // Get carrier by both carrier_id and account_code to ensure store-specific lookup
+          const existing = await database.getCarrierById(update.carrier_id, accountCode);
+          if (existing && String(existing.account_code) === String(accountCode)) {
+            const updateData = { 
+              priority: update.priority,
+              account_code: accountCode // Ensure account_code is set
+            };
+            if (update.status) {
+              updateData.status = update.status;
+            }
+            // Update with account_code to ensure store-specific update
+            await database.updateCarrier(update.carrier_id, updateData, accountCode);
+            storeUpdatedCount++;
+          } else {
+            console.warn(`⚠️ Carrier ${update.carrier_id} not found for store ${accountCode}`);
+          }
+        }
+
+        // Normalize priorities after updating to ensure continuity (1, 2, 3...)
+        if (storeUpdatedCount > 0) {
+          await this.normalizeCarrierPriorities(accountCode);
+          console.log(`✅ Store "${accountCode}": Normalized priorities after update`);
+        }
+
+        totalUpdated += storeUpdatedCount;
+        results.push({
+          accountCode,
+          updatedCount: storeUpdatedCount,
+          totalCarriers: storeCarriers.length
+        });
+
+        console.log(`✅ Store "${accountCode}": Updated ${storeUpdatedCount}/${updates.length} carriers`);
       }
+
+      const storeSummary = results.map(r => `${r.accountCode}: ${r.updatedCount}/${r.totalCarriers}`).join(', ');
 
       return {
         success: true,
-        message: `Successfully updated priorities for ${updatedCount} carriers. All ${updates.length} carriers validated.`,
-        updatedCount,
-        totalCarriers: currentCarriers.length,
+        message: `Successfully updated priorities for ${totalUpdated} carriers across ${results.length} store(s). ${storeSummary}`,
+        updatedCount: totalUpdated,
+        totalCarriers: allCarriers.length,
+        storesProcessed: results.length,
         validation: {
-          totalCarriersInDatabase: currentCarriers.length,
-          totalCarriersInCSV: updates.length,
-          missingCarriers: 0,
+          totalCarriersInDatabase: allCarriers.length,
+          totalCarriersInCSV: Array.from(updatesByStore.values()).reduce((sum, updates) => sum + updates.length, 0),
+          storesUpdated: results.map(r => r.accountCode),
           duplicatePriorities: false
         }
       };
@@ -503,18 +631,31 @@ class ShipwayCarrierService {
    * @param {'up'|'down'} direction
    * @returns {Promise<Object>} Result object
    */
-  async moveCarrier(carrierId, direction) {
+  async moveCarrier(carrierId, direction, accountCode = null) {
     try {
+      // If accountCode is provided, use it to filter carriers by store
+      // Otherwise, use this.accountCode from the service instance
+      const storeAccountCode = accountCode || this.accountCode;
+      
+      if (!storeAccountCode) {
+        throw new Error('account_code is required for moving carriers. Please specify a store.');
+      }
+
       const carriers = await this.readCarriersFromDatabase();
       const normalizeStatus = (s) => String(s || '').trim().toLowerCase();
 
+      // Filter by store (account_code) AND status
       const active = carriers
-        .filter(c => normalizeStatus(c.status) === 'active')
+        .filter(c => {
+          const matchesStore = c.account_code === storeAccountCode;
+          const matchesStatus = normalizeStatus(c.status) === 'active';
+          return matchesStore && matchesStatus;
+        })
         .sort((a, b) => (parseInt(a.priority) || 0) - (parseInt(b.priority) || 0));
 
       const index = active.findIndex(c => String(c.carrier_id) === String(carrierId));
       if (index === -1) {
-        throw new Error('Carrier not found or not active');
+        throw new Error('Carrier not found or not active in the selected store');
       }
       if (direction === 'up' && index === 0) {
         return { success: true, message: 'Already at top' };
@@ -533,8 +674,8 @@ class ShipwayCarrierService {
       // Insert it at the new position
       newOrder.splice(newIndex, 0, movedCarrier);
 
-      // Update priorities sequentially (1, 2, 3, ...)
-      await database.reorderCarrierPriorities(newOrder);
+      // Update priorities sequentially (1, 2, 3, ...) - only for this store's carriers
+      await database.reorderCarrierPriorities(newOrder, storeAccountCode);
 
       return { success: true, message: 'Carrier moved successfully' };
     } catch (error) {
@@ -544,21 +685,33 @@ class ShipwayCarrierService {
   }
 
   /**
-   * Normalize carrier priorities to be sequential (1, 2, 3, ...)
+   * Normalize carrier priorities to be sequential (1, 2, 3, ...) for a specific store
    * This fixes any gaps or duplicates in priority values
+   * @param {string} accountCode - Optional. Store account code. If not provided, uses this.accountCode
    * @returns {Promise<Object>} Result object
    */
-  async normalizeCarrierPriorities() {
+  async normalizeCarrierPriorities(accountCode = null) {
     try {
+      const storeAccountCode = accountCode || this.accountCode;
+      
+      if (!storeAccountCode) {
+        throw new Error('account_code is required for normalizing priorities. Please specify a store.');
+      }
+
       const carriers = await this.readCarriersFromDatabase();
       const normalizeStatus = (s) => String(s || '').trim().toLowerCase();
 
+      // Filter by store (account_code) AND status
       const active = carriers
-        .filter(c => normalizeStatus(c.status) === 'active')
+        .filter(c => {
+          const matchesStore = c.account_code === storeAccountCode;
+          const matchesStatus = normalizeStatus(c.status) === 'active';
+          return matchesStore && matchesStatus;
+        })
         .sort((a, b) => (parseInt(a.priority) || 0) - (parseInt(b.priority) || 0));
 
       if (active.length === 0) {
-        return { success: true, message: 'No active carriers to normalize' };
+        return { success: true, message: `No active carriers to normalize for store ${storeAccountCode}` };
       }
 
       // Check if normalization is needed
@@ -573,13 +726,13 @@ class ShipwayCarrierService {
       }
 
       if (!needsNormalization) {
-        return { success: true, message: 'Priorities are already normalized' };
+        return { success: true, message: `Priorities are already normalized for store ${storeAccountCode}` };
       }
 
-      // Normalize priorities
-      await database.reorderCarrierPriorities(active);
+      // Normalize priorities (store-specific)
+      await database.reorderCarrierPriorities(active, storeAccountCode);
 
-      return { success: true, message: `Normalized priorities for ${active.length} active carriers` };
+      return { success: true, message: `Normalized priorities for ${active.length} active carriers in store ${storeAccountCode}` };
     } catch (error) {
       console.error('Error normalizing carrier priorities:', error.message);
       throw new Error(error.message || 'Failed to normalize carrier priorities');
@@ -652,4 +805,9 @@ class ShipwayCarrierService {
   }
 }
 
-module.exports = new ShipwayCarrierService(); 
+// Default instance for legacy callers (no account_code context)
+const defaultShipwayCarrierService = new ShipwayCarrierService();
+
+// Export default instance (backward compatible) and also the class for multi-store usage
+module.exports = defaultShipwayCarrierService;
+module.exports.ShipwayCarrierService = ShipwayCarrierService; 

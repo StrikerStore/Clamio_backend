@@ -188,6 +188,26 @@ const requireAdminOrSuperadmin = authorizeRoles(['admin', 'superadmin']);
 const requireAnyUser = authorizeRoles(['admin', 'vendor', 'superadmin']);
 
 /**
+ * Combined authentication + superadmin authorization middleware
+ * Useful for routes that need both in one middleware
+ */
+const authenticateSuperAdmin = async (req, res, next) => {
+  await authenticateBasicAuth(req, res, () => {
+    requireSuperadmin(req, res, next);
+  });
+};
+
+/**
+ * Combined authentication + admin/superadmin authorization middleware
+ * Useful for routes that need both in one middleware
+ */
+const authenticateAdmin = async (req, res, next) => {
+  await authenticateBasicAuth(req, res, () => {
+    requireAdminOrSuperadmin(req, res, next);
+  });
+};
+
+/**
  * Optional authentication middleware
  * Adds user to request if Basic Auth is valid, but doesn't require it
  */
@@ -284,6 +304,8 @@ module.exports = {
   requireVendor,
   requireAdminOrSuperadmin,
   requireAnyUser,
+  authenticateSuperAdmin,
+  authenticateAdmin,
   optionalAuth,
   
   // Rate limiting

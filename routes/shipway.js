@@ -105,12 +105,25 @@ router.get('/stats',
  */
 router.get('/verify-warehouse/:warehouseId', authenticateBasicAuth, requireAdminOrSuperadmin, async (req, res) => {
   const { warehouseId } = req.params;
+  const accountCode = req.query.account_code || req.body.account_code;
+  
+  if (!accountCode) {
+    return res.status(400).json({
+      success: false,
+      message: 'account_code is required for warehouse verification'
+    });
+  }
+  
   try {
-    const warehouseData = await require('../services/shipwayService').getWarehouseById(warehouseId);
+    const ShipwayService = require('../services/shipwayService');
+    const shipwayServiceInstance = new ShipwayService(accountCode);
+    await shipwayServiceInstance.initialize();
+    
+    const warehouseData = await shipwayServiceInstance.getWarehouseById(warehouseId);
     if (!warehouseData.success) {
       return res.status(404).json({ success: false, message: 'Warehouse not found' });
     }
-    const details = require('../services/shipwayService').formatWarehouseData(warehouseData.data);
+    const details = shipwayServiceInstance.formatWarehouseData(warehouseData.data);
     res.json({
       success: true,
       data: {
@@ -159,19 +172,29 @@ router.get('/carriers', authenticateBasicAuth, requireAdminOrSuperadmin, async (
 
 /**
  * @route   GET /api/shipway/carriers/local
- * @desc    Get carriers from local MySQL database
+ * @desc    Get carriers from local MySQL database (filtered by store if account_code provided)
  * @access  Superadmin only
+ * @query   account_code - Optional. Filter carriers by store account code
  */
 router.get('/carriers/local', authenticateBasicAuth, requireAdminOrSuperadmin, async (req, res) => {
   try {
-    console.log('🔵 SHIPWAY CARRIERS LOCAL: API request received');
+    const accountCode = req.query.account_code || null;
+    console.log('🔵 SHIPWAY CARRIERS LOCAL: API request received', accountCode ? `for store: ${accountCode}` : 'for all stores');
     
-    const shipwayCarrierService = require('../services/shipwayCarrierService');
-    const carriers = await shipwayCarrierService.readCarriersFromDatabase();
+    const shipwayCarrierServiceModule = require('../services/shipwayCarrierService');
+    // Get the class constructor from the module (it's exported as ShipwayCarrierService)
+    const ShipwayCarrierService = shipwayCarrierServiceModule.ShipwayCarrierService;
+    
+    // Initialize service with account_code if provided (for store-specific filtering)
+    const service = accountCode 
+      ? new ShipwayCarrierService(accountCode)
+      : shipwayCarrierServiceModule; // Use default instance if no account_code
+    
+    const carriers = await service.readCarriersFromDatabase();
     
     res.json({
       success: true,
-      message: `Successfully loaded ${carriers.length} carriers from database`,
+      message: `Successfully loaded ${carriers.length} carriers from database${accountCode ? ` for store ${accountCode}` : ''}`,
       data: {
         carriers: carriers,
         carrierCount: carriers.length
@@ -324,10 +347,13 @@ router.post('/carriers/upload-priority',
         });
       }
 
+      // Multi-store upload - CSV contains account_code column, no need to pass it separately
+      // Use default instance (no account_code) since CSV contains multiple stores
       const shipwayCarrierService = require('../services/shipwayCarrierService');
       const csvContent = req.file.buffer.toString('utf8');
       console.log('🔍 CSV Content to process:', csvContent.substring(0, 200) + '...');
       console.log('🔍 CSV Content full length:', csvContent.length);
+      console.log('🔍 Multi-store upload mode - CSV should contain account_code column');
       
       const result = await shipwayCarrierService.updateCarrierPrioritiesFromCSV(csvContent);
       
@@ -554,9 +580,24 @@ router.put('/carriers/:carrierId', authenticateBasicAuth, requireAdminOrSuperadm
 router.delete('/carriers/:carrierId', authenticateBasicAuth, requireAdminOrSuperadmin, async (req, res) => {
   try {
     const { carrierId } = req.params;
-    const shipwayCarrierService = require('../services/shipwayCarrierService');
-    const result = shipwayCarrierService.deleteCarrier(carrierId);
-    res.json({ success: true, message: result.message });
+    const { account_code } = req.body || {};
+    if (!account_code) {
+      return res.status(400).json({ success: false, message: 'account_code is required' });
+    }
+    
+    const database = require('../config/database');
+    const deleted = await database.deleteCarrier(carrierId, account_code);
+    
+    if (!deleted) {
+      return res.status(404).json({ success: false, message: 'Carrier not found' });
+    }
+    
+    // Normalize priorities after deletion to ensure continuity
+    const { ShipwayCarrierService } = require('../services/shipwayCarrierService');
+    const carrierService = new ShipwayCarrierService(account_code);
+    await carrierService.normalizeCarrierPriorities(account_code);
+    
+    res.json({ success: true, message: 'Carrier deleted and priorities normalized' });
   } catch (error) {
     res.status(400).json({ success: false, message: error.message });
   }
@@ -570,12 +611,16 @@ router.delete('/carriers/:carrierId', authenticateBasicAuth, requireAdminOrSuper
 router.post('/carriers/:carrierId/move', authenticateBasicAuth, requireAdminOrSuperadmin, async (req, res) => {
   try {
     const { carrierId } = req.params;
-    const { direction } = req.body || {};
+    const { direction, account_code } = req.body || {};
     if (!['up', 'down'].includes(direction)) {
       return res.status(400).json({ success: false, message: 'direction must be "up" or "down"' });
     }
-    const shipwayCarrierService = require('../services/shipwayCarrierService');
-    const result = await shipwayCarrierService.moveCarrier(carrierId, direction);
+    if (!account_code) {
+      return res.status(400).json({ success: false, message: 'account_code is required' });
+    }
+    const { ShipwayCarrierService } = require('../services/shipwayCarrierService');
+    const carrierService = new ShipwayCarrierService(account_code);
+    const result = await carrierService.moveCarrier(carrierId, direction, account_code);
     res.json({ success: true, message: result.message });
   } catch (error) {
     res.status(400).json({ success: false, message: error.message });
@@ -589,8 +634,13 @@ router.post('/carriers/:carrierId/move', authenticateBasicAuth, requireAdminOrSu
  */
 router.post('/carriers/normalize-priorities', authenticateBasicAuth, requireAdminOrSuperadmin, async (req, res) => {
   try {
-    const shipwayCarrierService = require('../services/shipwayCarrierService');
-    const result = await shipwayCarrierService.normalizeCarrierPriorities();
+    const { account_code } = req.body || {};
+    if (!account_code) {
+      return res.status(400).json({ success: false, message: 'account_code is required' });
+    }
+    const { ShipwayCarrierService } = require('../services/shipwayCarrierService');
+    const carrierService = new ShipwayCarrierService(account_code);
+    const result = await carrierService.normalizeCarrierPriorities(account_code);
     res.json({ success: true, message: result.message });
   } catch (error) {
     res.status(400).json({ success: false, message: error.message });

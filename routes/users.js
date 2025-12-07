@@ -80,15 +80,24 @@ router.get('/vendors-report', requireAdminOrSuperadmin, async (req, res) => {
       const revenue = vOrders.reduce((sum, o) => sum + (parseFloat(o.order_total_split) || parseFloat(o.value) || 0), 0);
 
       // City from Shipway if not stored
+      // Note: Warehouse lookup requires account_code for store isolation
+      // If account_code is not available, skip warehouse lookup
       let city = v.city || v.vendor_city || '';
-      if (!city && warehouseId) {
+      const accountCode = req.query.account_code || req.body.account_code;
+      if (!city && warehouseId && accountCode) {
         try {
-          const wh = await shipwayService.getWarehouseById(String(warehouseId));
-          const formatted = shipwayService.formatWarehouseData(wh.data || wh);
+          const ShipwayService = require('../services/shipwayService');
+          const shipwayServiceInstance = new ShipwayService(accountCode);
+          await shipwayServiceInstance.initialize();
+          const wh = await shipwayServiceInstance.getWarehouseById(String(warehouseId));
+          const formatted = shipwayServiceInstance.formatWarehouseData(wh.data || wh);
           city = formatted.city || '';
         } catch (e) {
+          console.log(`⚠️ Could not fetch warehouse city for vendor ${v.id} (warehouse: ${warehouseId}, store: ${accountCode}):`, e.message);
           city = '';
         }
+      } else if (!city && warehouseId && !accountCode) {
+        console.log(`⚠️ Skipping warehouse lookup for vendor ${v.id}: account_code not provided`);
       }
 
       // Normalize status

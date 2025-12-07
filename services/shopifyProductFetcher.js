@@ -89,6 +89,34 @@ async function fetchAndSaveShopifyProducts(shopifyGraphqlUrl, headers, forceNew 
     console.log('[Shopify] Headers:', Object.keys(headers));
     console.log('[Shopify] Output: MySQL database');
 
+    // Get account_code from store_info table based on Shopify credentials
+    await database.waitForMySQLInitialization();
+    const shopifyToken = headers['X-Shopify-Access-Token'];
+    const store = await database.getStoreByShopifyCredentials(shopifyGraphqlUrl, shopifyToken);
+    
+    if (!store || !store.account_code) {
+      // Extract domain for better log message
+      let storeDomain = shopifyGraphqlUrl;
+      if (shopifyGraphqlUrl.includes('://')) {
+        const urlMatch = shopifyGraphqlUrl.match(/https?:\/\/([^\/]+)/);
+        if (urlMatch) {
+          storeDomain = urlMatch[1].split('/')[0];
+        }
+      }
+      
+      console.log(`⚠️ [Shopify] Store not found in store_info table for Shopify URL: ${shopifyGraphqlUrl} (domain: ${storeDomain})`);
+      console.log(`ℹ️ [Shopify] No stores configured yet. Superadmin can create stores via the admin panel.`);
+      console.log(`ℹ️ [Shopify] Skipping product fetch until stores are configured.`);
+      return {
+        success: false,
+        message: 'No store found for the provided Shopify credentials',
+        skipped: true
+      };
+    }
+    
+    const accountCode = store.account_code;
+    console.log(`[Shopify] Found store: ${store.store_name} (account_code: ${accountCode})`);
+
     // Check for existing running operations
     const runningOperation = await checkForRunningBulkOperations(shopifyGraphqlUrl, headers);
     
@@ -112,7 +140,7 @@ async function fetchAndSaveShopifyProducts(shopifyGraphqlUrl, headers, forceNew 
           const products = parseShopifyBulkData(jsonlData);
           
           // Save to MySQL database
-          const dbResult = await saveToDatabase(products);
+          const dbResult = await saveToDatabase(products, accountCode);
           
           return {
             success: true,
@@ -167,7 +195,7 @@ async function fetchAndSaveShopifyProducts(shopifyGraphqlUrl, headers, forceNew 
       const products = parseShopifyBulkData(jsonlData);
       
       // Save to MySQL database
-      const dbResult = await saveToDatabase(products);
+      const dbResult = await saveToDatabase(products, accountCode);
       
       return {
         success: true,
@@ -180,8 +208,13 @@ async function fetchAndSaveShopifyProducts(shopifyGraphqlUrl, headers, forceNew 
     }
 
   } catch (error) {
-    console.error('[Shopify] Error in bulk product fetch:', error);
-    throw error;
+    console.error('[Shopify] Error in bulk product fetch:', error.message);
+    // Return error result instead of throwing to prevent server crash
+    return {
+      success: false,
+      message: error.message,
+      error: error
+    };
   }
 }
 
@@ -268,10 +301,15 @@ async function downloadBulkOperationData(url) {
 /**
  * Save products data to MySQL database
  * @param {Array} products - Array of product data
+ * @param {string} accountCode - The account_code for the store
  * @returns {Promise<Object>} Result with counts
  */
-async function saveToDatabase(products) {
+async function saveToDatabase(products, accountCode) {
   console.log('[Shopify] Saving products to MySQL database...');
+  
+  if (!accountCode) {
+    throw new Error('account_code is required for saving products');
+  }
   
   try {
     // Wait for MySQL initialization
@@ -324,7 +362,8 @@ async function saveToDatabase(products) {
         image: product.images.length > 0 ? product.images[0].src : null,
         altText: product.images.length > 0 ? product.images[0].altText : null,
         totalImages: product.images.length,
-        sku_id: cleanedSku
+        sku_id: cleanedSku,
+        account_code: accountCode
       };
     });
 
@@ -403,12 +442,79 @@ function parseShopifyBulkData(jsonlData) {
 }
 
 
-module.exports = { 
-  fetchAndSaveShopifyProducts,
-  parseShopifyBulkData,
-  waitForBulkOperationCompletion,
-  downloadBulkOperationData,
-  saveToDatabase,
-  checkForRunningBulkOperations,
-  cancelBulkOperation
-}; 
+/**
+ * Class wrapper for Shopify Product Fetcher
+ * Supports multi-store via account_code
+ */
+class ShopifyProductFetcher {
+  constructor(accountCode) {
+    this.accountCode = accountCode;
+  }
+
+  /**
+   * Sync products from Shopify for this store
+   * @returns {Promise<Object>} Result with productCount
+   */
+  async syncProducts() {
+    if (!this.accountCode) {
+      throw new Error('account_code is required for syncing products');
+    }
+
+    // Wait for MySQL initialization
+    await database.waitForMySQLInitialization();
+
+    // Get store info from database
+    const store = await database.getStoreByAccountCode(this.accountCode);
+    
+    if (!store) {
+      throw new Error(`Store not found for account code: ${this.accountCode}`);
+    }
+
+    if (store.status !== 'active') {
+      throw new Error(`Store is not active: ${this.accountCode}`);
+    }
+
+    if (!store.shopify_token || !store.shopify_store_url) {
+      throw new Error(`Shopify credentials not configured for store: ${this.accountCode}`);
+    }
+
+    // Construct Shopify GraphQL URL
+    let shopifyGraphqlUrl = store.shopify_store_url;
+    
+    // Add https:// protocol if missing
+    if (!shopifyGraphqlUrl.startsWith('http://') && !shopifyGraphqlUrl.startsWith('https://')) {
+      shopifyGraphqlUrl = `https://${shopifyGraphqlUrl}`;
+    }
+    
+    if (!shopifyGraphqlUrl.includes('/admin/api/')) {
+      // If URL doesn't include API path, construct it
+      const baseUrl = shopifyGraphqlUrl.replace(/\/$/, ''); // Remove trailing slash
+      shopifyGraphqlUrl = `${baseUrl}/admin/api/2025-07/graphql.json`;
+    }
+
+    // Prepare headers
+    const headers = {
+      'X-Shopify-Access-Token': store.shopify_token,
+      'Content-Type': 'application/json'
+    };
+
+    // Fetch and save products
+    const result = await fetchAndSaveShopifyProducts(shopifyGraphqlUrl, headers, false);
+    
+    return {
+      productCount: result.productsCount || 0,
+      success: result.success,
+      message: result.message
+    };
+  }
+}
+
+// Export both the class (for new usage) and the functions (for backward compatibility)
+module.exports = ShopifyProductFetcher;
+module.exports.fetchAndSaveShopifyProducts = fetchAndSaveShopifyProducts;
+module.exports.parseShopifyBulkData = parseShopifyBulkData;
+module.exports.waitForBulkOperationCompletion = waitForBulkOperationCompletion;
+module.exports.downloadBulkOperationData = downloadBulkOperationData;
+module.exports.saveToDatabase = saveToDatabase;
+module.exports.checkForRunningBulkOperations = checkForRunningBulkOperations;
+module.exports.cancelBulkOperation = cancelBulkOperation; 
