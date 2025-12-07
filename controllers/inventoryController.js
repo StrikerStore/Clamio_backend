@@ -76,11 +76,12 @@ async function getAggregatedInventory(req, res) {
         p.sku_id as base_sku
       FROM orders o
       LEFT JOIN products p ON (
-        REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
+        (REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
         REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
-        REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id
+        REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id)
+        AND o.account_code = p.account_code
       )
-      LEFT JOIN claims c ON o.unique_id = c.order_unique_id
+      LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
       WHERE (c.status = 'unclaimed' OR c.status IS NULL)
         AND o.is_in_new_order = 1
       ORDER BY o.product_name, o.size

@@ -1399,8 +1399,30 @@ router.get('/admin/all', authenticateBasicAuth, requireAdminOrSuperadmin, async 
       });
     }
     
-    const orders = await database.getAllOrders();
-    console.log('📦 Orders loaded from MySQL:', orders.length);
+    // Get date filter from utility table (same as sync uses)
+    let numberOfDays = 60; // default
+    try {
+      const daysValue = await database.getUtilityParameter('number_of_day_of_order_include');
+      if (daysValue) {
+        numberOfDays = parseInt(daysValue, 10);
+        console.log(`📅 Using ${numberOfDays} days from utility configuration for frontend filter`);
+      } else {
+        console.log(`⚠️ Utility parameter not found, using default: ${numberOfDays} days`);
+      }
+    } catch (dbError) {
+      console.log(`⚠️ Could not fetch utility parameter, using default: ${numberOfDays} days`, dbError.message);
+    }
+    
+    // Calculate cutoff date
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - numberOfDays);
+    cutoffDate.setHours(0, 0, 0, 0); // Start of day
+    
+    console.log(`📅 Filtering orders from last ${numberOfDays} days (since ${cutoffDate.toISOString()})`);
+    
+    // Pass cutoffDate to getAllOrders to filter at SQL level (more efficient)
+    const orders = await database.getAllOrders(cutoffDate);
+    console.log(`📦 Orders loaded from MySQL (with ${numberOfDays}-day date filter): ${orders.length}`);
     
     const allUsers = await database.getAllUsers();
     const vendors = allUsers.filter(user => user.role === 'vendor');
@@ -1446,7 +1468,9 @@ router.get('/admin/all', authenticateBasicAuth, requireAdminOrSuperadmin, async 
         created_at: order.created_at || order.order_date || 'N/A',
         claimed_at: order.claimed_at || null,
         claimed_by: order.claimed_by || null,
-        image: order.product_image || order.image || '/placeholder.svg'
+        image: order.product_image || order.image || '/placeholder.svg',
+        store_name: order.store_name || null,
+        account_code: order.account_code || null
       };
     });
 
@@ -2188,8 +2212,15 @@ router.post('/download-label', async (req, res) => {
       // Store label in cache after successful generation
       if (labelResponse.success && labelResponse.data.shipping_url) {
         try {
+          // Get account_code from the first claimed product
+          const accountCode = claimedProducts[0]?.account_code;
+          if (!accountCode) {
+            throw new Error(`account_code not found for order ${order_id}. Cannot store label without store information.`);
+          }
+          
           const labelDataToStore = {
             order_id: order_id,
+            account_code: accountCode,
             label_url: labelResponse.data.shipping_url,
             awb: labelResponse.data.awb,
             carrier_id: labelResponse.data.carrier_id,
@@ -2418,6 +2449,47 @@ async function generateLabelForOrder(orderId, products, vendor, format = 'therma
       throw new Error(`Customer info not found for order ID: ${orderId}. Please sync orders from Shipway first.`);
     }
     
+    // Log customer info for debugging (especially phone numbers)
+    console.log(`  - Customer info retrieved for order ${orderId}:`);
+    console.log(`    - Shipping phone: ${customerInfo.shipping_phone ? 'Present' : 'MISSING'}`);
+    console.log(`    - Billing phone: ${customerInfo.billing_phone ? 'Present' : 'MISSING'}`);
+    console.log(`    - Account code: ${customerInfo.account_code || 'MISSING'}`);
+    
+    // Get account_code from order (validate it exists in store_info)
+    const accountCode = customerInfo.account_code || products[0]?.account_code;
+    if (!accountCode) {
+      throw new Error(`account_code not found for order ID: ${orderId}. Cannot generate label without store information.`);
+    }
+    
+    // Validate account_code exists in store_info
+    const store = await database.getStoreByAccountCode(accountCode);
+    if (!store) {
+      throw new Error(`Store not found for account_code: ${accountCode}. Cannot generate label without valid store information.`);
+    }
+    if (store.status !== 'active') {
+      throw new Error(`Store is not active for account_code: ${accountCode}. Cannot generate label for inactive store.`);
+    }
+    
+    console.log(`  - Using account_code: ${accountCode} (store: ${store.store_name}) for label generation`);
+    
+    // Validate and sanitize phone number (required by Shipway API)
+    // Use shipping_phone if available, otherwise fallback to billing_phone
+    let shippingPhone = customerInfo.shipping_phone || customerInfo.billing_phone || '';
+    
+    // Remove any non-digit characters except + (for international numbers)
+    shippingPhone = shippingPhone.toString().trim();
+    
+    // Validate phone number is not empty
+    if (!shippingPhone || shippingPhone === '' || shippingPhone === 'null' || shippingPhone === 'undefined') {
+      throw new Error(`Invalid or missing shipping phone number for order ${orderId}. Phone number is required for label generation.`);
+    }
+    
+    // Log phone number for debugging (mask sensitive digits)
+    const maskedPhone = shippingPhone.length > 4 
+      ? shippingPhone.substring(0, 2) + '****' + shippingPhone.substring(shippingPhone.length - 2)
+      : '****';
+    console.log(`  - Shipping phone: ${maskedPhone} (length: ${shippingPhone.length})`);
+    
     // Convert customer_info to originalOrder format expected by prepareShipwayRequestBody
     const originalOrder = {
       order_id: orderId,
@@ -2430,7 +2502,7 @@ async function generateLabelForOrder(orderId, products, vendor, format = 'therma
       b_country: customerInfo.billing_country,
       b_firstname: customerInfo.billing_firstname,
       b_lastname: customerInfo.billing_lastname,
-      b_phone: customerInfo.billing_phone,
+      b_phone: customerInfo.billing_phone || shippingPhone, // Fallback to shipping phone if billing phone missing
       b_zipcode: customerInfo.billing_zipcode,
       b_latitude: customerInfo.billing_latitude,
       b_longitude: customerInfo.billing_longitude,
@@ -2441,7 +2513,7 @@ async function generateLabelForOrder(orderId, products, vendor, format = 'therma
       s_country: customerInfo.shipping_country,
       s_firstname: customerInfo.shipping_firstname,
       s_lastname: customerInfo.shipping_lastname,
-      s_phone: customerInfo.shipping_phone,
+      s_phone: shippingPhone, // Use validated phone number
       s_zipcode: customerInfo.shipping_zipcode,
       s_latitude: customerInfo.shipping_latitude,
       s_longitude: customerInfo.shipping_longitude
@@ -2512,12 +2584,12 @@ async function generateLabelForOrder(orderId, products, vendor, format = 'therma
         }));
         
         // Prepare request body with this carrier
-        const requestBody = prepareShipwayRequestBody(orderId, modifiedProducts, originalOrder, vendor, true);
+        const requestBody = await prepareShipwayRequestBody(orderId, modifiedProducts, originalOrder, vendor, true, accountCode);
         
         console.log(`   📡 Calling Shipway API...`);
         
-        // Call Shipway API
-        response = await callShipwayPushOrderAPI(requestBody, true);
+        // Call Shipway API with account_code for store-specific credentials
+        response = await callShipwayPushOrderAPI(requestBody, true, accountCode);
         
         // If we reach here, API call succeeded
         assignedCarrier = {
@@ -3051,8 +3123,16 @@ async function retryOperation(operation, maxAttempts, stepName, inputData) {
 async function prepareInputData(originalOrderId, claimedProducts, allOrderProducts, vendor, forceCloneSuffix = null) {
   console.log('📋 Capturing input data for clone process...');
   
-  // Generate unique clone ID
-  const cloneOrderId = await generateUniqueCloneId(originalOrderId, forceCloneSuffix);
+  // Extract account_code from claimed products FIRST (CRITICAL: Must match the store)
+  const accountCode = claimedProducts[0]?.account_code;
+  if (!accountCode) {
+    throw new Error(`account_code not found for order ${originalOrderId}. Cannot create clone without store information.`);
+  }
+  
+  console.log(`  - Account Code: ${accountCode} (for store-specific operations)`);
+  
+  // Generate unique clone ID (with account_code for store-specific verification)
+  const cloneOrderId = await generateUniqueCloneId(originalOrderId, forceCloneSuffix, accountCode);
   
   // Get customer info from database
   const database = require('../config/database');
@@ -3061,6 +3141,24 @@ async function prepareInputData(originalOrderId, claimedProducts, allOrderProduc
   if (!customerInfo) {
     throw new Error(`Customer info not found for order ID: ${originalOrderId}. Please sync orders from Shipway first.`);
   }
+  
+  // Validate and sanitize phone number (required by Shipway API)
+  // Use shipping_phone if available, otherwise fallback to billing_phone
+  let shippingPhone = customerInfo.shipping_phone || customerInfo.billing_phone || '';
+  
+  // Remove any non-digit characters except + (for international numbers)
+  shippingPhone = shippingPhone.toString().trim();
+  
+  // Validate phone number is not empty
+  if (!shippingPhone || shippingPhone === '' || shippingPhone === 'null' || shippingPhone === 'undefined') {
+    throw new Error(`Invalid or missing shipping phone number for order ${originalOrderId}. Phone number is required for label generation.`);
+  }
+  
+  // Log phone number for debugging (mask sensitive digits)
+  const maskedPhone = shippingPhone.length > 4 
+    ? shippingPhone.substring(0, 2) + '****' + shippingPhone.substring(shippingPhone.length - 2)
+    : '****';
+  console.log(`  - Shipping phone: ${maskedPhone} (length: ${shippingPhone.length})`);
   
   // Convert customer_info to originalOrder format expected by prepareShipwayRequestBody
   const originalOrder = {
@@ -3073,7 +3171,7 @@ async function prepareInputData(originalOrderId, claimedProducts, allOrderProduc
     b_country: customerInfo.billing_country,
     b_firstname: customerInfo.billing_firstname,
     b_lastname: customerInfo.billing_lastname,
-    b_phone: customerInfo.billing_phone,
+    b_phone: customerInfo.billing_phone || shippingPhone, // Fallback to shipping phone if billing phone missing
     b_zipcode: customerInfo.billing_zipcode,
     b_latitude: customerInfo.billing_latitude,
     b_longitude: customerInfo.billing_longitude,
@@ -3084,7 +3182,7 @@ async function prepareInputData(originalOrderId, claimedProducts, allOrderProduc
     s_country: customerInfo.shipping_country,
     s_firstname: customerInfo.shipping_firstname,
     s_lastname: customerInfo.shipping_lastname,
-    s_phone: customerInfo.shipping_phone,
+    s_phone: shippingPhone, // Use validated phone number
     s_zipcode: customerInfo.shipping_zipcode,
     s_latitude: customerInfo.shipping_latitude,
     s_longitude: customerInfo.shipping_longitude
@@ -3100,6 +3198,7 @@ async function prepareInputData(originalOrderId, claimedProducts, allOrderProduc
     ),
     originalOrder: { ...originalOrder }, // Copy original order data
     cloneOrderId,
+    accountCode, // CRITICAL: Store account_code for store-specific operations
     timestamp: new Date().toISOString() // Fixed timestamp for consistency
   };
   
@@ -3108,8 +3207,8 @@ async function prepareInputData(originalOrderId, claimedProducts, allOrderProduc
 }
 
 // Generate unique clone order ID
-async function generateUniqueCloneId(originalOrderId, forceCloneSuffix = null) {
-    const database = require('../config/database');
+async function generateUniqueCloneId(originalOrderId, forceCloneSuffix = null, accountCode = null) {
+  const database = require('../config/database');
   
   // If forceCloneSuffix is provided, use it directly (for retry scenarios)
   if (forceCloneSuffix) {
@@ -3141,20 +3240,27 @@ async function generateUniqueCloneId(originalOrderId, forceCloneSuffix = null) {
     cloneOrderId = `${originalOrderId}_${counter}`;
   }
     
-    // Additional check: Verify with Shipway API to ensure no conflicts
+  // Additional check: Verify with Shipway API to ensure no conflicts
+  // CRITICAL: Use account_code to fetch orders from the correct store
+  if (accountCode) {
     try {
-      const shipwayService = require('../services/shipwayService');
+      const ShipwayService = require('../services/shipwayService');
+      const shipwayService = new ShipwayService(accountCode);
+      await shipwayService.initialize();
       const shipwayOrders = await shipwayService.fetchOrdersFromShipway();
       
       while (shipwayOrders.some(order => order.order_id === cloneOrderId)) {
         counter++;
         cloneOrderId = `${originalOrderId}_${counter}`;
-      console.log(`  - Clone ID exists in Shipway, incrementing to ${cloneOrderId}`);
+        console.log(`  - Clone ID exists in Shipway (store: ${accountCode}), incrementing to ${cloneOrderId}`);
       }
     } catch (shipwayError) {
-      console.log('  - Warning: Could not verify clone ID with Shipway:', shipwayError.message);
+      console.log(`  - Warning: Could not verify clone ID with Shipway (store: ${accountCode}):`, shipwayError.message);
       console.log('  - Proceeding with MySQL-only check');
     }
+  } else {
+    console.log('  - Warning: No account_code provided, skipping Shipway verification');
+  }
     
   console.log(`  - Generated unique Clone Order ID: ${cloneOrderId}`);
   return cloneOrderId;
@@ -3162,22 +3268,29 @@ async function generateUniqueCloneId(originalOrderId, forceCloneSuffix = null) {
 
 // Step 1: Create clone order (NO label generation)
 async function createCloneOrderOnly(inputData) {
-  const { cloneOrderId, claimedProducts, originalOrder, vendor } = inputData;
+  const { cloneOrderId, claimedProducts, originalOrder, vendor, accountCode } = inputData;
   
   console.log(`🔒 Creating clone with consistent data:`);
   console.log(`  - Clone ID: ${cloneOrderId}`);
   console.log(`  - Products count: ${claimedProducts.length}`);
+  console.log(`  - Account Code: ${accountCode} (for store-specific operations)`);
   console.log(`  - Timestamp: ${inputData.timestamp}`);
   
-  const requestBody = prepareShipwayRequestBody(
+  // CRITICAL: Use account_code from inputData (already validated in prepareInputData)
+  if (!accountCode) {
+    throw new Error(`account_code not found in inputData for clone order ${cloneOrderId}. Cannot create clone without store information.`);
+  }
+  
+  const requestBody = await prepareShipwayRequestBody(
     cloneOrderId, 
     claimedProducts, 
     originalOrder, 
     vendor, 
-    false // NO label generation
+    false, // NO label generation
+    accountCode
   );
   
-  const response = await callShipwayPushOrderAPI(requestBody, false);
+  const response = await callShipwayPushOrderAPI(requestBody, false, accountCode);
   
   if (!response.success) {
     throw new Error(`Failed to create clone order: ${response.message || 'Unknown error'}`);
@@ -3189,45 +3302,61 @@ async function createCloneOrderOnly(inputData) {
 
 // Step 2: Verify clone exists
 async function verifyCloneExists(inputData) {
-  const { cloneOrderId } = inputData;
+  const { cloneOrderId, accountCode } = inputData;
   
   console.log(`🔒 Verifying clone exists with consistent data:`);
   console.log(`  - Clone ID: ${cloneOrderId}`);
+  console.log(`  - Account Code: ${accountCode} (for store-specific verification)`);
   console.log(`  - Timestamp: ${inputData.timestamp}`);
   
-  // Call Shipway API to verify clone order exists
-  const shipwayService = require('../services/shipwayService');
+  // CRITICAL: Use account_code to fetch orders from the correct store
+  if (!accountCode) {
+    throw new Error(`account_code not found in inputData. Cannot verify clone without store information.`);
+  }
+  
+  // Call Shipway API to verify clone order exists (using store-specific credentials)
+  const ShipwayService = require('../services/shipwayService');
+  const shipwayService = new ShipwayService(accountCode);
+  await shipwayService.initialize();
   const shipwayOrders = await shipwayService.fetchOrdersFromShipway();
   
   const cloneExists = shipwayOrders.some(order => order.order_id === cloneOrderId);
   
   if (!cloneExists) {
-    throw new Error(`Clone order ${cloneOrderId} not found in Shipway`);
+    throw new Error(`Clone order ${cloneOrderId} not found in Shipway for store ${accountCode}`);
   }
   
-  console.log('✅ Clone order verified in Shipway');
+  console.log(`✅ Clone order verified in Shipway (store: ${accountCode})`);
   return { success: true, verified: true };
 }
 
 // Step 3: Update original order
 async function updateOriginalOrder(inputData) {
-  const { originalOrderId, remainingProducts, originalOrder, vendor } = inputData;
+  const { originalOrderId, remainingProducts, originalOrder, vendor, accountCode } = inputData;
   
   console.log(`🔒 Updating original with consistent data:`);
   console.log(`  - Original ID: ${originalOrderId}`);
   console.log(`  - Remaining products: ${remainingProducts.length}`);
+  console.log(`  - Account Code: ${accountCode} (for store-specific operations)`);
   console.log(`  - Timestamp: ${inputData.timestamp}`);
     
-    if (remainingProducts.length > 0) {
-    const requestBody = prepareShipwayRequestBody(
+  if (remainingProducts.length > 0) {
+    // CRITICAL: Use account_code from inputData (already validated in prepareInputData)
+    // All products in the same order should have the same account_code
+    if (!accountCode) {
+      throw new Error(`account_code not found in inputData for original order ${originalOrderId}. Cannot update order without store information.`);
+    }
+    
+    const requestBody = await prepareShipwayRequestBody(
       originalOrderId,
       remainingProducts,
       originalOrder,
       vendor,
-      false // NO label generation
+      false, // NO label generation
+      accountCode
     );
     
-    const response = await callShipwayPushOrderAPI(requestBody, false);
+    const response = await callShipwayPushOrderAPI(requestBody, false, accountCode);
     
     if (!response.success) {
       throw new Error(`Failed to update original order: ${response.message || 'Unknown error'}`);
@@ -3243,24 +3372,32 @@ async function updateOriginalOrder(inputData) {
 
 // Step 4: Verify original order update
 async function verifyOriginalOrderUpdate(inputData) {
-  const { originalOrderId, remainingProducts } = inputData;
+  const { originalOrderId, remainingProducts, accountCode } = inputData;
   
   console.log(`🔒 Verifying original order update with consistent data:`);
   console.log(`  - Original ID: ${originalOrderId}`);
   console.log(`  - Expected remaining products: ${remainingProducts.length}`);
+  console.log(`  - Account Code: ${accountCode} (for store-specific verification)`);
   console.log(`  - Timestamp: ${inputData.timestamp}`);
   
-  // Call Shipway API to verify original order was updated correctly
-  const shipwayService = require('../services/shipwayService');
+  // CRITICAL: Use account_code to fetch orders from the correct store
+  if (!accountCode) {
+    throw new Error(`account_code not found in inputData. Cannot verify original order update without store information.`);
+  }
+  
+  // Call Shipway API to verify original order was updated correctly (using store-specific credentials)
+  const ShipwayService = require('../services/shipwayService');
+  const shipwayService = new ShipwayService(accountCode);
+  await shipwayService.initialize();
   const shipwayOrders = await shipwayService.fetchOrdersFromShipway();
   
   const originalOrder = shipwayOrders.find(order => order.order_id === originalOrderId);
   
   if (!originalOrder && remainingProducts.length > 0) {
-    throw new Error(`Original order ${originalOrderId} not found in Shipway after update`);
+    throw new Error(`Original order ${originalOrderId} not found in Shipway for store ${accountCode} after update`);
   }
   
-  console.log('✅ Original order update verified in Shipway');
+  console.log(`✅ Original order update verified in Shipway (store: ${accountCode})`);
   return { success: true, verified: true };
 }
 
@@ -3328,12 +3465,13 @@ async function generateLabelForClone(inputData) {
 
 // Step 7: Mark label as downloaded and store in labels table
 async function markLabelAsDownloaded(inputData, labelResponse) {
-  const { claimedProducts, cloneOrderId } = inputData;
+  const { claimedProducts, cloneOrderId, accountCode } = inputData;
   const database = require('../config/database');
   
   console.log(`🔒 Marking label as downloaded and storing in labels table:`);
   console.log(`  - Clone Order ID: ${cloneOrderId}`);
   console.log(`  - Products count: ${claimedProducts.length}`);
+  console.log(`  - Account Code: ${accountCode} (for store-specific operations)`);
   console.log(`  - Label URL: ${labelResponse.data.shipping_url}`);
   console.log(`  - AWB: ${labelResponse.data.awb}`);
   
@@ -3349,8 +3487,14 @@ async function markLabelAsDownloaded(inputData, labelResponse) {
     }
     
     // Store label URL and carrier info in labels table (one entry per order_id, no duplicates)
+    // CRITICAL: Use account_code from inputData (already validated in prepareInputData)
+    if (!accountCode) {
+      throw new Error(`account_code not found in inputData for clone order ${cloneOrderId}. Cannot store label without store information.`);
+    }
+    
     const labelDataToStore = {
       order_id: cloneOrderId,
+      account_code: accountCode,
       label_url: labelResponse.data.shipping_url,
       awb: labelResponse.data.awb,
       carrier_id: labelResponse.data.carrier_id,
@@ -3374,8 +3518,14 @@ async function markLabelAsDownloaded(inputData, labelResponse) {
 
 /**
  * Prepare request body for Shipway API
+ * @param {string} orderId - Order ID
+ * @param {Array} products - Products array
+ * @param {Object} originalOrder - Original order data
+ * @param {Object} vendor - Vendor object with warehouseId (claimio_wh_id)
+ * @param {boolean} generateLabel - Whether to generate label
+ * @param {string} accountCode - Account code (store identifier) - required for label generation
  */
-function prepareShipwayRequestBody(orderId, products, originalOrder, vendor, generateLabel = false) {
+async function prepareShipwayRequestBody(orderId, products, originalOrder, vendor, generateLabel = false, accountCode = null) {
   // Get payment type from the first product (all products in an order should have same payment_type)
   const paymentType = products[0]?.payment_type || 'P';
   console.log('🔍 Payment type from order data:', paymentType);
@@ -3437,7 +3587,7 @@ function prepareShipwayRequestBody(orderId, products, originalOrder, vendor, gen
     shipping_country: originalOrder.s_country,
     shipping_firstname: originalOrder.s_firstname,
     shipping_lastname: originalOrder.s_lastname,
-    shipping_phone: originalOrder.s_phone,
+    shipping_phone: originalOrder.s_phone || originalOrder.b_phone || '',
     shipping_zipcode: originalOrder.s_zipcode,
     shipping_latitude: "10",
     shipping_longitude: "20",
@@ -3453,8 +3603,35 @@ function prepareShipwayRequestBody(orderId, products, originalOrder, vendor, gen
   if (generateLabel) {
     console.log('🔄 Adding label generation parameters (carrier_id, warehouse_id, return_warehouse_id)');
     baseRequestBody.carrier_id = parseInt(products[0].priority_carrier) || 80165;
-    baseRequestBody.warehouse_id = vendor.warehouseId;
-    baseRequestBody.return_warehouse_id = '67311'; // Try 67311 first, fallback to vendor's warehouse if needed
+    
+    // Get vendor_wh_id and return_warehouse_id from wh_mapping using claimio_wh_id and account_code
+    if (!accountCode) {
+      throw new Error('account_code is required for label generation. Cannot determine vendor warehouse ID.');
+    }
+    
+    const database = require('../config/database');
+    const whMapping = await database.getWhMappingByClaimioWhIdAndAccountCode(vendor.warehouseId, accountCode);
+    
+    if (!whMapping || !whMapping.vendor_wh_id) {
+      throw new Error(`Warehouse mapping not found for vendor (claimio_wh_id: ${vendor.warehouseId}) and store (account_code: ${accountCode}). Please contact admin to set up warehouse mapping.`);
+    }
+    
+    // Use return_warehouse_id from mapping if available, otherwise fallback to vendor_wh_id (pickup warehouse)
+    // Some carriers don't accept different return warehouse, so we use the same pickup warehouse
+    const returnWarehouseId = whMapping.return_warehouse_id || whMapping.vendor_wh_id;
+    
+    if (!returnWarehouseId) {
+      throw new Error(`Return warehouse ID not configured for vendor (claimio_wh_id: ${vendor.warehouseId}) and store (account_code: ${accountCode}). Please contact admin to set up return warehouse ID in warehouse mapping.`);
+    }
+    
+    console.log(`  - Using vendor_wh_id from mapping: ${whMapping.vendor_wh_id} (claimio_wh_id: ${vendor.warehouseId}, account_code: ${accountCode})`);
+    if (whMapping.return_warehouse_id) {
+      console.log(`  - Using return_warehouse_id from mapping: ${whMapping.return_warehouse_id} (claimio_wh_id: ${vendor.warehouseId}, account_code: ${accountCode})`);
+    } else {
+      console.log(`  - Using vendor_wh_id as return_warehouse_id (fallback): ${whMapping.vendor_wh_id} (claimio_wh_id: ${vendor.warehouseId}, account_code: ${accountCode})`);
+    }
+    baseRequestBody.warehouse_id = whMapping.vendor_wh_id;
+    baseRequestBody.return_warehouse_id = returnWarehouseId;
     baseRequestBody.generate_label = true;
   } else {
     console.log('🔄 Using PUSH Order API (no carrier/warehouse parameters)');
@@ -3465,33 +3642,41 @@ function prepareShipwayRequestBody(orderId, products, originalOrder, vendor, gen
 
 /**
  * Call Shipway Create Manifest API
+ * @param {string|Array} orderIds - Order ID(s) to create manifest for
+ * @param {string} accountCode - Account code for the store (REQUIRED)
  */
-async function callShipwayCreateManifestAPI(orderIds) {
+async function callShipwayCreateManifestAPI(orderIds, accountCode) {
   try {
+    if (!accountCode) {
+      throw new Error('account_code is required for creating manifest. Cannot proceed without store information.');
+    }
+
     console.log('🔄 Calling Shipway Create Manifest API');
     console.log('  - Order IDs:', Array.isArray(orderIds) ? orderIds : [orderIds]);
+    console.log('  - Account Code:', accountCode);
     
-    // Get basic auth credentials from environment
-    const username = process.env.SHIPWAY_USERNAME;
-    const password = process.env.SHIPWAY_PASSWORD;
-    const basicAuthHeader = process.env.SHIPWAY_BASIC_AUTH_HEADER;
+    // Get store-specific credentials using account_code
+    const database = require('../config/database');
+    const encryptionService = require('../services/encryptionService');
     
-    console.log('🔍 Debug: Environment variables check');
-    console.log('  - SHIPWAY_USERNAME:', username ? 'SET' : 'NOT SET');
-    console.log('  - SHIPWAY_PASSWORD:', password ? 'SET' : 'NOT SET');
-    console.log('  - SHIPWAY_BASIC_AUTH_HEADER:', basicAuthHeader ? 'SET' : 'NOT SET');
+    console.log(`🔍 Fetching store credentials for account_code: ${accountCode}`);
+    const store = await database.getStoreByAccountCode(accountCode);
     
-    let authHeader;
-    if (basicAuthHeader) {
-      authHeader = basicAuthHeader;
-      console.log('✅ Using SHIPWAY_BASIC_AUTH_HEADER');
-    } else if (username && password) {
-      authHeader = 'Basic ' + Buffer.from(`${username}:${password}`).toString('base64');
-      console.log('✅ Using SHIPWAY_USERNAME and SHIPWAY_PASSWORD');
-    } else {
-      console.log('❌ No Shipway credentials found');
-      throw new Error('Shipway credentials not configured');
+    if (!store) {
+      throw new Error(`Store not found for account_code: ${accountCode}`);
     }
+    
+    if (!store.username || !store.password_encrypted) {
+      throw new Error(`Store credentials not configured for account_code: ${accountCode}`);
+    }
+    
+    // Decrypt password
+    const password = encryptionService.decrypt(store.password_encrypted);
+    const username = store.username;
+    
+    // Generate Basic Auth header from store credentials
+    const authHeader = 'Basic ' + Buffer.from(`${username}:${password}`).toString('base64');
+    console.log(`✅ Using store-specific credentials for ${accountCode} (${store.store_name})`);
     
     const requestBody = {
       order_ids: Array.isArray(orderIds) ? orderIds : [orderIds]
@@ -3544,33 +3729,59 @@ async function callShipwayCreateManifestAPI(orderIds) {
 /**
  * Call Shipway PUSH Order API
  */
-async function callShipwayPushOrderAPI(requestBody, generateLabel = false) {
+async function callShipwayPushOrderAPI(requestBody, generateLabel = false, accountCode = null) {
   try {
     console.log('🔄 Calling Shipway PUSH Order API');
     console.log('  - Generate label:', generateLabel);
     console.log('  - Order ID:', requestBody.order_id);
+    console.log('  - Account Code:', accountCode || 'NOT PROVIDED (using default)');
     console.log('  - API Type:', generateLabel ? 'PUSH Order with Label Generation' : 'PUSH Order (Edit Only)');
     
-    // Get basic auth credentials from environment
-    const username = process.env.SHIPWAY_USERNAME;
-    const password = process.env.SHIPWAY_PASSWORD;
-    const basicAuthHeader = process.env.SHIPWAY_BASIC_AUTH_HEADER;
-    
-    console.log('🔍 Debug: Environment variables check');
-    console.log('  - SHIPWAY_USERNAME:', username ? 'SET' : 'NOT SET');
-    console.log('  - SHIPWAY_PASSWORD:', password ? 'SET' : 'NOT SET');
-    console.log('  - SHIPWAY_BASIC_AUTH_HEADER:', basicAuthHeader ? 'SET' : 'NOT SET');
-    
+    // Get store-specific credentials if account_code is provided
     let authHeader;
-    if (basicAuthHeader) {
-      authHeader = basicAuthHeader;
-      console.log('✅ Using SHIPWAY_BASIC_AUTH_HEADER');
-    } else if (username && password) {
+    const database = require('../config/database');
+    const encryptionService = require('../services/encryptionService');
+    
+    if (accountCode) {
+      console.log(`🔍 Fetching store credentials for account_code: ${accountCode}`);
+      const store = await database.getStoreByAccountCode(accountCode);
+      
+      if (!store) {
+        throw new Error(`Store not found for account_code: ${accountCode}`);
+      }
+      
+      if (!store.username || !store.password_encrypted) {
+        throw new Error(`Store credentials not configured for account_code: ${accountCode}`);
+      }
+      
+      // Decrypt password
+      const password = encryptionService.decrypt(store.password_encrypted);
+      const username = store.username;
+      
+      // Generate Basic Auth header from store credentials
       authHeader = 'Basic ' + Buffer.from(`${username}:${password}`).toString('base64');
-      console.log('✅ Using SHIPWAY_USERNAME and SHIPWAY_PASSWORD');
+      console.log(`✅ Using store-specific credentials for ${accountCode} (${store.store_name})`);
     } else {
-      console.log('❌ No Shipway credentials found');
-      throw new Error('Shipway credentials not configured');
+      // Fallback to environment variables (for backward compatibility)
+      const username = process.env.SHIPWAY_USERNAME;
+      const password = process.env.SHIPWAY_PASSWORD;
+      const basicAuthHeader = process.env.SHIPWAY_BASIC_AUTH_HEADER;
+      
+      console.log('🔍 Debug: Environment variables check');
+      console.log('  - SHIPWAY_USERNAME:', username ? 'SET' : 'NOT SET');
+      console.log('  - SHIPWAY_PASSWORD:', password ? 'SET' : 'NOT SET');
+      console.log('  - SHIPWAY_BASIC_AUTH_HEADER:', basicAuthHeader ? 'SET' : 'NOT SET');
+      
+      if (basicAuthHeader) {
+        authHeader = basicAuthHeader;
+        console.log('✅ Using SHIPWAY_BASIC_AUTH_HEADER (fallback)');
+      } else if (username && password) {
+        authHeader = 'Basic ' + Buffer.from(`${username}:${password}`).toString('base64');
+        console.log('✅ Using SHIPWAY_USERNAME and SHIPWAY_PASSWORD (fallback)');
+      } else {
+        console.log('❌ No Shipway credentials found');
+        throw new Error('Shipway credentials not configured');
+      }
     }
     
     // For original order editing (no label generation), remove generate_label parameter
@@ -3779,8 +3990,15 @@ router.post('/bulk-download-labels', async (req, res) => {
           
           // Store label and carrier info for direct download
           if (labelResponse.success && labelResponse.data.shipping_url) {
+            // Get account_code from the first claimed product
+            const accountCode = claimedProducts[0]?.account_code;
+            if (!accountCode) {
+              throw new Error(`account_code not found for order ${orderId}. Cannot store label without store information.`);
+            }
+            
             await database.upsertLabel({
               order_id: orderId,
+              account_code: accountCode,
               label_url: labelResponse.data.shipping_url,
               awb: labelResponse.data.awb,
               carrier_id: labelResponse.data.carrier_id,
@@ -4335,9 +4553,21 @@ router.post('/mark-ready', async (req, res) => {
     console.log('  - Total products in order:', orderProducts.length);
     console.log('  - Products claimed by vendor:', claimedProducts.length);
 
-    // Call Shipway Create Manifest API
+    // Get account_code from the first claimed product (REQUIRED)
+    const accountCode = claimedProducts[0]?.account_code;
+    if (!accountCode) {
+      console.log('❌ ACCOUNT_CODE NOT FOUND for order:', order_id);
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Store information not found for this order. Cannot mark as ready.' 
+      });
+    }
+
+    console.log('✅ Account code found:', accountCode);
+
+    // Call Shipway Create Manifest API with account_code
     console.log('🔄 Calling Shipway Create Manifest API...');
-    const manifestResponse = await callShipwayCreateManifestAPI(order_id);
+    const manifestResponse = await callShipwayCreateManifestAPI(order_id, accountCode);
     
     if (!manifestResponse.success) {
       console.log('❌ Shipway manifest API failed:', manifestResponse.message);
@@ -4353,6 +4583,7 @@ router.post('/mark-ready', async (req, res) => {
     console.log('🔄 Setting is_manifest = 1 and manifest_id in labels table...');
     const labelData = {
       order_id: order_id,
+      account_code: accountCode,
       is_manifest: 1,
       manifest_id: manifestResponse.manifest_id
     };
@@ -4493,50 +4724,73 @@ router.post('/bulk-mark-ready', async (req, res) => {
       }
     }
 
-    // If we have valid orders, split by payment_type and call manifest API separately
+    // If we have valid orders, split by payment_type AND account_code and call manifest API separately
     if (validOrderIds.length > 0) {
       console.log(`🔄 Processing ${validOrderIds.length} valid orders...`);
       
-      // Step 1: Group orders by payment_type (COD vs Prepaid)
-      const codOrderIds = [];
-      const prepaidOrderIds = [];
+      // Step 1: Group orders by payment_type AND account_code (to ensure store isolation)
+      // Structure: { 'C-STRI': [order_ids], 'C-JERS': [order_ids], 'P-STRI': [order_ids], 'P-JERS': [order_ids] }
+      const orderGroups = {};
       
       for (const order_id of validOrderIds) {
         const orderProducts = orders.filter(order => order.order_id === order_id);
-        // Get payment_type from first product (all products in same order have same payment_type)
-        const paymentType = orderProducts[0]?.payment_type;
+        const claimedProducts = orderProducts.filter(order => 
+          order.claimed_by === vendor.warehouseId && order.claims_status === 'claimed'
+        );
         
-        if (paymentType === 'C') {
-          codOrderIds.push(order_id);
-        } else if (paymentType === 'P') {
-          prepaidOrderIds.push(order_id);
+        // Get payment_type and account_code from first claimed product
+        const paymentType = claimedProducts[0]?.payment_type;
+        const accountCode = claimedProducts[0]?.account_code;
+        
+        if (!accountCode) {
+          console.error(`❌ ACCOUNT_CODE NOT FOUND for order ${order_id}`);
+          failedOrders.push({
+            order_id: order_id,
+            reason: 'Store information not found for this order'
+          });
+          continue;
         }
+        
+        // Create group key: payment_type-account_code
+        const groupKey = `${paymentType}-${accountCode}`;
+        if (!orderGroups[groupKey]) {
+          orderGroups[groupKey] = {
+            paymentType: paymentType,
+            accountCode: accountCode,
+            orderIds: []
+          };
+        }
+        orderGroups[groupKey].orderIds.push(order_id);
       }
       
-      console.log(`📊 Orders grouped by payment type:`);
-      console.log(`  - COD orders: ${codOrderIds.length} (${codOrderIds.join(', ')})`);
-      console.log(`  - Prepaid orders: ${prepaidOrderIds.length} (${prepaidOrderIds.join(', ')})`);
+      console.log(`📊 Orders grouped by payment type and account_code:`);
+      for (const [groupKey, group] of Object.entries(orderGroups)) {
+        console.log(`  - ${groupKey}: ${group.orderIds.length} orders (${group.orderIds.join(', ')})`);
+      }
       
-      // Step 2: Process COD orders
-      if (codOrderIds.length > 0) {
-        console.log(`🔄 Calling Shipway Create Manifest API for COD orders...`);
-        const codManifestResponse = await callShipwayCreateManifestAPI(codOrderIds);
+      // Step 2: Process each group separately (each group has same payment_type and account_code)
+      for (const [groupKey, group] of Object.entries(orderGroups)) {
+        const { paymentType, accountCode, orderIds } = group;
+        const paymentTypeName = paymentType === 'C' ? 'COD' : 'Prepaid';
         
-        if (!codManifestResponse.success) {
-          console.log(`❌ COD manifest creation failed:`, codManifestResponse.message);
-          codOrderIds.forEach(order_id => {
+        console.log(`🔄 Calling Shipway Create Manifest API for ${paymentTypeName} orders (${accountCode})...`);
+        const manifestResponse = await callShipwayCreateManifestAPI(orderIds, accountCode);
+        
+        if (!manifestResponse.success) {
+          console.log(`❌ ${paymentTypeName} manifest creation failed for ${accountCode}:`, manifestResponse.message);
+          orderIds.forEach(order_id => {
             failedOrders.push({
               order_id: order_id,
-              reason: 'Failed to create COD manifest: ' + codManifestResponse.message
+              reason: `Failed to create ${paymentTypeName} manifest for ${accountCode}: ${manifestResponse.message}`
             });
           });
         } else {
-          console.log(`✅ COD Manifest created successfully`);
-          console.log(`  - Manifest ID: ${codManifestResponse.manifest_id}`);
-          manifestIds.push(codManifestResponse.manifest_id);
+          console.log(`✅ ${paymentTypeName} Manifest created successfully for ${accountCode}`);
+          console.log(`  - Manifest ID: ${manifestResponse.manifest_id}`);
+          manifestIds.push(manifestResponse.manifest_id);
           
-          // Process each COD order
-          for (const order_id of codOrderIds) {
+          // Process each order in this group
+          for (const order_id of orderIds) {
             try {
               const orderProducts = orders.filter(order => order.order_id === order_id);
               const claimedProducts = orderProducts.filter(order => 
@@ -4544,15 +4798,16 @@ router.post('/bulk-mark-ready', async (req, res) => {
               );
 
               // Set is_manifest = 1 and manifest_id in labels table
-              console.log(`🔄 Setting manifest data for COD order ${order_id}...`);
+              console.log(`🔄 Setting manifest data for ${paymentTypeName} order ${order_id} (${accountCode})...`);
               const labelData = {
                 order_id: order_id,
+                account_code: accountCode,
                 is_manifest: 1,
-                manifest_id: codManifestResponse.manifest_id
+                manifest_id: manifestResponse.manifest_id
               };
               
               await database.upsertLabel(labelData);
-              console.log(`  ✅ Set manifest_id = ${codManifestResponse.manifest_id} for order ${order_id}`);
+              console.log(`  ✅ Set manifest_id = ${manifestResponse.manifest_id} for order ${order_id}`);
 
               // Update order status to ready_for_handover
               for (const product of claimedProducts) {
@@ -4566,76 +4821,13 @@ router.post('/bulk-mark-ready', async (req, res) => {
                 status: 'ready_for_handover',
                 manifest_created: true,
                 is_manifest: 1,
-                manifest_id: codManifestResponse.manifest_id,
-                payment_type: 'COD'
+                manifest_id: manifestResponse.manifest_id,
+                payment_type: paymentTypeName,
+                account_code: accountCode
               });
 
             } catch (error) {
-              console.error(`❌ Error updating COD order ${order_id}:`, error);
-              failedOrders.push({
-                order_id: order_id,
-                reason: error.message
-              });
-            }
-          }
-        }
-      }
-      
-      // Step 3: Process Prepaid orders
-      if (prepaidOrderIds.length > 0) {
-        console.log(`🔄 Calling Shipway Create Manifest API for Prepaid orders...`);
-        const prepaidManifestResponse = await callShipwayCreateManifestAPI(prepaidOrderIds);
-        
-        if (!prepaidManifestResponse.success) {
-          console.log(`❌ Prepaid manifest creation failed:`, prepaidManifestResponse.message);
-          prepaidOrderIds.forEach(order_id => {
-            failedOrders.push({
-              order_id: order_id,
-              reason: 'Failed to create Prepaid manifest: ' + prepaidManifestResponse.message
-            });
-          });
-        } else {
-          console.log(`✅ Prepaid Manifest created successfully`);
-          console.log(`  - Manifest ID: ${prepaidManifestResponse.manifest_id}`);
-          manifestIds.push(prepaidManifestResponse.manifest_id);
-          
-          // Process each Prepaid order
-          for (const order_id of prepaidOrderIds) {
-            try {
-              const orderProducts = orders.filter(order => order.order_id === order_id);
-              const claimedProducts = orderProducts.filter(order => 
-                order.claimed_by === vendor.warehouseId && order.claims_status === 'claimed'
-              );
-
-              // Set is_manifest = 1 and manifest_id in labels table
-              console.log(`🔄 Setting manifest data for Prepaid order ${order_id}...`);
-              const labelData = {
-                order_id: order_id,
-                is_manifest: 1,
-                manifest_id: prepaidManifestResponse.manifest_id
-              };
-              
-              await database.upsertLabel(labelData);
-              console.log(`  ✅ Set manifest_id = ${prepaidManifestResponse.manifest_id} for order ${order_id}`);
-
-              // Update order status to ready_for_handover
-              for (const product of claimedProducts) {
-                await database.updateOrder(product.unique_id, {
-                  status: 'ready_for_handover'
-                });
-              }
-
-              successfulOrders.push({
-                order_id: order_id,
-                status: 'ready_for_handover',
-                manifest_created: true,
-                is_manifest: 1,
-                manifest_id: prepaidManifestResponse.manifest_id,
-                payment_type: 'Prepaid'
-              });
-
-            } catch (error) {
-              console.error(`❌ Error updating Prepaid order ${order_id}:`, error);
+              console.error(`❌ Error updating ${paymentTypeName} order ${order_id}:`, error);
               failedOrders.push({
                 order_id: order_id,
                 reason: error.message
@@ -4690,6 +4882,52 @@ router.post('/bulk-mark-ready', async (req, res) => {
 });
 
 /**
+ * @route   POST /api/orders/admin/refresh
+ * @desc    Refresh orders by syncing from Shipway API (Admin)
+ * @access  Admin/Superadmin only
+ */
+router.post('/admin/refresh', authenticateBasicAuth, requireAdminOrSuperadmin, async (req, res) => {
+  console.log('🔵 ADMIN REFRESH ORDERS REQUEST START');
+  
+  try {
+    // Wait for MySQL initialization
+    const database = require('../config/database');
+    await database.waitForMySQLInitialization();
+    
+    if (!database.isMySQLAvailable()) {
+      console.log('❌ MySQL connection not available');
+      return res.status(500).json({ success: false, message: 'Database connection not available' });
+    }
+
+    // Use multiStoreSyncService to sync orders for all active stores
+    const multiStoreSyncService = require('../services/multiStoreSyncService');
+    
+    console.log('🔄 Starting orders sync from Shipway for all stores...');
+    const result = await multiStoreSyncService.syncAllStores();
+    
+    console.log('✅ Orders synced successfully');
+    console.log('  - Result:', result);
+    
+    return res.json({
+      success: true,
+      message: `Orders refreshed successfully from Shipway. ${result.successfulStores}/${result.totalStores} stores synced, ${result.totalOrders} orders processed.`,
+      data: {
+        sync_result: result,
+        timestamp: new Date().toISOString()
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ ADMIN REFRESH ORDERS ERROR:', error);
+    return res.status(500).json({ 
+      success: false, 
+      message: 'Failed to refresh orders', 
+      error: error.message 
+    });
+  }
+});
+
+/**
  * @route   POST /api/orders/refresh
  * @desc    Refresh orders by syncing from Shipway API
  * @access  Vendor (token required)
@@ -4728,18 +4966,18 @@ router.post('/refresh', async (req, res) => {
     console.log('  - Email:', vendor.email);
     console.log('  - Warehouse ID:', vendor.warehouseId);
 
-    // Import shipwayService
-    const shipwayService = require('../services/shipwayService');
+    // Use multiStoreSyncService to sync orders for all active stores
+    const multiStoreSyncService = require('../services/multiStoreSyncService');
     
-    console.log('🔄 Starting orders sync from Shipway...');
-    const result = await shipwayService.syncOrdersToMySQL();
+    console.log('🔄 Starting orders sync from Shipway for all stores...');
+    const result = await multiStoreSyncService.syncAllStores();
     
     console.log('✅ Orders synced successfully');
     console.log('  - Result:', result);
     
     return res.json({
       success: true,
-      message: 'Orders refreshed successfully from Shipway',
+      message: `Orders refreshed successfully from Shipway. ${result.successfulStores}/${result.totalStores} stores synced, ${result.totalOrders} orders processed.`,
       data: {
         sync_result: result,
         timestamp: new Date().toISOString()
@@ -4849,8 +5087,18 @@ router.post('/reverse', async (req, res) => {
     if (isLabelDownloaded) {
       console.log('🔄 CASE 2: Label downloaded - calling Shipway cancel API');
       
-      // Get AWB number from labels table
-      const label = await database.getLabelByOrderId(order.order_id);
+      // Get account_code from order to use correct store credentials
+      const accountCode = order.account_code;
+      if (!accountCode) {
+        console.log('❌ ACCOUNT_CODE NOT FOUND for order:', order.order_id);
+        return res.status(400).json({ 
+          success: false, 
+          message: 'Store information not found for this order. Cannot cancel shipment.' 
+        });
+      }
+      
+      // Get AWB number from labels table (with account_code filter for store-specific retrieval)
+      const label = await database.getLabelByOrderId(order.order_id, accountCode);
       
       if (!label || !label.awb) {
         console.log('❌ AWB NOT FOUND for order:', order.order_id);
@@ -4862,18 +5110,27 @@ router.post('/reverse', async (req, res) => {
 
       console.log('✅ AWB FOUND:', label.awb);
 
-      // Call Shipway cancel API
-      const shipwayService = require('../services/shipwayService');
+      // Call Shipway cancel API with store-specific credentials
+      const ShipwayService = require('../services/shipwayService');
+      const shipwayService = new ShipwayService(accountCode);
+      
+      // Initialize the service to load store credentials
+      await shipwayService.initialize();
       
       try {
         const cancelResult = await shipwayService.cancelShipment([label.awb]);
         console.log('✅ SHIPWAY CANCEL SUCCESS:', cancelResult);
       } catch (cancelError) {
-        console.log('❌ SHIPWAY CANCEL FAILED:', cancelError.message);
+        console.error('❌ SHIPWAY CANCEL FAILED:');
+        console.error('  - Error message:', cancelError.message);
+        console.error('  - Error stack:', cancelError.stack);
+        console.error('  - Account Code:', accountCode);
+        console.error('  - AWB:', label.awb);
         return res.status(500).json({
           success: false,
-          message: 'Failed to cancel shipment. Please try after sometime.',
-          error: 'shipway_cancel_failed'
+          message: cancelError.message || 'Failed to cancel shipment. Please try after sometime.',
+          error: 'shipway_cancel_failed',
+          details: cancelError.message
         });
       }
 
@@ -5073,8 +5330,18 @@ router.post('/reverse-grouped', async (req, res) => {
     if (isLabelDownloaded) {
       console.log('🔄 CASE 2: Label downloaded - calling Shipway cancel API');
       
-      // Get AWB number from labels table (only one AWB for the entire order_id)
-      const label = await database.getLabelByOrderId(order_id);
+      // Get account_code from order to use correct store credentials
+      const accountCode = firstValidOrder.account_code;
+      if (!accountCode) {
+        console.log('❌ ACCOUNT_CODE NOT FOUND for order:', order_id);
+        return res.status(400).json({ 
+          success: false, 
+          message: 'Store information not found for this order. Cannot cancel shipment.' 
+        });
+      }
+      
+      // Get AWB number from labels table (only one AWB for the entire order_id, with account_code filter)
+      const label = await database.getLabelByOrderId(order_id, accountCode);
       
       if (!label || !label.awb) {
         console.log('❌ AWB NOT FOUND for order:', order_id);
@@ -5086,18 +5353,27 @@ router.post('/reverse-grouped', async (req, res) => {
 
       console.log('✅ AWB FOUND:', label.awb);
 
-      // Call Shipway cancel API (only once for the entire order)
-      const shipwayService = require('../services/shipwayService');
+      // Call Shipway cancel API with store-specific credentials (only once for the entire order)
+      const ShipwayService = require('../services/shipwayService');
+      const shipwayService = new ShipwayService(accountCode);
+      
+      // Initialize the service to load store credentials
+      await shipwayService.initialize();
       
       try {
         const cancelResult = await shipwayService.cancelShipment([label.awb]);
         console.log('✅ SHIPWAY CANCEL SUCCESS:', cancelResult);
       } catch (cancelError) {
-        console.log('❌ SHIPWAY CANCEL FAILED:', cancelError.message);
+        console.error('❌ SHIPWAY CANCEL FAILED:');
+        console.error('  - Error message:', cancelError.message);
+        console.error('  - Error stack:', cancelError.stack);
+        console.error('  - Account Code:', accountCode);
+        console.error('  - AWB:', label.awb);
         return res.status(500).json({
           success: false,
-          message: 'Failed to cancel shipment. Please try after sometime.',
-          error: 'shipway_cancel_failed'
+          message: cancelError.message || 'Failed to cancel shipment. Please try after sometime.',
+          error: 'shipway_cancel_failed',
+          details: cancelError.message
         });
       }
 
@@ -5317,38 +5593,71 @@ router.post('/download-manifest-summary', async (req, res) => {
     const manifestIdsArray = Array.isArray(manifest_ids) ? manifest_ids : [manifest_ids];
     console.log('📋 Processing manifest IDs:', manifestIdsArray);
 
-    // Query database for manifest summary data
-    const manifestData = [];
+    // Query database for manifest summary data grouped by account_code
+    // Structure: { account_code: { store_name, logo_url, manifests: [...] } }
+    const manifestDataByStore = {};
     
     for (const manifest_id of manifestIdsArray) {
       console.log(`🔍 Querying data for manifest_id: ${manifest_id}`);
       
-      // Query to get carrier summary for this manifest
+      // Query to get carrier summary for this manifest with account_code
       const [summaryRows] = await database.mysqlConnection.execute(`
         SELECT 
           l.carrier_name,
           o.payment_type,
+          l.account_code,
           COUNT(DISTINCT l.order_id) as order_count,
           GROUP_CONCAT(DISTINCT l.order_id ORDER BY l.order_id SEPARATOR ', ') as order_ids
         FROM labels l
-        JOIN orders o ON l.order_id = o.order_id
+        JOIN orders o ON l.order_id = o.order_id AND l.account_code = o.account_code
         WHERE l.manifest_id = ?
-        GROUP BY l.carrier_name, o.payment_type
-        ORDER BY l.carrier_name, o.payment_type
+        GROUP BY l.carrier_name, o.payment_type, l.account_code
+        ORDER BY l.account_code, l.carrier_name, o.payment_type
       `, [manifest_id]);
       
       console.log(`  - Found ${summaryRows.length} carrier/payment combinations`);
       
-      if (summaryRows.length > 0) {
-        manifestData.push({
-          manifest_id: manifest_id,
-          payment_type: summaryRows[0].payment_type,
-          summary: summaryRows
+      // Group by account_code
+      for (const row of summaryRows) {
+        const accountCode = row.account_code;
+        if (!accountCode) {
+          console.log('⚠️ Skipping row with missing account_code');
+          continue;
+        }
+        
+        if (!manifestDataByStore[accountCode]) {
+          // Fetch store information
+          const store = await database.getStoreByAccountCode(accountCode);
+          manifestDataByStore[accountCode] = {
+            account_code: accountCode,
+            store_name: store?.store_name || accountCode,
+            logo_url: store?.logo_url || null,
+            manifests: []
+          };
+        }
+        
+        // Find existing manifest entry or create new one
+        let manifestEntry = manifestDataByStore[accountCode].manifests.find(m => m.manifest_id === manifest_id);
+        if (!manifestEntry) {
+          manifestEntry = {
+            manifest_id: manifest_id,
+            payment_type: row.payment_type,
+            summary: []
+          };
+          manifestDataByStore[accountCode].manifests.push(manifestEntry);
+        }
+        
+        // Add summary row
+        manifestEntry.summary.push({
+          carrier_name: row.carrier_name,
+          payment_type: row.payment_type,
+          order_count: row.order_count,
+          order_ids: row.order_ids
         });
       }
     }
     
-    if (manifestData.length === 0) {
+    if (Object.keys(manifestDataByStore).length === 0) {
       console.log('❌ No data found for provided manifest IDs');
       return res.status(404).json({
         success: false,
@@ -5356,19 +5665,29 @@ router.post('/download-manifest-summary', async (req, res) => {
       });
     }
 
-    console.log('✅ Manifest data collected, generating PDF...');
+    console.log('✅ Manifest data collected, grouped by store:', Object.keys(manifestDataByStore));
     
-    // Fetch logo image
-    let logoBuffer = null;
-    try {
-      const logoUrl = 'https://cdn.shopify.com/s/files/1/0922/4824/4508/files/striker_logo_28245adf-5794-46fb-9ba2-e7703824330e.png?v=1744064798';
-      const logoResponse = await fetch(logoUrl);
-      if (logoResponse.ok) {
-        logoBuffer = Buffer.from(await logoResponse.arrayBuffer());
-        console.log('✅ Logo fetched successfully');
+    // Fetch store logos
+    const storeLogos = {};
+    for (const [accountCode, storeData] of Object.entries(manifestDataByStore)) {
+      if (storeData.logo_url) {
+        try {
+          const logoResponse = await fetch(storeData.logo_url);
+          if (logoResponse.ok) {
+            storeLogos[accountCode] = Buffer.from(await logoResponse.arrayBuffer());
+            console.log(`✅ Logo fetched for ${storeData.store_name}`);
+          } else {
+            console.log(`⚠️ Could not fetch logo for ${storeData.store_name}: ${logoResponse.statusText}`);
+            storeLogos[accountCode] = null;
+          }
+        } catch (error) {
+          console.log(`⚠️ Could not fetch logo for ${storeData.store_name}:`, error.message);
+          storeLogos[accountCode] = null;
+        }
+      } else {
+        storeLogos[accountCode] = null;
+        console.log(`ℹ️ No logo URL configured for ${storeData.store_name}`);
       }
-    } catch (error) {
-      console.log('⚠️ Could not fetch logo:', error.message);
     }
     
     // Generate PDF
@@ -5392,203 +5711,239 @@ router.post('/download-manifest-summary', async (req, res) => {
     // Pipe PDF to response
     doc.pipe(res);
     
-    // Top Section: Logo and Store Name (Left aligned)
-    const topY = 50;
     const leftMargin = 50;
     
-    // Add logo at top left
-    if (logoBuffer) {
+    // Generate separate PDF section for each store
+    const storeKeys = Object.keys(manifestDataByStore);
+    for (let storeIndex = 0; storeIndex < storeKeys.length; storeIndex++) {
+      const accountCode = storeKeys[storeIndex];
+      const storeData = manifestDataByStore[accountCode];
+      const storeName = storeData.store_name;
+      const logoBuffer = storeLogos[accountCode];
+      
+      // Get vendor warehouse ID (vendor_wh_id) for this store
+      let vendorWarehouseId = vendor.warehouseId; // Fallback to claimio_wh_id if mapping not found
       try {
-        const logoWidth = 55;
-        const logoHeight = 55;
-        doc.image(logoBuffer, leftMargin, topY, { width: logoWidth, height: logoHeight, fit: [logoWidth, logoHeight] });
+        const whMapping = await database.getWhMappingByClaimioWhIdAndAccountCode(vendor.warehouseId, accountCode);
+        if (whMapping && whMapping.vendor_wh_id) {
+          vendorWarehouseId = whMapping.vendor_wh_id;
+          console.log(`✅ Using vendor_wh_id (${vendorWarehouseId}) for ${storeName} instead of claimio_wh_id (${vendor.warehouseId})`);
+        } else {
+          console.log(`⚠️ No warehouse mapping found for ${storeName}, using claimio_wh_id (${vendor.warehouseId})`);
+        }
       } catch (error) {
-        console.log('⚠️ Could not embed logo in PDF:', error.message);
+        console.log(`⚠️ Error fetching warehouse mapping for ${storeName}:`, error.message);
+        console.log(`   Using claimio_wh_id (${vendor.warehouseId}) as fallback`);
       }
-    }
-    
-    // Add "Striker Store" next to logo (aligned horizontally)
-    doc.fontSize(20).font('Helvetica-Bold').fillColor('#000000');
-    doc.text('Striker Store', leftMargin + 65, topY + 15);
-    
-    doc.y = topY + 50;
-    
-    // PDF Header - Underlined
-    doc.fontSize(14).font('Helvetica-Bold').fillColor('#000000');
-    doc.text('Manifest Summary Report', leftMargin, doc.y, { underline: true });
-    doc.y += 20;
-    
-    // Header information - Left aligned
-    doc.fontSize(9).font('Helvetica');
-    doc.text(`Generated On: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`, leftMargin, doc.y);
-    doc.y += 12;
-    doc.text(`Warehouse ID: ${vendor.warehouseId}`, leftMargin, doc.y);
-    doc.y += 12;
-    if (vendorAddress) {
-      doc.text(`Warehouse Address: ${vendorAddress}`, leftMargin, doc.y);
-      doc.y += 12;
-    }
-    doc.y += 15;
-    
-    // Calculate grand totals
-    let grandTotal = 0;
-    
-    // Helper function to calculate dynamic row height based on text
-    function calculateRowHeight(text, maxWidth, fontSize) {
-      const avgCharWidth = fontSize * 0.5; // Approximate character width
-      const charsPerLine = Math.floor(maxWidth / avgCharWidth);
-      const lines = Math.ceil(text.length / charsPerLine);
-      const lineHeight = fontSize * 1.5;
-      const minHeight = 30;
-      return Math.max(minHeight, lines * lineHeight + 10);
-    }
-    
-    // Process each manifest (COD and/or Prepaid)
-    for (let i = 0; i < manifestData.length; i++) {
-      const { manifest_id, payment_type, summary } = manifestData[i];
       
-      // Determine payment type label and icon
-      const paymentTypeLabel = payment_type === 'C' ? 'COD' : 'Pre-Paid';
-      const iconLetter = payment_type === 'C' ? 'C' : 'P';
+      // Add new page for each store (except the first one)
+      if (storeIndex > 0) {
+        doc.addPage();
+      }
       
-      // Draw C/P icon box on the left (height matches text lines)
-      const iconBoxWidth = 42;
-      const iconBoxHeight = 35; // Height to match "COD MANIFEST" + "Manifest ID:" combined
-      const iconBoxX = leftMargin;
-      const iconBoxY = doc.y;
+      // Top Section: Logo and Store Name (Left aligned)
+      const topY = 50;
       
-      // Icon box background
-      doc.rect(iconBoxX, iconBoxY, iconBoxWidth, iconBoxHeight).stroke('#000000');
+      // Add logo at top left (if available)
+      let logoWidth = 0;
+      if (logoBuffer) {
+        try {
+          logoWidth = 55;
+          const logoHeight = 55;
+          doc.image(logoBuffer, leftMargin, topY, { width: logoWidth, height: logoHeight, fit: [logoWidth, logoHeight] });
+          console.log(`✅ Logo embedded for ${storeName}`);
+        } catch (error) {
+          console.log(`⚠️ Could not embed logo for ${storeName}:`, error.message);
+          logoWidth = 0; // Reset if embedding failed
+        }
+      } else {
+        console.log(`ℹ️ No logo for ${storeName} - keeping logo space blank`);
+      }
       
-      // Icon letter (centered in box)
-      doc.fontSize(22).font('Helvetica-Bold').fillColor('#000000');
-      const iconText = iconLetter;
-      const iconTextWidth = doc.widthOfString(iconText);
-      const iconTextHeight = 22; // Approximate font height
-      const iconTextX = iconBoxX + (iconBoxWidth - iconTextWidth) / 2;
-      const iconTextY = iconBoxY + (iconBoxHeight - iconTextHeight) / 2 + 2;
-      doc.text(iconText, iconTextX, iconTextY);
+      // Add store name next to logo (or at left margin if no logo)
+      const storeNameX = logoWidth > 0 ? leftMargin + logoWidth + 10 : leftMargin;
+      doc.fontSize(20).font('Helvetica-Bold').fillColor('#000000');
+      doc.text(storeName, storeNameX, topY + 15);
       
-      // Manifest section header box next to icon box
-      const manifestHeaderX = iconBoxX + iconBoxWidth;
-      const manifestHeaderWidth = 440; // Width of the text box
+      doc.y = topY + 50;
       
-      // Draw border box around manifest header text
-      doc.rect(manifestHeaderX, iconBoxY, manifestHeaderWidth, iconBoxHeight).stroke('#000000');
+      // PDF Header - Underlined
+      doc.fontSize(14).font('Helvetica-Bold').fillColor('#000000');
+      doc.text('Manifest Summary Report', leftMargin, doc.y, { underline: true });
+      doc.y += 20;
       
-      // Manifest section header text inside the box
-      doc.fontSize(12).font('Helvetica-Bold').fillColor('#000000');
-      doc.text(`${paymentTypeLabel} MANIFEST`, manifestHeaderX + 15, iconBoxY + 5);
+      // Header information - Left aligned
       doc.fontSize(9).font('Helvetica');
-      doc.text(`Manifest ID: ${manifest_id}`, manifestHeaderX + 15, iconBoxY + 19);
-      
-      // Move Y position below the icon box
-      doc.y = iconBoxY + iconBoxHeight + 15;
-      
-      // Table header
-      const tableTop = doc.y;
-      const colWidths = { carrier: 100, paymentType: 60, orders: 40, orderIds: 180, pickupDetails: 115 };
-      const startX = leftMargin;
-      const totalWidth = colWidths.carrier + colWidths.paymentType + colWidths.orders + colWidths.orderIds + colWidths.pickupDetails;
-      
-      // Draw table header with borders
-      const headerHeight = 25;
-      doc.fontSize(9).font('Helvetica-Bold').fillColor('#000000');
-      
-      // Draw header cells with borders
-      let headerX = startX;
-      
-      // Carrier column
-      doc.rect(headerX, tableTop, colWidths.carrier, headerHeight).stroke();
-      doc.text('Carrier', headerX + 5, tableTop + 8, { width: colWidths.carrier - 10, continued: false });
-      headerX += colWidths.carrier;
-      
-      // Payment column
-      doc.rect(headerX, tableTop, colWidths.paymentType, headerHeight).stroke();
-      doc.text('Payment', headerX + 5, tableTop + 8, { width: colWidths.paymentType - 10, continued: false });
-      headerX += colWidths.paymentType;
-      
-      // Count column
-      doc.rect(headerX, tableTop, colWidths.orders, headerHeight).stroke();
-      doc.text('Count', headerX + 5, tableTop + 8, { width: colWidths.orders - 10, continued: false });
-      headerX += colWidths.orders;
-      
-      // Order IDs column
-      doc.rect(headerX, tableTop, colWidths.orderIds, headerHeight).stroke();
-      doc.text('Order IDs', headerX + 5, tableTop + 8, { width: colWidths.orderIds - 10, continued: false });
-      headerX += colWidths.orderIds;
-      
-      // Signature column
-      doc.rect(headerX, tableTop, colWidths.pickupDetails, headerHeight).stroke();
-      doc.text('Signature', headerX + 5, tableTop + 8, { width: colWidths.pickupDetails - 10, continued: false });
-      
-      // Draw table rows with dynamic height
-      let currentY = tableTop + headerHeight;
-      doc.fillColor('black').font('Helvetica');
-      let manifestTotal = 0;
-      
-      summary.forEach((row, index) => {
-        const friendlyPaymentType = row.payment_type === 'C' ? 'COD' : 'Prepaid';
-        const orderIdsText = row.order_ids || '';
-        
-        // Remove "Shipway" from carrier name
-        const carrierName = (row.carrier_name || 'Unknown').replace(/Shipway\s*/gi, '');
-        
-        // Calculate dynamic row height based on order IDs length
-        const rowHeight = calculateRowHeight(orderIdsText, colWidths.orderIds - 10, 8);
-        
-        // Draw row cells with borders
-        let cellX = startX;
-        
-        // Carrier cell
-        doc.rect(cellX, currentY, colWidths.carrier, rowHeight).stroke();
-        doc.fontSize(8).text(carrierName, cellX + 5, currentY + 8, { width: colWidths.carrier - 10, continued: false });
-        cellX += colWidths.carrier;
-        
-        // Payment cell
-        doc.rect(cellX, currentY, colWidths.paymentType, rowHeight).stroke();
-        doc.text(friendlyPaymentType, cellX + 5, currentY + 8, { width: colWidths.paymentType - 10, continued: false });
-        cellX += colWidths.paymentType;
-        
-        // Count cell
-        doc.rect(cellX, currentY, colWidths.orders, rowHeight).stroke();
-        doc.text(row.order_count.toString(), cellX + 5, currentY + 8, { width: colWidths.orders - 10, align: 'center', continued: false });
-        cellX += colWidths.orders;
-        
-        // Order IDs cell (with text wrapping)
-        doc.rect(cellX, currentY, colWidths.orderIds, rowHeight).stroke();
-        doc.text(orderIdsText, cellX + 5, currentY + 8, { width: colWidths.orderIds - 10, continued: false });
-        cellX += colWidths.orderIds;
-        
-        // Signature cell (blank for manual signature)
-        doc.rect(cellX, currentY, colWidths.pickupDetails, rowHeight).stroke();
-        
-        currentY += rowHeight;
-        manifestTotal += parseInt(row.order_count);
-      });
-      
-      // Manifest total row
-      const totalRowHeight = 25;
-      doc.rect(startX, currentY, totalWidth, totalRowHeight).stroke();
-      doc.fillColor('black').font('Helvetica-Bold').fontSize(9);
-      doc.text(`Total ${paymentTypeLabel} Orders`, startX + 5, currentY + 8, { continued: true });
-      doc.text(` ${manifestTotal}`, { continued: false });
-      
-      grandTotal += manifestTotal;
-      
-      // Move Y position down after the table
-      doc.y = currentY + totalRowHeight + 20;
-      
-      // Add spacing between manifests
-      if (i < manifestData.length - 1) {
-        doc.y += 10;
+      doc.text(`Generated On: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`, leftMargin, doc.y);
+      doc.y += 12;
+      doc.text(`Warehouse ID: ${vendorWarehouseId}`, leftMargin, doc.y);
+      doc.y += 12;
+      if (vendorAddress) {
+        doc.text(`Warehouse Address: ${vendorAddress}`, leftMargin, doc.y);
+        doc.y += 12;
       }
+      doc.y += 15;
+      
+      // Helper function to calculate dynamic row height based on text
+      function calculateRowHeight(text, maxWidth, fontSize) {
+        const avgCharWidth = fontSize * 0.5; // Approximate character width
+        const charsPerLine = Math.floor(maxWidth / avgCharWidth);
+        const lines = Math.ceil(text.length / charsPerLine);
+        const lineHeight = fontSize * 1.5;
+        const minHeight = 30;
+        return Math.max(minHeight, lines * lineHeight + 10);
+      }
+      
+      // Calculate store total
+      let storeTotal = 0;
+      
+      // Process each manifest (COD and/or Prepaid) for this store
+      for (let i = 0; i < storeData.manifests.length; i++) {
+        const { manifest_id, payment_type, summary } = storeData.manifests[i];
+        
+        // Determine payment type label and icon
+        const paymentTypeLabel = payment_type === 'C' ? 'COD' : 'Pre-Paid';
+        const iconLetter = payment_type === 'C' ? 'C' : 'P';
+        
+        // Draw C/P icon box on the left (height matches text lines)
+        const iconBoxWidth = 42;
+        const iconBoxHeight = 35; // Height to match "COD MANIFEST" + "Manifest ID:" combined
+        const iconBoxX = leftMargin;
+        const iconBoxY = doc.y;
+        
+        // Icon box background
+        doc.rect(iconBoxX, iconBoxY, iconBoxWidth, iconBoxHeight).stroke('#000000');
+        
+        // Icon letter (centered in box)
+        doc.fontSize(22).font('Helvetica-Bold').fillColor('#000000');
+        const iconText = iconLetter;
+        const iconTextWidth = doc.widthOfString(iconText);
+        const iconTextHeight = 22; // Approximate font height
+        const iconTextX = iconBoxX + (iconBoxWidth - iconTextWidth) / 2;
+        const iconTextY = iconBoxY + (iconBoxHeight - iconTextHeight) / 2 + 2;
+        doc.text(iconText, iconTextX, iconTextY);
+        
+        // Manifest section header box next to icon box
+        const manifestHeaderX = iconBoxX + iconBoxWidth;
+        const manifestHeaderWidth = 440; // Width of the text box
+        
+        // Draw border box around manifest header text
+        doc.rect(manifestHeaderX, iconBoxY, manifestHeaderWidth, iconBoxHeight).stroke('#000000');
+        
+        // Manifest section header text inside the box
+        doc.fontSize(12).font('Helvetica-Bold').fillColor('#000000');
+        doc.text(`${paymentTypeLabel} MANIFEST`, manifestHeaderX + 15, iconBoxY + 5);
+        doc.fontSize(9).font('Helvetica');
+        doc.text(`Manifest ID: ${manifest_id}`, manifestHeaderX + 15, iconBoxY + 19);
+        
+        // Move Y position below the icon box
+        doc.y = iconBoxY + iconBoxHeight + 15;
+        
+        // Table header
+        const tableTop = doc.y;
+        const colWidths = { carrier: 100, paymentType: 60, orders: 40, orderIds: 180, pickupDetails: 115 };
+        const startX = leftMargin;
+        const totalWidth = colWidths.carrier + colWidths.paymentType + colWidths.orders + colWidths.orderIds + colWidths.pickupDetails;
+        
+        // Draw table header with borders
+        const headerHeight = 25;
+        doc.fontSize(9).font('Helvetica-Bold').fillColor('#000000');
+        
+        // Draw header cells with borders
+        let headerX = startX;
+        
+        // Carrier column
+        doc.rect(headerX, tableTop, colWidths.carrier, headerHeight).stroke();
+        doc.text('Carrier', headerX + 5, tableTop + 8, { width: colWidths.carrier - 10, continued: false });
+        headerX += colWidths.carrier;
+        
+        // Payment column
+        doc.rect(headerX, tableTop, colWidths.paymentType, headerHeight).stroke();
+        doc.text('Payment', headerX + 5, tableTop + 8, { width: colWidths.paymentType - 10, continued: false });
+        headerX += colWidths.paymentType;
+        
+        // Count column
+        doc.rect(headerX, tableTop, colWidths.orders, headerHeight).stroke();
+        doc.text('Count', headerX + 5, tableTop + 8, { width: colWidths.orders - 10, continued: false });
+        headerX += colWidths.orders;
+        
+        // Order IDs column
+        doc.rect(headerX, tableTop, colWidths.orderIds, headerHeight).stroke();
+        doc.text('Order IDs', headerX + 5, tableTop + 8, { width: colWidths.orderIds - 10, continued: false });
+        headerX += colWidths.orderIds;
+        
+        // Signature column
+        doc.rect(headerX, tableTop, colWidths.pickupDetails, headerHeight).stroke();
+        doc.text('Signature', headerX + 5, tableTop + 8, { width: colWidths.pickupDetails - 10, continued: false });
+        
+        // Draw table rows with dynamic height
+        let currentY = tableTop + headerHeight;
+        doc.fillColor('black').font('Helvetica');
+        let manifestTotal = 0;
+        
+        summary.forEach((row, index) => {
+          const friendlyPaymentType = row.payment_type === 'C' ? 'COD' : 'Prepaid';
+          const orderIdsText = row.order_ids || '';
+          
+          // Remove "Shipway" from carrier name
+          const carrierName = (row.carrier_name || 'Unknown').replace(/Shipway\s*/gi, '');
+          
+          // Calculate dynamic row height based on order IDs length
+          const rowHeight = calculateRowHeight(orderIdsText, colWidths.orderIds - 10, 8);
+          
+          // Draw row cells with borders
+          let cellX = startX;
+          
+          // Carrier cell
+          doc.rect(cellX, currentY, colWidths.carrier, rowHeight).stroke();
+          doc.fontSize(8).text(carrierName, cellX + 5, currentY + 8, { width: colWidths.carrier - 10, continued: false });
+          cellX += colWidths.carrier;
+          
+          // Payment cell
+          doc.rect(cellX, currentY, colWidths.paymentType, rowHeight).stroke();
+          doc.text(friendlyPaymentType, cellX + 5, currentY + 8, { width: colWidths.paymentType - 10, continued: false });
+          cellX += colWidths.paymentType;
+          
+          // Count cell
+          doc.rect(cellX, currentY, colWidths.orders, rowHeight).stroke();
+          doc.text(row.order_count.toString(), cellX + 5, currentY + 8, { width: colWidths.orders - 10, align: 'center', continued: false });
+          cellX += colWidths.orders;
+          
+          // Order IDs cell (with text wrapping)
+          doc.rect(cellX, currentY, colWidths.orderIds, rowHeight).stroke();
+          doc.text(orderIdsText, cellX + 5, currentY + 8, { width: colWidths.orderIds - 10, continued: false });
+          cellX += colWidths.orderIds;
+          
+          // Signature cell (blank for manual signature)
+          doc.rect(cellX, currentY, colWidths.pickupDetails, rowHeight).stroke();
+          
+          currentY += rowHeight;
+          manifestTotal += parseInt(row.order_count);
+        });
+        
+        // Manifest total row
+        const totalRowHeight = 25;
+        doc.rect(startX, currentY, totalWidth, totalRowHeight).stroke();
+        doc.fillColor('black').font('Helvetica-Bold').fontSize(9);
+        doc.text(`Total ${paymentTypeLabel} Orders`, startX + 5, currentY + 8, { continued: true });
+        doc.text(` ${manifestTotal}`, { continued: false });
+        
+        storeTotal += manifestTotal;
+        
+        // Move Y position down after the table
+        doc.y = currentY + totalRowHeight + 20;
+        
+        // Add spacing between manifests
+        if (i < storeData.manifests.length - 1) {
+          doc.y += 10;
+        }
+      }
+      
+      // Store total for this store
+      doc.y += 10;
+      doc.fontSize(11).font('Helvetica-Bold').fillColor('#000000');
+      doc.text(`${storeName} Total: ${storeTotal} Orders`, leftMargin, doc.y);
     }
-    
-    // Grand total (always show)
-    doc.y += 10;
-    doc.fontSize(11).font('Helvetica-Bold').fillColor('#000000');
-    doc.text(`Grand Total: ${grandTotal} Orders`, leftMargin, doc.y);
     
     // Finalize PDF
     doc.end();

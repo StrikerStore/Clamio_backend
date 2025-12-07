@@ -13,17 +13,31 @@ class ShipwayController {
   async getWarehouseById(req, res) {
     try {
       const { warehouseId } = req.params;
+      const accountCode = req.query.account_code || req.body.account_code;
+
+      if (!accountCode) {
+        return res.status(400).json({
+          success: false,
+          message: 'account_code is required for warehouse validation'
+        });
+      }
 
       // Validate warehouse ID format
-      if (!shipwayService.validateWarehouseId(warehouseId)) {
+      const ShipwayService = require('../services/shipwayService');
+      const tempService = new ShipwayService();
+      if (!tempService.validateWarehouseId(warehouseId)) {
         return res.status(400).json({
           success: false,
           message: 'Invalid warehouse ID format. Must be a positive number.'
         });
       }
 
+      // Create store-specific ShipwayService instance
+      const shipwayServiceInstance = new ShipwayService(accountCode);
+      await shipwayServiceInstance.initialize();
+
       // Fetch warehouse data from Shipway API
-      const warehouseData = await shipwayService.getWarehouseById(warehouseId);
+      const warehouseData = await shipwayServiceInstance.getWarehouseById(warehouseId);
 
       if (!warehouseData.success) {
         return res.status(404).json({
@@ -157,8 +171,20 @@ class ShipwayController {
         });
       }
 
+      // Get account_code from request first
+      const accountCode = req.body.account_code || req.query.account_code;
+      
+      if (!accountCode) {
+        return res.status(400).json({
+          success: false,
+          message: 'account_code is required for warehouse validation'
+        });
+      }
+
       // Validate warehouse ID format
-      if (!shipwayService.validateWarehouseId(warehouseId)) {
+      const ShipwayService = require('../services/shipwayService');
+      const tempService = new ShipwayService();
+      if (!tempService.validateWarehouseId(warehouseId)) {
         console.log('❌ Invalid warehouse ID format:', warehouseId);
         return res.status(400).json({
           success: false,
@@ -168,8 +194,12 @@ class ShipwayController {
 
       console.log('✅ Warehouse ID format is valid, fetching from Shipway API...');
 
+      // Create store-specific ShipwayService instance (accountCode already declared above)
+      const shipwayServiceInstance = new ShipwayService(accountCode);
+      await shipwayServiceInstance.initialize();
+
       // Fetch warehouse data from Shipway API
-      const warehouseData = await shipwayService.getWarehouseById(warehouseId);
+      const warehouseData = await shipwayServiceInstance.getWarehouseById(warehouseId);
 
       console.log('📦 Shipway API response:', {
         success: warehouseData.success,
@@ -185,7 +215,7 @@ class ShipwayController {
       }
 
       // Format the warehouse data
-      const formattedWarehouse = shipwayService.formatWarehouseData(warehouseData.data);
+      const formattedWarehouse = shipwayServiceInstance.formatWarehouseData(warehouseData.data);
 
       console.log('✅ Warehouse validated successfully:', {
         warehouseId,
@@ -286,11 +316,26 @@ class ShipwayController {
       const results = [];
       const errors = [];
 
+      // Get account_code from request
+      const accountCode = req.body.account_code || req.query.account_code;
+      
+      if (!accountCode) {
+        return res.status(400).json({
+          success: false,
+          message: 'account_code is required for warehouse validation'
+        });
+      }
+
+      // Create store-specific ShipwayService instance
+      const ShipwayService = require('../services/shipwayService');
+      const shipwayServiceInstance = new ShipwayService(accountCode);
+      await shipwayServiceInstance.initialize();
+
       // Fetch each warehouse
       for (const warehouseId of warehouseIds) {
         try {
           // Validate warehouse ID format
-          if (!shipwayService.validateWarehouseId(warehouseId)) {
+          if (!shipwayServiceInstance.validateWarehouseId(warehouseId)) {
             errors.push({
               warehouseId,
               error: 'Invalid warehouse ID format'
@@ -299,10 +344,10 @@ class ShipwayController {
           }
 
           // Fetch warehouse data
-          const warehouseData = await shipwayService.getWarehouseById(warehouseId);
+          const warehouseData = await shipwayServiceInstance.getWarehouseById(warehouseId);
 
           if (warehouseData.success) {
-            const formattedWarehouse = shipwayService.formatWarehouseData(warehouseData.data);
+            const formattedWarehouse = shipwayServiceInstance.formatWarehouseData(warehouseData.data);
             results.push({
               warehouseId,
               warehouse: formattedWarehouse,

@@ -1,10 +1,52 @@
+const database = require('../config/database');
+
 /**
  * Auto Manifest Service
  * Handles automatic manifest creation for orders that are handed over but not marked as ready
+ * Now supports multi-store via account_code from orders
  */
 class AutoManifestService {
   constructor() {
     this.isRunning = false;
+    // Store credentials cache: account_code -> auth_token
+    this.storeCredentialsCache = new Map();
+  }
+
+  /**
+   * Get store credentials for a given account_code
+   * @param {string} accountCode - The account_code to get credentials for
+   * @returns {string} The auth_token for the store
+   */
+  async getStoreCredentials(accountCode) {
+    if (!accountCode) {
+      throw new Error('account_code is required for creating manifest');
+    }
+
+    // Check cache first
+    if (this.storeCredentialsCache.has(accountCode)) {
+      return this.storeCredentialsCache.get(accountCode);
+    }
+
+    // Fetch from database
+    await database.waitForMySQLInitialization();
+    const store = await database.getStoreByAccountCode(accountCode);
+    
+    if (!store) {
+      throw new Error(`Store not found for account_code: ${accountCode}`);
+    }
+    
+    if (store.status !== 'active') {
+      throw new Error(`Store is not active: ${accountCode}`);
+    }
+    
+    if (!store.auth_token) {
+      throw new Error(`Store auth_token not found for account_code: ${accountCode}`);
+    }
+
+    // Cache the credentials
+    this.storeCredentialsCache.set(accountCode, store.auth_token);
+    
+    return store.auth_token;
   }
 
   /**
@@ -53,34 +95,50 @@ class AutoManifestService {
         };
       }
 
+      // Group orders by account_code to process store-specific batches
+      const ordersByStore = {};
+      ordersNeedingManifest.forEach(order => {
+        if (!order.account_code) {
+          console.warn(`⚠️ [Auto-Manifest] Order ${order.order_id} missing account_code, skipping`);
+          return;
+        }
+        if (!ordersByStore[order.account_code]) {
+          ordersByStore[order.account_code] = [];
+        }
+        ordersByStore[order.account_code].push(order);
+      });
+
       let successCount = 0;
       let errorCount = 0;
 
-      // Process orders in batches using bulk API
-      const batchSize = 10; // Increased batch size since we're using bulk API
-      for (let i = 0; i < ordersNeedingManifest.length; i += batchSize) {
-        const batch = ordersNeedingManifest.slice(i, i + batchSize);
-        const orderIds = batch.map(order => order.order_id);
+      // Process each store's orders separately
+      for (const [accountCode, storeOrders] of Object.entries(ordersByStore)) {
+        console.log(`🏪 [Auto-Manifest] Processing ${storeOrders.length} orders for store: ${accountCode}`);
         
-        console.log(`🔄 [Auto-Manifest] Processing batch ${Math.floor(i/batchSize) + 1}/${Math.ceil(ordersNeedingManifest.length/batchSize)} (${batch.length} orders)`);
-        console.log(`📦 [Auto-Manifest] Order IDs in batch: ${orderIds.join(', ')}`);
-        
-        try {
-          // Collect AWB numbers for all orders in batch
-          const orderDetails = batch.map(order => ({
-            order_id: order.order_id,
-            awb: order.awb,
-            customer_name: order.customer_name,
-            current_shipment_status: order.current_shipment_status
-          }));
+        const batchSize = 10; // Batch size per store
+        for (let i = 0; i < storeOrders.length; i += batchSize) {
+          const batch = storeOrders.slice(i, i + batchSize);
+          const orderIds = batch.map(order => order.order_id);
           
-          console.log(`📦 [Auto-Manifest] Batch details:`);
-          orderDetails.forEach(order => {
-            console.log(`  - Order ${order.order_id}: AWB=${order.awb || 'N/A'}, Customer=${order.customer_name}, Status=${order.current_shipment_status}`);
-          });
+          console.log(`🔄 [Auto-Manifest] Processing batch ${Math.floor(i/batchSize) + 1}/${Math.ceil(storeOrders.length/batchSize)} for store ${accountCode} (${batch.length} orders)`);
+          console.log(`📦 [Auto-Manifest] Order IDs in batch: ${orderIds.join(', ')}`);
           
-          // Call Shipway Create Manifest API with all orders in batch
-          const manifestResponse = await this.callShipwayCreateManifestAPI(orderIds, orderDetails);
+          try {
+            // Collect AWB numbers for all orders in batch
+            const orderDetails = batch.map(order => ({
+              order_id: order.order_id,
+              awb: order.awb,
+              customer_name: order.customer_name,
+              current_shipment_status: order.current_shipment_status
+            }));
+            
+            console.log(`📦 [Auto-Manifest] Batch details:`);
+            orderDetails.forEach(order => {
+              console.log(`  - Order ${order.order_id}: AWB=${order.awb || 'N/A'}, Customer=${order.customer_name}, Status=${order.current_shipment_status}`);
+            });
+            
+            // Call Shipway Create Manifest API with all orders in batch (store-specific)
+            const manifestResponse = await this.callShipwayCreateManifestAPI(orderIds, orderDetails, accountCode);
           
           if (manifestResponse.success) {
             // Update database for all successful orders
@@ -159,12 +217,14 @@ class AutoManifestService {
    */
   async processSingleOrderManifest(order) {
     try {
-      console.log(`🔄 [Auto-Manifest] Processing order: ${order.order_id}`);
+      if (!order.account_code) {
+        throw new Error(`Order ${order.order_id} missing account_code`);
+      }
+
+      console.log(`🔄 [Auto-Manifest] Processing order: ${order.order_id} (store: ${order.account_code})`);
       
-      const database = require('../config/database');
-      
-      // Call Shipway Create Manifest API
-      const manifestResponse = await this.callShipwayCreateManifestAPI([order.order_id]);
+      // Call Shipway Create Manifest API with store-specific credentials
+      const manifestResponse = await this.callShipwayCreateManifestAPI([order.order_id], null, order.account_code);
       
       if (!manifestResponse.success) {
         throw new Error(`Manifest API failed: ${manifestResponse.message}`);
@@ -205,16 +265,19 @@ class AutoManifestService {
    * Call Shipway Create Manifest API (Bulk)
    * @param {Array} orderIds - Array of order IDs to manifest in bulk
    * @param {Array} orderDetails - Array of order details with AWB numbers (optional)
+   * @param {string} accountCode - The account_code for the store
    */
-  async callShipwayCreateManifestAPI(orderIds, orderDetails = null) {
+  async callShipwayCreateManifestAPI(orderIds, orderDetails = null, accountCode = null) {
     try {
-      console.log(`🔄 [Auto-Manifest] Calling Shipway Create Manifest API (Bulk)`);
+      if (!accountCode) {
+        throw new Error('account_code is required for creating manifest');
+      }
+
+      console.log(`🔄 [Auto-Manifest] Calling Shipway Create Manifest API (Bulk) for store: ${accountCode}`);
       console.log(`📦 [Auto-Manifest] Processing ${orderIds.length} orders: ${orderIds.join(', ')}`);
       
-      const basicAuthHeader = process.env.SHIPWAY_BASIC_AUTH_HEADER;
-      if (!basicAuthHeader) {
-        throw new Error('SHIPWAY_BASIC_AUTH_HEADER not found in environment variables');
-      }
+      // Get store-specific credentials
+      const basicAuthHeader = await this.getStoreCredentials(accountCode);
 
       const requestBody = {
         order_ids: orderIds

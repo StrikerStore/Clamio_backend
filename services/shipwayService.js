@@ -6,26 +6,72 @@ const orderEnhancementService = require('./orderEnhancementService');
 const database = require('../config/database');
 
 /**
- * Generate stable unique_id from order and product data
+ * Generate stable unique_id from order and product data.
+ * Now includes account_code so rows from different stores never collide.
  * @param {string} orderId - Order ID
  * @param {string} productCode - Product code
  * @param {number} itemIndex - Item index in order (for duplicate products in same order)
+ * @param {string} accountCode - Store account code
  * @returns {string} Stable unique_id
  */
-function generateStableUniqueId(orderId, productCode, itemIndex = 0) {
-  const id = `${orderId}_${productCode}_${itemIndex}`;
+function generateStableUniqueId(orderId, productCode, itemIndex = 0, accountCode = '') {
+  const storePart = accountCode || 'GLOBAL';
+  const id = `${storePart}_${orderId}_${productCode}_${itemIndex}`;
   return crypto.createHash('md5').update(id).digest('hex').substring(0, 12).toUpperCase();
 }
 
 /**
  * Shipway API Service
  * Handles all interactions with Shipway API
+ * Now supports multi-store via account_code parameter
  */
 class ShipwayService {
-  constructor() {
+  constructor(accountCode = null) {
     this.baseURL = process.env.SHIPWAY_API_BASE_URL || 'https://app.shipway.com/api';
-    // Instead of API key, use Basic Auth header from environment variable
-    this.basicAuthHeader = process.env.SHIPWAY_BASIC_AUTH_HEADER;
+    this.accountCode = accountCode;
+    this.basicAuthHeader = null;
+    this.initialized = false;
+  }
+
+  /**
+   * Initialize service by fetching store credentials
+   * @returns {Promise<void>}
+   */
+  async initialize() {
+    if (this.initialized) {
+      return;
+    }
+
+    try {
+      if (this.accountCode) {
+        // Multi-store mode: fetch credentials from database
+        const store = await database.getStoreByAccountCode(this.accountCode);
+        
+        if (!store) {
+          throw new Error(`Store not found for account code: ${this.accountCode}`);
+        }
+        
+        if (store.status !== 'active') {
+          throw new Error(`Store is not active: ${this.accountCode}`);
+        }
+        
+        this.basicAuthHeader = store.auth_token;
+        console.log(`✅ ShipwayService initialized for store: ${this.accountCode}`);
+      } else {
+        // Legacy mode: use environment variable (backward compatibility)
+        this.basicAuthHeader = process.env.SHIPWAY_BASIC_AUTH_HEADER;
+        console.log(`✅ ShipwayService initialized in legacy mode (env variables)`);
+      }
+
+      if (!this.basicAuthHeader) {
+        throw new Error('Shipway API configuration error. No auth token available.');
+      }
+
+      this.initialized = true;
+    } catch (error) {
+      console.error('❌ ShipwayService initialization failed:', error.message);
+      throw error;
+    }
   }
 
   /**
@@ -34,6 +80,9 @@ class ShipwayService {
    * @returns {Object} Warehouse details from Shipway API
    */
   async getWarehouseById(warehouseId) {
+    // Initialize service if not already initialized
+    await this.initialize();
+    
     try {
       if (!warehouseId) {
         throw new Error('Warehouse ID is required');
@@ -410,10 +459,11 @@ class ShipwayService {
     const flatOrders = [];
     let uniqueIdCounter = maxUniqueId + 1;
 
-    // Function to generate stable unique_id
-    function generateStableUniqueId(orderId, productCode, itemIndex = 0) {
+    // Function to generate stable unique_id (store-aware)
+    function generateStableUniqueIdWithStore(orderId, productCode, itemIndex = 0, accountCode = '') {
       const crypto = require('crypto');
-      const id = `${orderId}_${productCode}_${itemIndex}`;
+      const storePart = accountCode || 'GLOBAL';
+      const id = `${storePart}_${orderId}_${productCode}_${itemIndex}`;
       return crypto.createHash('md5').update(id).digest('hex').substring(0, 12).toUpperCase();
     }
     
@@ -490,7 +540,7 @@ class ShipwayService {
            : parseFloat((orderTotalSplit - prepaidAmount).toFixed(2));
          
                                                          const orderRow = {
-          unique_id: existingClaim ? existingClaim.unique_id : generateStableUniqueId(order.order_id, product.product_code, i),
+         unique_id: existingClaim ? existingClaim.unique_id : generateStableUniqueIdWithStore(order.order_id, product.product_code, i, this.accountCode),
           order_id: order.order_id,
           order_date: order.order_date,
           product_name: product.product,
@@ -614,6 +664,9 @@ class ShipwayService {
    * Stores raw API response in JSON file for reference.
    */
   async syncOrdersToMySQL() {
+    // Initialize service if not already initialized
+    await this.initialize();
+    
     const database = require('../config/database');
     const rawDataJsonPath = path.join(__dirname, '../data/raw_shipway_orders.json');
     const url = `${this.baseURL}/getorders`;
@@ -626,7 +679,7 @@ class ShipwayService {
       let page = 1;
       let hasMorePages = true;
       
-      console.log('🔄 Starting paginated fetch from Shipway API...');
+      console.log(`🔄 Starting paginated fetch from Shipway API${this.accountCode ? ` (${this.accountCode})` : ''}...`);
       
       while (hasMorePages) {
         const currentParams = { 
@@ -779,16 +832,19 @@ class ShipwayService {
     }
 
     // Get existing orders from MySQL to preserve claim data
+    // IMPORTANT: Filter by account_code to prevent cross-store data interaction
     let existingOrders = [];
-    let existingClaimData = new Map(); // Map to store claim data by order_id|product_code
+    let existingClaimData = new Map(); // Map to store claim data by account_code|order_id|product_code
     let maxUniqueId = 0;
     
     try {
-      existingOrders = await database.getAllOrders();
+      const allOrders = await database.getAllOrders();
+      // Filter orders to only include current store's orders
+      existingOrders = allOrders.filter(row => row.account_code === this.accountCode);
       
-      // Build map of existing claim data
+      // Build map of existing claim data with account_code in key
       existingOrders.forEach(row => {
-        const key = `${row.order_id}|${row.product_code}`;
+        const key = `${row.account_code}|${row.order_id}|${row.product_code}`;
         existingClaimData.set(key, {
           unique_id: row.unique_id,
           status: row.status || 'unclaimed',
@@ -818,6 +874,14 @@ class ShipwayService {
     // Flatten Shipway orders to one row per product, preserving existing claim data
     const flatOrders = [];
     let uniqueIdCounter = maxUniqueId + 1;
+    
+    // Function to generate stable unique_id (store-aware)
+    const generateStableUniqueIdWithStore = (orderId, productCode, itemIndex = 0, accountCode = '') => {
+      const crypto = require('crypto');
+      const storePart = accountCode || 'GLOBAL';
+      const id = `${storePart}_${orderId}_${productCode}_${itemIndex}`;
+      return crypto.createHash('md5').update(id).digest('hex').substring(0, 12).toUpperCase();
+    };
     
     for (const order of shipwayOrders) {
       if (!Array.isArray(order.products)) continue;
@@ -929,7 +993,7 @@ class ShipwayService {
         
         const orderRow = {
           id: `${order.order_id}_${product.product_code}_${Date.now()}`,
-          unique_id: existingClaim ? existingClaim.unique_id : generateStableUniqueId(order.order_id, product.product_code, i),
+          unique_id: existingClaim ? existingClaim.unique_id : generateStableUniqueIdWithStore(order.order_id, product.product_code, i, this.accountCode),
           order_id: order.order_id,
           order_date: order.order_date, // Shipway sends IST time; MySQL connection is configured with IST timezone
           product_name: product.product,
@@ -946,6 +1010,8 @@ class ShipwayService {
           collectable_amount: collectableAmount,
           // Add pincode from s_zipcode, preserve existing if available
           pincode: existingClaim ? existingClaim.pincode : (order.s_zipcode || ''),
+          // Multi-store: Tag order with account_code
+          account_code: this.accountCode || 'STRI',
           // Note: store_code is stored in customer_info table (order-level), not in orders table (product-level)
           // Preserve existing claim data or use defaults for new orders
           status: existingClaim ? existingClaim.status : 'unclaimed',
@@ -969,15 +1035,16 @@ class ShipwayService {
     }
 
     // Compare and update MySQL only if changed
-    const existingKeySet = new Set(existingOrders.map(r => `${r.order_id}|${r.product_code}`));
-    const newKeySet = new Set(flatOrders.map(r => `${r.order_id}|${r.product_code}`));
+    // IMPORTANT: Include account_code in key to prevent cross-store data interaction
+    const existingKeySet = new Set(existingOrders.map(r => `${r.account_code}|${r.order_id}|${r.product_code}`));
+    const newKeySet = new Set(flatOrders.map(r => `${r.account_code}|${r.order_id}|${r.product_code}`));
     let changed = false;
     let newOrdersCount = 0;
     let updatedOrdersCount = 0;
     
     // Check for new rows
     for (const row of flatOrders) {
-      if (!existingKeySet.has(`${row.order_id}|${row.product_code}`)) {
+      if (!existingKeySet.has(`${row.account_code}|${row.order_id}|${row.product_code}`)) {
         changed = true;
         newOrdersCount++;
       }
@@ -990,7 +1057,8 @@ class ShipwayService {
     
     // ALWAYS update is_in_new_order flags (regardless of other changes)
     try {
-      // Step 1: Mark all existing orders as NOT in new order (is_in_new_order = 0)
+      // Step 1: Mark all existing orders for THIS STORE as NOT in new order (is_in_new_order = 0)
+      // IMPORTANT: Only update orders from current store (already filtered by account_code)
       for (const existingOrder of existingOrders) {
         await database.updateOrder(existingOrder.unique_id, {
           is_in_new_order: false
@@ -999,13 +1067,14 @@ class ShipwayService {
       
       // Step 2: Insert or update orders from current Shipway API (is_in_new_order = 1)
       for (const orderRow of flatOrders) {
-        const key = `${orderRow.order_id}|${orderRow.product_code}`;
+        const key = `${orderRow.account_code}|${orderRow.order_id}|${orderRow.product_code}`;
         // Set is_in_new_order = 1 for all orders from current Shipway API
         orderRow.is_in_new_order = true;
         
         if (existingKeySet.has(key)) {
           // Check if existing order needs update by comparing key fields
-          const existingOrder = existingOrders.find(o => `${o.order_id}|${o.product_code}` === key);
+          // IMPORTANT: Include account_code in matching to prevent cross-store data interaction
+          const existingOrder = existingOrders.find(o => `${o.account_code}|${o.order_id}|${o.product_code}` === key);
           if (existingOrder) {
             // Only update if there are actual changes to order data
             const hasDataChanges = (
@@ -1155,6 +1224,7 @@ class ShipwayService {
             // Upsert customer info (create or update)
             const customerData = {
               order_id: order.order_id,
+              account_code: this.accountCode, // Add account_code from service instance
               store_code: order.store_code || '1',
               email: order.email || null,
               billing_firstname: order.b_firstname || null,
@@ -1325,6 +1395,9 @@ class ShipwayService {
    * @returns {Object} Cancel result from Shipway API
    */
   async cancelShipment(awbNumbers) {
+    // Initialize service if not already initialized
+    await this.initialize();
+    
     try {
       if (!awbNumbers || !Array.isArray(awbNumbers) || awbNumbers.length === 0) {
         throw new Error('AWB numbers array is required and cannot be empty');
@@ -1422,4 +1495,6 @@ class ShipwayService {
   }
 }
 
-module.exports = new ShipwayService(); 
+// Export the class so callers can create store-specific instances,
+// e.g. new ShipwayService(accountCode)
+module.exports = ShipwayService; 
