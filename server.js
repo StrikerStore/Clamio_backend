@@ -23,6 +23,7 @@ const database = require('./config/database');
 const { fetchAndSaveShopifyProducts } = require('./services/shopifyProductFetcher');
 const cron = require('node-cron');
 const { runMultiStoreMigration } = require('./utils/migrationRunner');
+const { runProductionMigration } = require('./scripts/migrate-prod-database');
 
 // Import vendor error tracking middleware
 const { trackVendorErrors, handleVendorErrors } = require('./middleware/vendorErrorTracking');
@@ -446,6 +447,26 @@ app.listen(PORT, async () => {
   
   // Log database initialization
   console.log('📁 Database initialized successfully');
+  
+  // Run production database migration FIRST (if enabled)
+  // This migrates database structure from old commit to current structure
+  // Set RUN_PROD_MIGRATION=false in .env to disable
+  const runProdMigration = process.env.RUN_PROD_MIGRATION !== 'false';
+  if (runProdMigration) {
+    try {
+      console.log('\n🔄 Running production database migration...');
+      const migrationSuccess = await runProductionMigration();
+      if (migrationSuccess) {
+        console.log('✅ Production migration completed successfully\n');
+      } else {
+        console.error('❌ Production migration failed, but server will continue\n');
+      }
+    } catch (error) {
+      console.error('⚠️ Production migration error (server will continue):', error.message);
+    }
+  } else {
+    console.log('⚠️ Production migration disabled (RUN_PROD_MIGRATION=false)\n');
+  }
   
   // Run database migrations on startup (if enabled)
   // This is idempotent and safe to run on every server start
