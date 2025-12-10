@@ -1470,7 +1470,8 @@ router.get('/admin/all', authenticateBasicAuth, requireAdminOrSuperadmin, async 
         claimed_by: order.claimed_by || null,
         image: order.product_image || order.image || '/placeholder.svg',
         store_name: order.store_name || null,
-        account_code: order.account_code || null
+        account_code: order.account_code || null,
+        awb: order.awb || null
       };
     });
 
