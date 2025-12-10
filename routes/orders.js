@@ -252,6 +252,97 @@ router.get('/last-updated', async (req, res) => {
 });
 
 /**
+ * @route   POST /api/orders/verify-status
+ * @desc    Verify order statuses in database (for bulk operations verification)
+ * @access  Vendor (token required)
+ */
+router.post('/verify-status', async (req, res) => {
+  const { unique_ids } = req.body;
+  const token = req.headers['authorization'];
+  
+  console.log('🔵 VERIFY STATUS REQUEST START');
+  console.log('  - unique_ids:', unique_ids);
+  console.log('  - token received:', token ? 'YES' : 'NO');
+  
+  if (!unique_ids || !Array.isArray(unique_ids) || unique_ids.length === 0) {
+    return res.status(400).json({ 
+      success: false, 
+      message: 'unique_ids array is required' 
+    });
+  }
+  
+  if (!token) {
+    return res.status(400).json({ 
+      success: false, 
+      message: 'Authorization token required' 
+    });
+  }
+  
+  try {
+    const database = require('../config/database');
+    
+    await database.waitForMySQLInitialization();
+    
+    if (!database.isMySQLAvailable()) {
+      return res.status(500).json({ success: false, message: 'Database connection not available' });
+    }
+    
+    // Verify vendor token
+    const vendor = await database.getUserByToken(token);
+    if (!vendor || vendor.active_session !== 'TRUE') {
+      return res.status(401).json({ success: false, message: 'Invalid or inactive vendor token' });
+    }
+    
+    // Fetch orders from database to verify their status
+    const orders = await database.getOrdersByUniqueIds(unique_ids);
+    
+    // Create a map of unique_id -> status and full order data
+    const statusMap = {};
+    orders.forEach(order => {
+      statusMap[order.unique_id] = {
+        unique_id: order.unique_id,
+        order_id: order.order_id,
+        status: order.status || 'unknown',
+        claimed_by: order.claimed_by || null,
+        found: true,
+        order: order // Include full order object for UI updates
+      };
+    });
+    
+    // Mark orders that weren't found
+    unique_ids.forEach(unique_id => {
+      if (!statusMap[unique_id]) {
+        statusMap[unique_id] = {
+          unique_id: unique_id,
+          status: 'not_found',
+          found: false
+        };
+      }
+    });
+    
+    console.log('✅ Status verification complete');
+    console.log('  - Verified orders:', Object.keys(statusMap).length);
+    
+    return res.json({
+      success: true,
+      data: {
+        statuses: statusMap,
+        verified_count: orders.length,
+        requested_count: unique_ids.length
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ VERIFY STATUS ERROR:', error);
+    return res.status(500).json({ 
+      success: false, 
+      message: 'Failed to verify order statuses', 
+      error: error.message 
+    });
+  }
+});
+
+/**
  * @route   POST /api/orders/claim
  * @desc    Vendor claims an order row by unique_id
  * @access  Vendor (token required)
@@ -476,67 +567,110 @@ router.post('/bulk-claim', async (req, res) => {
     const successfulClaims = [];
     const failedClaims = [];
     
-    // Process each unique_id
-    for (const unique_id of unique_ids) {
-      console.log('🔍 Processing unique_id:', unique_id);
-      
-      const order = await database.getOrderByUniqueId(unique_id);
-      
-      if (!order) {
-        console.log('❌ ORDER NOT FOUND:', unique_id);
-        failedClaims.push({ unique_id, reason: 'Order not found' });
-        continue;
-      }
-      
-      if (order.status !== 'unclaimed') {
-        console.log('❌ ORDER NOT UNCLAIMED:', unique_id, 'Status:', order.status);
-        failedClaims.push({ unique_id, reason: 'Order is not unclaimed' });
-        continue;
-      }
-      
-      // Update order
-      console.log('🔄 CLAIMING ORDER:', unique_id);
-      
-      // Update order object in memory (like Excel behavior)
-      const updatedOrder = {
-        ...order,
-        status: 'claimed',
-        claimed_by: warehouseId,
-        claimed_at: now,
-        last_claimed_by: warehouseId,
-        last_claimed_at: now
-      };
-      
-      // Assign top 3 priority carriers during claim
-      console.log(`🚚 ASSIGNING TOP 3 PRIORITY CARRIERS for ${order.order_id}...`);
-      let priorityCarrier = '';
+    // OPTIMIZATION 1: Fetch all orders in one database query instead of N individual queries
+    console.log('📦 Fetching all orders in bulk...');
+    const allOrders = await database.getOrdersByUniqueIds(unique_ids);
+    console.log(`✅ Fetched ${allOrders.length} orders from database`);
+    
+    // Create a map for quick lookup: unique_id -> order
+    const ordersMap = new Map();
+    allOrders.forEach(order => {
+      ordersMap.set(order.unique_id, order);
+    });
+    
+    // OPTIMIZATION 2: Process orders in parallel with concurrency limit
+    // This processes multiple orders simultaneously instead of one-by-one
+    const CONCURRENCY_LIMIT = 15; // Process 15 orders at the same time
+    console.log(`⚡ Using parallel processing with concurrency limit of ${CONCURRENCY_LIMIT}`);
+    
+    // Helper function to process a single order
+    const processSingleOrder = async (unique_id) => {
       try {
-        priorityCarrier = await carrierServiceabilityService.getTop3PriorityCarriers(order);
-        console.log(`✅ Top 3 carriers assigned: ${priorityCarrier}`);
-        updatedOrder.priority_carrier = priorityCarrier;
-      } catch (carrierError) {
-        console.log(`⚠️ Carrier assignment failed: ${carrierError.message}`);
-        console.log('  - Order will be claimed without priority carriers');
-        updatedOrder.priority_carrier = '';
+        console.log('🔍 Processing unique_id:', unique_id);
+        
+        // Get order from the map (already fetched)
+        const order = ordersMap.get(unique_id);
+        
+        if (!order) {
+          console.log('❌ ORDER NOT FOUND:', unique_id);
+          return { success: false, unique_id, reason: 'Order not found' };
+        }
+        
+        if (order.status !== 'unclaimed') {
+          console.log('❌ ORDER NOT UNCLAIMED:', unique_id, 'Status:', order.status);
+          return { success: false, unique_id, reason: 'Order is not unclaimed' };
+        }
+        
+        // Update order
+        console.log('🔄 CLAIMING ORDER:', unique_id);
+        
+        // Update order object in memory (like Excel behavior)
+        const updatedOrder = {
+          ...order,
+          status: 'claimed',
+          claimed_by: warehouseId,
+          claimed_at: now,
+          last_claimed_by: warehouseId,
+          last_claimed_at: now
+        };
+        
+        // Assign top 3 priority carriers during claim
+        console.log(`🚚 ASSIGNING TOP 3 PRIORITY CARRIERS for ${order.order_id}...`);
+        let priorityCarrier = '';
+        try {
+          priorityCarrier = await carrierServiceabilityService.getTop3PriorityCarriers(order);
+          console.log(`✅ Top 3 carriers assigned: ${priorityCarrier}`);
+          updatedOrder.priority_carrier = priorityCarrier;
+        } catch (carrierError) {
+          console.log(`⚠️ Carrier assignment failed: ${carrierError.message}`);
+          console.log('  - Order will be claimed without priority carriers');
+          updatedOrder.priority_carrier = '';
+        }
+        
+        // Now save everything to MySQL in one go
+        const finalUpdatedOrder = await database.updateOrder(unique_id, {
+          status: updatedOrder.status,
+          claimed_by: updatedOrder.claimed_by,
+          claimed_at: updatedOrder.claimed_at,
+          last_claimed_by: updatedOrder.last_claimed_by,
+          last_claimed_at: updatedOrder.last_claimed_at,
+          priority_carrier: updatedOrder.priority_carrier
+        });
+        
+        if (finalUpdatedOrder) {
+          console.log('✅ ORDER CLAIMED SUCCESSFULLY:', unique_id);
+          return { success: true, unique_id, order_id: order.order_id };
+        } else {
+          console.log('❌ FAILED TO UPDATE ORDER:', unique_id);
+          return { success: false, unique_id, reason: 'Failed to update order' };
+        }
+      } catch (error) {
+        console.log(`💥 ERROR PROCESSING ORDER ${unique_id}:`, error.message);
+        return { success: false, unique_id, reason: error.message };
       }
+    };
+    
+    // Process orders in batches with concurrency limit
+    for (let i = 0; i < unique_ids.length; i += CONCURRENCY_LIMIT) {
+      const batch = unique_ids.slice(i, i + CONCURRENCY_LIMIT);
+      const batchNumber = Math.floor(i / CONCURRENCY_LIMIT) + 1;
+      const totalBatches = Math.ceil(unique_ids.length / CONCURRENCY_LIMIT);
       
-      // Now save everything to MySQL in one go
-      const finalUpdatedOrder = await database.updateOrder(unique_id, {
-        status: updatedOrder.status,
-        claimed_by: updatedOrder.claimed_by,
-        claimed_at: updatedOrder.claimed_at,
-        last_claimed_by: updatedOrder.last_claimed_by,
-        last_claimed_at: updatedOrder.last_claimed_at,
-        priority_carrier: updatedOrder.priority_carrier
+      console.log(`📦 Processing batch ${batchNumber}/${totalBatches} (${batch.length} orders in parallel)...`);
+      
+      // Process all orders in this batch in parallel
+      const batchResults = await Promise.all(batch.map(processSingleOrder));
+      
+      // Collect results
+      batchResults.forEach(result => {
+        if (result.success) {
+          successfulClaims.push({ unique_id: result.unique_id, order_id: result.order_id });
+        } else {
+          failedClaims.push({ unique_id: result.unique_id, reason: result.reason });
+        }
       });
       
-      if (finalUpdatedOrder) {
-        successfulClaims.push({ unique_id, order_id: order.order_id });
-        console.log('✅ ORDER CLAIMED SUCCESSFULLY:', unique_id);
-      } else {
-        console.log('❌ FAILED TO UPDATE ORDER:', unique_id);
-        failedClaims.push({ unique_id, reason: 'Failed to update order' });
-      }
+      console.log(`✅ Batch ${batchNumber}/${totalBatches} completed - Success: ${batchResults.filter(r => r.success).length}, Failed: ${batchResults.filter(r => !r.success).length}`);
     }
     
     if (successfulClaims.length > 0) {

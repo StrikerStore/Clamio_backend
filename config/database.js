@@ -3179,6 +3179,63 @@ class Database {
   }
 
   /**
+   * Get multiple orders by unique_ids from MySQL (bulk fetch)
+   * @param {Array<string>} unique_ids - Array of order unique IDs
+   * @returns {Array} Array of order objects
+   */
+  async getOrdersByUniqueIds(unique_ids) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    if (!unique_ids || !Array.isArray(unique_ids) || unique_ids.length === 0) {
+      return [];
+    }
+
+    try {
+      // Create placeholders for IN clause (?, ?, ?, ...)
+      const placeholders = unique_ids.map(() => '?').join(',');
+      
+      const [rows] = await this.mysqlConnection.execute(`
+        SELECT 
+          o.*,
+          p.image as product_image,
+          c.status,
+          c.claimed_by,
+          c.claimed_at,
+          c.last_claimed_by,
+          c.last_claimed_at,
+          c.clone_status,
+          c.cloned_order_id,
+          c.is_cloned_row,
+          c.label_downloaded,
+          l.label_url,
+          l.awb,
+          l.carrier_id,
+          l.carrier_name,
+          l.handover_at,
+          c.priority_carrier,
+          l.is_manifest
+        FROM orders o
+        LEFT JOIN products p ON (
+          (REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id)
+          AND o.account_code = p.account_code
+        )
+        LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
+        LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
+        WHERE o.unique_id IN (${placeholders})
+      `, unique_ids);
+      
+      return rows || [];
+    } catch (error) {
+      console.error('Error getting orders by unique_ids:', error);
+      throw new Error('Failed to get orders from database');
+    }
+  }
+
+  /**
    * Get all orders from MySQL
    * @returns {Array} Array of all orders
    */
