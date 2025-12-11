@@ -3533,10 +3533,7 @@ class Database {
         AND (c.status = 'claimed' OR c.status = 'ready_for_handover')
         AND (o.is_in_new_order = 1 OR c.label_downloaded = 1)
         AND l.is_manifest = 1
-        AND (
-          l.handover_at IS NULL 
-          OR (l.handover_at IS NOT NULL AND TIMESTAMPDIFF(HOUR, l.handover_at, NOW()) < 24)
-        )
+        AND (l.is_handover = 0 OR l.is_handover IS NULL)
         ORDER BY o.order_date DESC, o.order_id
       `, [warehouseId]);
       
@@ -3548,9 +3545,9 @@ class Database {
   }
 
   /**
-   * Get Order Tracking Orders (orders that have been in handover for 24+ hours)
+   * Get Order Tracking Orders (orders that have been handed over - is_handover = 1)
    * @param {string} warehouseId - Vendor warehouse ID
-   * @returns {Array} Array of individual orders for Order Tracking section (>= 24 hrs from handover_at)
+   * @returns {Array} Array of individual orders for Order Tracking section (is_handover = 1)
    */
   async getOrderTrackingOrders(warehouseId) {
     if (!this.mysqlConnection) {
@@ -3599,8 +3596,7 @@ class Database {
         AND (c.status = 'claimed' OR c.status = 'ready_for_handover')
         AND (o.is_in_new_order = 1 OR c.label_downloaded = 1)
         AND l.is_manifest = 1
-        AND l.handover_at IS NOT NULL
-        AND TIMESTAMPDIFF(HOUR, l.handover_at, NOW()) >= 24
+        AND l.is_handover = 1
         ORDER BY o.order_date DESC, o.order_id
       `, [warehouseId]);
       
