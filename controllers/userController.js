@@ -31,6 +31,7 @@ class UserController {
         warehouseId,
         contactNumber,
         address,
+        city,
         pincode
       } = req.body;
 
@@ -41,7 +42,10 @@ class UserController {
         role,
         status,
         warehouseId,
-        contactNumber: contactNumber ? '***provided***' : 'not provided'
+        contactNumber: contactNumber ? '***provided***' : 'not provided',
+        address: address ? '***provided***' : 'not provided',
+        city: city ? '***provided***' : 'not provided',
+        pincode: pincode ? '***provided***' : 'not provided'
       });
 
       // Validate role-specific requirements
@@ -78,6 +82,7 @@ class UserController {
           const hashedPassword = await hashPassword(password);
 
           // Create user with warehouse_id (claimio_wh_id) - no Shipway validation needed
+          // Trim and include optional fields only if they have values
           const userData = {
             name,
             email,
@@ -86,12 +91,17 @@ class UserController {
             role,
             status,
             warehouseId,
-            contactNumber,
-            ...(address && { address }),
-            ...(pincode && { pincode })
+            contactNumber: contactNumber ? contactNumber.trim() : null,
+            address: address ? address.trim() : null,
+            city: city ? city.trim() : null,
+            pincode: pincode ? pincode.trim() : null
           };
 
           console.log('💾 Creating user in database...');
+          console.log('📦 UserData being sent to database:', {
+            ...userData,
+            password: '***hidden***'
+          });
           const newUser = await database.createUser(userData);
 
           console.log('✅ User created successfully:', {
@@ -141,6 +151,7 @@ class UserController {
           status,
           contactNumber,
           ...(address && { address }),
+          ...(city && { city }),
           ...(pincode && { pincode })
         };
 
@@ -621,11 +632,12 @@ class UserController {
           message: 'Access denied. Only vendors can access this endpoint.'
         });
       }
-      if (!warehouseId || !address || !city || !pincode) {
-        fs.appendFileSync(logPath, `[${timestamp}] result: 404 (missing field)\n`);
+      // Only require warehouseId and address. City and pincode are optional.
+      if (!warehouseId || !address) {
+        fs.appendFileSync(logPath, `[${timestamp}] result: 404 (missing required field: warehouseId or address)\n`);
         return res.status(404).json({
           success: false,
-          message: 'Warehouse address not found for this vendor.'
+          message: 'Warehouse address not found for this vendor. Warehouse ID and address are required.'
         });
       }
       fs.appendFileSync(logPath, `[${timestamp}] result: 200 (success)\n`);

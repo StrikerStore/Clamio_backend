@@ -85,12 +85,20 @@ const validateUserRegistration = [
       if (value === undefined || value === null || value === '') {
         return true; // Optional field, allow empty
       }
-      // Convert to string and check if it's a valid positive number
+      // Allow alphanumeric warehouse IDs (matching database VARCHAR(50) type)
       const stringValue = String(value).trim();
-      const numValue = parseInt(stringValue, 10);
-      return !isNaN(numValue) && numValue > 0 && numValue.toString() === stringValue;
+      // Check if it's a valid alphanumeric string (letters, numbers, and common separators)
+      const alphanumericRegex = /^[a-zA-Z0-9\-_]+$/;
+      if (!alphanumericRegex.test(stringValue)) {
+        throw new Error('Warehouse ID can only contain letters, numbers, hyphens, and underscores');
+      }
+      // Check length (database limit is VARCHAR(50))
+      if (stringValue.length > 50) {
+        throw new Error('Warehouse ID must be 50 characters or less');
+      }
+      return true;
     })
-    .withMessage('Warehouse ID must be a positive number'),
+    .withMessage('Warehouse ID must be alphanumeric (letters, numbers, hyphens, underscores) and 50 characters or less'),
   
   body('contactNumber')
     .optional()
