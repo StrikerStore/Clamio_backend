@@ -3179,6 +3179,65 @@ class Database {
   }
 
   /**
+   * Get orders by multiple order_ids from MySQL (bulk fetch)
+   * OPTIMIZATION: Fetches only specified orders instead of all orders
+   * @param {Array<string>} order_ids - Array of order IDs
+   * @returns {Array} Array of order objects
+   */
+  async getOrdersByOrderIds(order_ids) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    if (!order_ids || !Array.isArray(order_ids) || order_ids.length === 0) {
+      return [];
+    }
+
+    try {
+      // Create placeholders for IN clause (?, ?, ?, ...)
+      const placeholders = order_ids.map(() => '?').join(',');
+      
+      const [rows] = await this.mysqlConnection.execute(`
+        SELECT 
+          o.*,
+          p.image as product_image,
+          c.status,
+          c.claimed_by,
+          c.claimed_at,
+          c.last_claimed_by,
+          c.last_claimed_at,
+          c.clone_status,
+          c.cloned_order_id,
+          c.is_cloned_row,
+          c.label_downloaded,
+          l.label_url,
+          l.awb,
+          l.carrier_id,
+          l.carrier_name,
+          l.handover_at,
+          c.priority_carrier,
+          l.is_manifest
+        FROM orders o
+        LEFT JOIN products p ON (
+          (REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id)
+          AND o.account_code = p.account_code
+        )
+        LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
+        LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
+        WHERE o.order_id IN (${placeholders})
+        ORDER BY o.order_id, o.product_name
+      `, order_ids);
+      
+      return rows || [];
+    } catch (error) {
+      console.error('Error getting orders by order_ids:', error);
+      throw new Error('Failed to get orders from database');
+    }
+  }
+
+  /**
    * Get multiple orders by unique_ids from MySQL (bulk fetch)
    * @param {Array<string>} unique_ids - Array of order unique IDs
    * @returns {Array} Array of order objects
@@ -4025,6 +4084,37 @@ class Database {
   }
 
   /**
+   * Get multiple labels by order_ids (bulk fetch)
+   * OPTIMIZATION: Fetches all labels in one query instead of N queries
+   * @param {Array<string>} order_ids - Array of order IDs
+   * @returns {Array} Array of label objects
+   */
+  async getLabelsByOrderIds(order_ids) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    if (!order_ids || !Array.isArray(order_ids) || order_ids.length === 0) {
+      return [];
+    }
+
+    try {
+      // Create placeholders for IN clause (?, ?, ?, ...)
+      const placeholders = order_ids.map(() => '?').join(',');
+      
+      const [rows] = await this.mysqlConnection.execute(
+        `SELECT * FROM labels WHERE order_id IN (${placeholders})`,
+        order_ids
+      );
+      
+      return rows || [];
+    } catch (error) {
+      console.error('Error getting labels by order_ids:', error);
+      throw new Error('Failed to get labels from database');
+    }
+  }
+
+  /**
    * Check if label exists for order_id
    * @param {string} orderId - Order ID
    * @returns {boolean} True if label exists
@@ -4076,6 +4166,36 @@ class Database {
       return rows.length > 0 ? rows[0] : null;
     } catch (error) {
       console.error('Error getting customer info by order ID:', error);
+      throw new Error('Failed to get customer info from database');
+    }
+  }
+
+  /**
+   * Get multiple customer info by order_ids (bulk fetch)
+   * OPTIMIZATION: Fetches all customer info in one query instead of N queries
+   * @param {Array<string>} order_ids - Array of order IDs
+   * @returns {Array} Array of customer info objects
+   */
+  async getCustomerInfoByOrderIds(order_ids) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    if (!order_ids || !Array.isArray(order_ids) || order_ids.length === 0) {
+      return [];
+    }
+
+    try {
+      const placeholders = order_ids.map(() => '?').join(',');
+      
+      const [rows] = await this.mysqlConnection.execute(
+        `SELECT * FROM customer_info WHERE order_id IN (${placeholders})`,
+        order_ids
+      );
+      
+      return rows || [];
+    } catch (error) {
+      console.error('Error getting customer info by order_ids:', error);
       throw new Error('Failed to get customer info from database');
     }
   }
@@ -4834,6 +4954,36 @@ class Database {
   }
 
   /**
+   * Get multiple stores by account_codes (bulk fetch)
+   * OPTIMIZATION: Fetches all stores in one query instead of N queries
+   * @param {Array<string>} account_codes - Array of account codes
+   * @returns {Array} Array of store objects
+   */
+  async getStoresByAccountCodes(account_codes) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    if (!account_codes || !Array.isArray(account_codes) || account_codes.length === 0) {
+      return [];
+    }
+
+    try {
+      const placeholders = account_codes.map(() => '?').join(',');
+      
+      const [rows] = await this.mysqlConnection.execute(
+        `SELECT * FROM store_info WHERE account_code IN (${placeholders})`,
+        account_codes
+      );
+      
+      return rows || [];
+    } catch (error) {
+      console.error('Error getting stores by account_codes:', error);
+      throw new Error('Failed to get stores from database');
+    }
+  }
+
+  /**
    * Get store by Shopify URL or token
    * @param {string} shopifyUrl - The Shopify store URL (e.g., 'seq5t1-mz.myshopify.com')
    * @param {string} shopifyToken - The Shopify access token (optional, used as fallback)
@@ -5198,6 +5348,39 @@ class Database {
     } catch (error) {
       console.error('Error getting warehouse mapping:', error);
       throw new Error('Failed to get warehouse mapping from database');
+    }
+  }
+
+  /**
+   * Get multiple warehouse mappings by claimio_wh_id and account_codes (bulk fetch)
+   * OPTIMIZATION: Fetches all mappings in one query instead of N queries
+   * @param {string} claimioWhId - The claimio warehouse ID
+   * @param {Array<string>} account_codes - Array of account codes
+   * @returns {Array} Array of mapping objects with account_code
+   */
+  async getWhMappingsByClaimioWhIdAndAccountCodes(claimioWhId, account_codes) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    if (!claimioWhId || !account_codes || !Array.isArray(account_codes) || account_codes.length === 0) {
+      return [];
+    }
+
+    try {
+      const placeholders = account_codes.map(() => '?').join(',');
+      
+      const [rows] = await this.mysqlConnection.execute(
+        `SELECT vendor_wh_id, return_warehouse_id, account_code 
+         FROM wh_mapping 
+         WHERE claimio_wh_id = ? AND account_code IN (${placeholders}) AND is_active = TRUE`,
+        [claimioWhId, ...account_codes]
+      );
+      
+      return rows || [];
+    } catch (error) {
+      console.error('Error getting warehouse mappings:', error);
+      throw new Error('Failed to get warehouse mappings from database');
     }
   }
 
