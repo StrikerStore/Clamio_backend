@@ -1921,46 +1921,151 @@ router.post('/admin/bulk-unassign', authenticateBasicAuth, requireAdminOrSuperad
     }
 
     let updatedCount = 0;
+    let labelCancelledCount = 0;
+    const errors = [];
+    const ShipwayService = require('../services/shipwayService');
     
-    // Update each order in MySQL
+    // Process each order
     for (const uid of unique_ids) {
       try {
-        // First check if order exists and is claimed
+        // Get order from database
         const order = await database.getOrderByUniqueId(uid);
-        if (order && order.status !== 'unclaimed') {
-          console.log(`🔄 CLEARING CLAIM INFORMATION for ${order.order_id}...`);
-          
-          // Clear claim information (same as vendor unclaim process)
-          await database.mysqlConnection.execute(
-            `UPDATE claims SET 
-              claimed_by = NULL, 
-              claimed_at = NULL, 
-              last_claimed_by = NULL, 
-              last_claimed_at = NULL, 
-              status = 'unclaimed',
-              label_downloaded = 0,
-              priority_carrier = NULL
-            WHERE order_unique_id = ?`,
-            [uid]
-          );
-          
-          // Clear manifest data if exists
-          await database.mysqlConnection.execute(
-            'UPDATE labels SET is_manifest = 0, manifest_id = NULL WHERE order_id = ?',
-            [order.order_id]
-          );
-          
-          console.log(`✅ CLAIM DATA AND MANIFEST CLEARED for ${order.order_id}`);
-          updatedCount += 1;
+        
+        if (!order) {
+          errors.push({ unique_id: uid, error: 'Order not found' });
+          continue;
         }
+        
+        // Validate order is actually claimed
+        if (order.status === 'unclaimed' || !order.claimed_by || order.claimed_by.trim() === '') {
+          errors.push({ unique_id: uid, order_id: order.order_id, error: 'Order is not claimed by any vendor' });
+          continue;
+        }
+        
+        const previousVendor = order.claimed_by;
+        console.log(`🔄 Processing order ${order.order_id} (claimed by ${previousVendor})...`);
+        
+        // Validate vendor exists (for audit trail, but don't fail if vendor was deleted)
+        const vendor = await database.getUserByWarehouseId(previousVendor);
+        if (!vendor) {
+          console.log(`⚠️ Vendor ${previousVendor} not found for order ${order.order_id} - proceeding with unassign anyway (cleanup)`);
+        }
+        
+        // Check label_downloaded status
+        const isLabelDownloaded = order.label_downloaded === 1 || order.label_downloaded === true || order.label_downloaded === '1';
+        
+        if (isLabelDownloaded) {
+          console.log(`🔄 CASE 2: Label downloaded for order ${order.order_id} - calling Shipway cancel API`);
+          
+          // Get account_code from order to use correct store credentials
+          const accountCode = order.account_code;
+          if (!accountCode) {
+            errors.push({ unique_id: uid, order_id: order.order_id, error: 'Store information not found. Cannot cancel shipment.' });
+            continue;
+          }
+          
+          // Get AWB number from labels table (with account_code filter for store-specific retrieval)
+          const label = await database.getLabelByOrderId(order.order_id, accountCode);
+          
+          if (!label || !label.awb) {
+            errors.push({ unique_id: uid, order_id: order.order_id, error: 'AWB number not found. Cannot cancel shipment.' });
+            continue;
+          }
+
+          console.log(`✅ AWB FOUND for order ${order.order_id}:`, label.awb);
+
+          // Call Shipway cancel API with store-specific credentials
+          const shipwayService = new ShipwayService(accountCode);
+          await shipwayService.initialize();
+          
+          try {
+            const cancelResult = await shipwayService.cancelShipment([label.awb]);
+            console.log(`✅ SHIPWAY CANCEL SUCCESS for order ${order.order_id}:`, cancelResult);
+            labelCancelledCount++;
+          } catch (cancelError) {
+            console.error(`❌ SHIPWAY CANCEL FAILED for order ${order.order_id}:`);
+            console.error('  - Error message:', cancelError.message);
+            console.error('  - Account Code:', accountCode);
+            console.error('  - AWB:', label.awb);
+            errors.push({ 
+              unique_id: uid, 
+              order_id: order.order_id, 
+              error: `Failed to cancel shipment: ${cancelError.message}` 
+            });
+            continue; // Skip this order if cancellation fails
+          }
+
+          // Clear label data after successful cancellation (with account_code filter for store isolation)
+          await database.mysqlConnection.execute(
+            'UPDATE labels SET awb = NULL, label_url = NULL, carrier_id = NULL, carrier_name = NULL, priority_carrier = NULL, is_manifest = 0, manifest_id = NULL, current_shipment_status = NULL WHERE order_id = ? AND account_code = ?',
+            [order.order_id, accountCode]
+          );
+          console.log(`✅ LABEL DATA CLEARED for order ${order.order_id}`);
+        } else {
+          console.log(`🔄 CASE 1: No label downloaded for order ${order.order_id} - simple reverse`);
+          // Even without label download, reset manifest fields if they exist
+          const accountCode = order.account_code;
+          if (accountCode) {
+            await database.mysqlConnection.execute(
+              'UPDATE labels SET is_manifest = 0, manifest_id = NULL, current_shipment_status = NULL WHERE order_id = ? AND account_code = ?',
+              [order.order_id, accountCode]
+            );
+          } else {
+            await database.mysqlConnection.execute(
+              'UPDATE labels SET is_manifest = 0, manifest_id = NULL, current_shipment_status = NULL WHERE order_id = ?',
+              [order.order_id]
+            );
+          }
+          console.log(`✅ MANIFEST FIELDS RESET for order ${order.order_id}`);
+        }
+
+        // Clear claim information (both cases)
+        await database.mysqlConnection.execute(
+          `UPDATE claims SET 
+            claimed_by = NULL, 
+            claimed_at = NULL, 
+            last_claimed_by = NULL, 
+            last_claimed_at = NULL, 
+            status = 'unclaimed',
+            label_downloaded = 0,
+            priority_carrier = NULL
+          WHERE order_unique_id = ?`,
+          [uid]
+        );
+        
+        // Set is_in_new_order = 1 so unclaimed order appears in All Orders tab
+        await database.mysqlConnection.execute(
+          'UPDATE orders SET is_in_new_order = 1 WHERE unique_id = ?',
+          [uid]
+        );
+        
+        console.log(`✅ ORDER ${order.order_id} UNASSIGNED SUCCESSFULLY`);
+        updatedCount += 1;
       } catch (error) {
-        console.error(`❌ Failed to update order ${uid}:`, error.message);
+        console.error(`❌ Failed to unassign order ${uid}:`, error.message);
+        errors.push({ unique_id: uid, error: error.message });
       }
     }
 
-    return res.json({ success: true, message: `Unassigned ${updatedCount} orders`, data: { updated: updatedCount } });
+    const message = `Unassigned ${updatedCount} orders${labelCancelledCount > 0 ? ` (${labelCancelledCount} labels cancelled)` : ''}`;
+    
+    console.log('✅ BULK UNASSIGN COMPLETE:');
+    console.log(`  - Successfully unassigned: ${updatedCount}`);
+    console.log(`  - Labels cancelled: ${labelCancelledCount}`);
+    console.log(`  - Errors: ${errors.length}`);
+
+    return res.json({ 
+      success: true, 
+      message: message,
+      data: { 
+        updated: updatedCount,
+        labels_cancelled: labelCancelledCount,
+        errors: errors.length > 0 ? errors : undefined
+      } 
+    });
   } catch (error) {
     console.error('💥 ADMIN BULK UNASSIGN ERROR:', error.message);
+    console.error('  - Stack:', error.stack);
     return res.status(500).json({ success: false, message: 'Internal server error: ' + error.message });
   }
 });
@@ -2005,16 +2110,107 @@ router.post('/admin/unassign', authenticateBasicAuth, requireAdminOrSuperadmin, 
     
     console.log('✅ ORDER FOUND:', order.order_id);
     
-    if (order.status === 'unclaimed') {
+    // Validate order is actually claimed
+    if (order.status === 'unclaimed' || !order.claimed_by || order.claimed_by.trim() === '') {
       return res.status(400).json({ 
         success: false, 
-        message: 'Order is already unclaimed' 
+        message: 'Order is not claimed by any vendor' 
       });
     }
     
     const previousVendor = order.claimed_by;
     
-    // Clear claim information (same as vendor unclaim process)
+    // Validate vendor exists (for audit trail, but don't fail if vendor was deleted)
+    console.log('🔍 VALIDATING VENDOR BEFORE UNASSIGN:');
+    console.log('  - Order ID:', order.order_id);
+    console.log('  - Claimed by (warehouse ID):', previousVendor);
+    
+    const vendor = await database.getUserByWarehouseId(previousVendor);
+    if (!vendor) {
+      console.log(`⚠️ Vendor ${previousVendor} not found - proceeding with unassign anyway (cleanup)`);
+    } else {
+      console.log(`✅ Verified vendor: ${vendor.name || 'N/A'} (${vendor.email || 'N/A'})`);
+    }
+    
+    // Check label_downloaded status (same logic as vendor panel)
+    const isLabelDownloaded = order.label_downloaded === 1 || order.label_downloaded === true || order.label_downloaded === '1';
+    
+    if (isLabelDownloaded) {
+      console.log('🔄 CASE 2: Label downloaded - calling Shipway cancel API');
+      
+      // Get account_code from order to use correct store credentials
+      const accountCode = order.account_code;
+      if (!accountCode) {
+        console.log('❌ ACCOUNT_CODE NOT FOUND for order:', order.order_id);
+        return res.status(400).json({ 
+          success: false, 
+          message: 'Store information not found for this order. Cannot cancel shipment.' 
+        });
+      }
+      
+      // Get AWB number from labels table (with account_code filter for store-specific retrieval)
+      const label = await database.getLabelByOrderId(order.order_id, accountCode);
+      
+      if (!label || !label.awb) {
+        console.log('❌ AWB NOT FOUND for order:', order.order_id);
+        return res.status(400).json({ 
+          success: false, 
+          message: 'AWB number not found for this order. Cannot cancel shipment.' 
+        });
+      }
+
+      console.log('✅ AWB FOUND:', label.awb);
+
+      // Call Shipway cancel API with store-specific credentials
+      const ShipwayService = require('../services/shipwayService');
+      const shipwayService = new ShipwayService(accountCode);
+      
+      // Initialize the service to load store credentials
+      await shipwayService.initialize();
+      
+      try {
+        const cancelResult = await shipwayService.cancelShipment([label.awb]);
+        console.log('✅ SHIPWAY CANCEL SUCCESS:', cancelResult);
+      } catch (cancelError) {
+        console.error('❌ SHIPWAY CANCEL FAILED:');
+        console.error('  - Error message:', cancelError.message);
+        console.error('  - Error stack:', cancelError.stack);
+        console.error('  - Account Code:', accountCode);
+        console.error('  - AWB:', label.awb);
+        return res.status(500).json({
+          success: false,
+          message: cancelError.message || 'Failed to cancel shipment. Please try after sometime.',
+          error: 'shipway_cancel_failed',
+          details: cancelError.message
+        });
+      }
+
+      // Clear label data after successful cancellation (with account_code filter for store isolation)
+      await database.mysqlConnection.execute(
+        'UPDATE labels SET awb = NULL, label_url = NULL, carrier_id = NULL, carrier_name = NULL, priority_carrier = NULL, is_manifest = 0, manifest_id = NULL, current_shipment_status = NULL WHERE order_id = ? AND account_code = ?',
+        [order.order_id, accountCode]
+      );
+      console.log('✅ LABEL DATA CLEARED (including manifest_id)');
+    } else {
+      console.log('🔄 CASE 1: No label downloaded - simple reverse');
+      // Even without label download, reset manifest fields if they exist (for Handover tab orders)
+      // Use account_code filter if available for store isolation
+      const accountCode = order.account_code;
+      if (accountCode) {
+        await database.mysqlConnection.execute(
+          'UPDATE labels SET is_manifest = 0, manifest_id = NULL, current_shipment_status = NULL WHERE order_id = ? AND account_code = ?',
+          [order.order_id, accountCode]
+        );
+      } else {
+        await database.mysqlConnection.execute(
+          'UPDATE labels SET is_manifest = 0, manifest_id = NULL, current_shipment_status = NULL WHERE order_id = ?',
+          [order.order_id]
+        );
+      }
+      console.log('✅ MANIFEST FIELDS RESET (including manifest_id)');
+    }
+
+    // Clear claim information (both cases)
     console.log('🔄 CLEARING CLAIM INFORMATION...');
     await database.mysqlConnection.execute(
       `UPDATE claims SET 
@@ -2030,14 +2226,13 @@ router.post('/admin/unassign', authenticateBasicAuth, requireAdminOrSuperadmin, 
     );
     
     console.log('✅ CLAIM DATA CLEARED');
-    
-    // Clear manifest data if exists (for orders that were marked ready)
-    console.log('🔄 CLEARING MANIFEST DATA IF EXISTS...');
+
+    // Set is_in_new_order = 1 so unclaimed order appears in All Orders tab
     await database.mysqlConnection.execute(
-      'UPDATE labels SET is_manifest = 0, manifest_id = NULL WHERE order_id = ?',
-      [order.order_id]
+      'UPDATE orders SET is_in_new_order = 1 WHERE unique_id = ?',
+      [unique_id]
     );
-    console.log('✅ MANIFEST DATA CLEARED');
+    console.log('✅ ORDER SET TO NEW ORDER STATUS');
     
     // Get updated order for response
     const updatedOrder = await database.getOrderByUniqueId(unique_id);
@@ -2049,21 +2244,29 @@ router.post('/admin/unassign', authenticateBasicAuth, requireAdminOrSuperadmin, 
       });
     }
     
+    const successMessage = isLabelDownloaded 
+      ? 'Shipment cancelled and order unassigned successfully'
+      : 'Order unassigned successfully';
+    
     console.log('✅ ORDER UNASSIGNED SUCCESSFULLY');
     console.log(`  - Order ${order.order_id} unassigned from ${previousVendor}`);
+    console.log(`  - Label cancelled: ${isLabelDownloaded ? 'YES' : 'NO'}`);
     
     return res.json({ 
       success: true, 
-      message: `Order ${updatedOrder.order_id} unassigned successfully`,
+      message: successMessage,
       data: {
         order_id: updatedOrder.order_id,
         previous_vendor: previousVendor,
+        vendor_name: vendor ? (vendor.name || 'N/A') : null,
+        label_cancelled: isLabelDownloaded,
         unassigned_at: new Date().toISOString().replace('T', ' ').substring(0, 19)
       }
     });
     
   } catch (error) {
     console.error('💥 ADMIN UNASSIGN ERROR:', error.message);
+    console.error('  - Stack:', error.stack);
     return res.status(500).json({ 
       success: false, 
       message: 'Internal server error: ' + error.message 
@@ -5590,19 +5793,28 @@ router.post('/reverse', async (req, res) => {
         });
       }
 
-      // Clear label data after successful cancellation
+      // Clear label data after successful cancellation (with account_code filter for store isolation)
       await database.mysqlConnection.execute(
-        'UPDATE labels SET awb = NULL, label_url = NULL, carrier_id = NULL, carrier_name = NULL, priority_carrier = NULL, is_manifest = 0, manifest_id = NULL, current_shipment_status = NULL WHERE order_id = ?',
-        [order.order_id]
+        'UPDATE labels SET awb = NULL, label_url = NULL, carrier_id = NULL, carrier_name = NULL, priority_carrier = NULL, is_manifest = 0, manifest_id = NULL, current_shipment_status = NULL WHERE order_id = ? AND account_code = ?',
+        [order.order_id, accountCode]
       );
       console.log('✅ LABEL DATA CLEARED (including manifest_id)');
     } else {
       console.log('🔄 CASE 1: No label downloaded - simple reverse');
       // Even without label download, reset manifest fields if they exist (for Handover tab orders)
-      await database.mysqlConnection.execute(
-        'UPDATE labels SET is_manifest = 0, manifest_id = NULL, current_shipment_status = NULL WHERE order_id = ?',
-        [order.order_id]
-      );
+      // Use account_code filter if available for store isolation
+      const accountCode = order.account_code;
+      if (accountCode) {
+        await database.mysqlConnection.execute(
+          'UPDATE labels SET is_manifest = 0, manifest_id = NULL, current_shipment_status = NULL WHERE order_id = ? AND account_code = ?',
+          [order.order_id, accountCode]
+        );
+      } else {
+        await database.mysqlConnection.execute(
+          'UPDATE labels SET is_manifest = 0, manifest_id = NULL, current_shipment_status = NULL WHERE order_id = ?',
+          [order.order_id]
+        );
+      }
       console.log('✅ MANIFEST FIELDS RESET (including manifest_id)');
     }
 
@@ -5833,19 +6045,28 @@ router.post('/reverse-grouped', async (req, res) => {
         });
       }
 
-      // Clear label data after successful cancellation (only once for the entire order)
+      // Clear label data after successful cancellation (only once for the entire order, with account_code filter for store isolation)
       await database.mysqlConnection.execute(
-        'UPDATE labels SET awb = NULL, label_url = NULL, carrier_id = NULL, carrier_name = NULL, priority_carrier = NULL, is_manifest = 0, manifest_id = NULL, current_shipment_status = NULL WHERE order_id = ?',
-        [order_id]
+        'UPDATE labels SET awb = NULL, label_url = NULL, carrier_id = NULL, carrier_name = NULL, priority_carrier = NULL, is_manifest = 0, manifest_id = NULL, current_shipment_status = NULL WHERE order_id = ? AND account_code = ?',
+        [order_id, accountCode]
       );
       console.log('✅ LABEL DATA CLEARED (including manifest_id)');
     } else {
       console.log('🔄 CASE 1: No label downloaded - simple reverse');
       // Even without label download, reset manifest fields if they exist (for Handover tab orders)
-      await database.mysqlConnection.execute(
-        'UPDATE labels SET is_manifest = 0, manifest_id = NULL, current_shipment_status = NULL WHERE order_id = ?',
-        [order_id]
-      );
+      // Use account_code filter if available for store isolation
+      const accountCode = firstValidOrder.account_code;
+      if (accountCode) {
+        await database.mysqlConnection.execute(
+          'UPDATE labels SET is_manifest = 0, manifest_id = NULL, current_shipment_status = NULL WHERE order_id = ? AND account_code = ?',
+          [order_id, accountCode]
+        );
+      } else {
+        await database.mysqlConnection.execute(
+          'UPDATE labels SET is_manifest = 0, manifest_id = NULL, current_shipment_status = NULL WHERE order_id = ?',
+          [order_id]
+        );
+      }
       console.log('✅ MANIFEST FIELDS RESET (including manifest_id)');
     }
 
