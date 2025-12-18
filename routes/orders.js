@@ -1293,166 +1293,6 @@ router.get('/order-tracking', async (req, res) => {
 });
 
 /**
- * @route   GET /api/orders/dashboard-stats
- * @desc    Get pre-calculated dashboard statistics for vendor (all card values)
- * @access  Vendor (token required)
- */
-router.get('/dashboard-stats', async (req, res) => {
-  console.log('\n📊 DASHBOARD STATS REQUEST START');
-  console.log('================================');
-  
-  let token = req.headers['authorization'];
-  
-  // Handle case where token might be an object
-  if (typeof token === 'object' && token !== null) {
-    if (token.token) {
-      token = token.token;
-    } else if (token.authorization) {
-      token = token.authorization;
-    } else if (Object.values(token).length === 1) {
-      token = Object.values(token)[0];
-    } else {
-      token = null;
-    }
-  }
-
-  if (!token) {
-    console.log('❌ DASHBOARD STATS FAILED: Missing token');
-    return res.status(400).json({ success: false, message: 'Authorization token required' });
-  }
-
-  const database = require('../config/database');
-  
-  try {
-    // Wait for MySQL initialization
-    await database.waitForMySQLInitialization();
-    
-    if (!database.isMySQLAvailable()) {
-      console.log('❌ MySQL connection not available');
-      return res.status(500).json({ success: false, message: 'Database connection not available' });
-    }
-    
-    const vendor = await database.getUserByToken(token);
-    
-    if (!vendor || vendor.active_session !== 'TRUE') {
-      console.log('❌ VENDOR NOT FOUND OR INACTIVE');
-      return res.status(401).json({ success: false, message: 'Invalid or inactive vendor token' });
-    }
-    
-    console.log('✅ VENDOR FOUND');
-    console.log('  - warehouseId:', vendor.warehouseId);
-    
-    const warehouseId = vendor.warehouseId;
-
-    // Calculate all statistics using SQL aggregations (much faster than JavaScript)
-    console.log('📊 Calculating dashboard statistics...');
-    
-    // 1. All Orders (unclaimed) - Total Quantity
-    // Orders that are unclaimed (must match frontend logic: status = 'unclaimed')
-    // Frontend filters by: order.status === 'unclaimed'
-    // Status is computed as: CASE WHEN l.current_shipment_status IS NOT NULL AND != '' THEN l.current_shipment_status ELSE c.status END
-    // So for status = 'unclaimed', we need:
-    //   - (l.current_shipment_status IS NULL OR l.current_shipment_status = '') AND c.status = 'unclaimed'
-    //   - OR l.current_shipment_status = 'unclaimed'
-    // Also must match getAllOrders filter: (o.is_in_new_order = 1 OR c.label_downloaded = 1)
-    const allOrdersResult = await database.query(`
-      SELECT COALESCE(SUM(o.quantity), 0) as total_quantity
-      FROM orders o
-      LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
-      LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
-      WHERE (
-        (
-          (l.current_shipment_status IS NULL OR l.current_shipment_status = '') 
-          AND c.status = 'unclaimed'
-        )
-        OR l.current_shipment_status = 'unclaimed'
-      )
-      AND (o.is_in_new_order = 1 OR c.label_downloaded = 1)
-    `);
-    const allOrdersQuantity = parseInt(allOrdersResult[0]?.total_quantity || 0);
-
-    // 2. My Orders - Total Quantity
-    // Orders claimed by this vendor, status claimed or ready_for_handover, not manifested
-    const myOrdersResult = await database.query(`
-      SELECT COALESCE(SUM(o.quantity), 0) as total_quantity
-      FROM orders o
-      LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
-      LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
-      WHERE c.claimed_by = ?
-        AND (c.status = 'claimed' OR c.status = 'ready_for_handover')
-        AND (o.is_in_new_order = 1 OR c.label_downloaded = 1)
-        AND (l.is_manifest IS NULL OR l.is_manifest = 0)
-    `, [warehouseId]);
-    const myOrdersQuantity = parseInt(myOrdersResult[0]?.total_quantity || 0);
-
-    // 3. Handover - Total Quantity
-    // Orders claimed by this vendor, manifested (is_manifest=1), not handed over (is_handover=0 or null)
-    const handoverResult = await database.query(`
-      SELECT COALESCE(SUM(o.quantity), 0) as total_quantity
-      FROM orders o
-      LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
-      LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
-      WHERE c.claimed_by = ?
-        AND (c.status = 'claimed' OR c.status = 'ready_for_handover')
-        AND (o.is_in_new_order = 1 OR c.label_downloaded = 1)
-        AND l.is_manifest = 1
-        AND (l.is_handover = 0 OR l.is_handover IS NULL)
-    `, [warehouseId]);
-    const handoverQuantity = parseInt(handoverResult[0]?.total_quantity || 0);
-
-    // 4. Order Tracking - Total Quantity
-    // Orders claimed by this vendor, manifested (is_manifest=1), handed over (is_handover=1)
-    const orderTrackingResult = await database.query(`
-      SELECT COALESCE(SUM(o.quantity), 0) as total_quantity
-      FROM orders o
-      LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
-      LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
-      WHERE c.claimed_by = ?
-        AND (c.status = 'claimed' OR c.status = 'ready_for_handover')
-        AND (o.is_in_new_order = 1 OR c.label_downloaded = 1)
-        AND l.is_manifest = 1
-        AND l.is_handover = 1
-    `, [warehouseId]);
-    const orderTrackingQuantity = parseInt(orderTrackingResult[0]?.total_quantity || 0);
-
-    console.log('✅ Dashboard statistics calculated:');
-    console.log('  - All Orders:', allOrdersQuantity);
-    console.log('  - My Orders:', myOrdersQuantity);
-    console.log('  - Handover:', handoverQuantity);
-    console.log('  - Order Tracking:', orderTrackingQuantity);
-
-    const responseData = {
-      success: true,
-      message: 'Dashboard statistics retrieved successfully',
-      data: {
-        allOrders: {
-          totalQuantity: allOrdersQuantity
-        },
-        myOrders: {
-          totalQuantity: myOrdersQuantity
-        },
-        handover: {
-          totalQuantity: handoverQuantity
-        },
-        orderTracking: {
-          totalQuantity: orderTrackingQuantity
-        },
-        lastUpdated: new Date().toISOString()
-      }
-    };
-    
-    return res.json(responseData);
-    
-  } catch (error) {
-    console.error('❌ DASHBOARD STATS ERROR:', error);
-    return res.status(500).json({ 
-      success: false, 
-      message: 'Internal server error: ' + error.message 
-    });
-  }
-});
-
-/**
  * @route   GET /api/orders/grouped
  * @desc    Get vendor's claimed orders grouped by order_id
  * @access  Vendor (token required)
@@ -2922,17 +2762,6 @@ function categorizeError(errorMessage) {
     };
   }
   
-  // AWB assignment in progress - retriable error
-  if (msg.includes('awb assignment is in progress') || 
-      msg.includes('have patience')) {
-    return {
-      type: 'RETRIABLE',
-      category: 'RETRIABLE_AWB_PROGRESS',
-      userMessage: 'AWB assignment is in progress. Trying next carrier...',
-      shouldTryNextCarrier: true
-    };
-  }
-  
   // UNKNOWN ERRORS - Default to retriable (safety net)
   // Better to try next carrier than fail prematurely
   return {
@@ -3228,16 +3057,6 @@ async function generateLabelForOrder(orderId, products, vendor, format = 'therma
     console.log('  - Full response:', JSON.stringify(response, null, 2));
     console.log('  - Response keys:', Object.keys(response));
     
-    // Check if response indicates AWB assignment is in progress
-    if (response.status === false || response.success === false) {
-      const message = response.message || '';
-      if (message.toLowerCase().includes('awb assignment is in progress') || 
-          message.toLowerCase().includes('have patience')) {
-        console.log('⏳ AWB assignment is in progress - throwing retriable error');
-        throw new Error(message);
-      }
-    }
-    
     // Handle different possible response structures
     let shipping_url, awb;
     
@@ -3256,16 +3075,6 @@ async function generateLabelForOrder(orderId, products, vendor, format = 'therma
     } else {
       console.log('❌ Could not find shipping_url in response structure');
       console.log('  - Available keys:', Object.keys(response));
-      console.log('  - Response status:', response.status);
-      console.log('  - Response success:', response.success);
-      console.log('  - Response message:', response.message);
-      
-      // If there's a message indicating AWB assignment in progress, throw that instead
-      if (response.message && (response.message.toLowerCase().includes('awb assignment is in progress') || 
-          response.message.toLowerCase().includes('have patience'))) {
-        throw new Error(response.message);
-      }
-      
       throw new Error('Invalid response structure from Shipway API - missing shipping_url');
     }
     
@@ -3693,14 +3502,9 @@ async function prepareInputData(originalOrderId, claimedProducts, allOrderProduc
   console.log(`  - Shipping phone: ${maskedPhone} (length: ${shippingPhone.length})`);
   
   // Convert customer_info to originalOrder format expected by prepareShipwayRequestBody
-  // Get order_date from products (orders table) since customer_info may not have it
-  const orderDate = allOrderProducts[0]?.order_date || customerInfo.order_date || null;
-  
   const originalOrder = {
     order_id: originalOrderId,
-    store_code: customerInfo.store_code || '1', // Use dynamic store_code from database
     email: customerInfo.email,
-    order_date: orderDate, // Get from products table or customer_info
     b_address: customerInfo.billing_address,
     b_address_2: customerInfo.billing_address2,
     b_city: customerInfo.billing_city,
@@ -3849,19 +3653,20 @@ async function verifyCloneExists(inputData) {
   console.log(`  - Account Code: ${accountCode} (for store-specific verification)`);
   console.log(`  - Timestamp: ${inputData.timestamp}`);
   
-  // CRITICAL: Use account_code to fetch order from the correct store
+  // CRITICAL: Use account_code to fetch orders from the correct store
   if (!accountCode) {
     throw new Error(`account_code not found in inputData. Cannot verify clone without store information.`);
   }
   
   // Call Shipway API to verify clone order exists (using store-specific credentials)
-  // OPTIMIZATION: Use single order API instead of fetching all orders
   const ShipwayService = require('../services/shipwayService');
   const shipwayService = new ShipwayService(accountCode);
   await shipwayService.initialize();
-  const cloneOrder = await shipwayService.fetchOrderById(cloneOrderId);
+  const shipwayOrders = await shipwayService.fetchOrdersFromShipway();
   
-  if (!cloneOrder) {
+  const cloneExists = shipwayOrders.some(order => order.order_id === cloneOrderId);
+  
+  if (!cloneExists) {
     throw new Error(`Clone order ${cloneOrderId} not found in Shipway for store ${accountCode}`);
   }
   
@@ -3919,17 +3724,18 @@ async function verifyOriginalOrderUpdate(inputData) {
   console.log(`  - Account Code: ${accountCode} (for store-specific verification)`);
   console.log(`  - Timestamp: ${inputData.timestamp}`);
   
-  // CRITICAL: Use account_code to fetch order from the correct store
+  // CRITICAL: Use account_code to fetch orders from the correct store
   if (!accountCode) {
     throw new Error(`account_code not found in inputData. Cannot verify original order update without store information.`);
   }
   
   // Call Shipway API to verify original order was updated correctly (using store-specific credentials)
-  // OPTIMIZATION: Use single order API instead of fetching all orders
   const ShipwayService = require('../services/shipwayService');
   const shipwayService = new ShipwayService(accountCode);
   await shipwayService.initialize();
-  const originalOrder = await shipwayService.fetchOrderById(originalOrderId);
+  const shipwayOrders = await shipwayService.fetchOrdersFromShipway();
+  
+  const originalOrder = shipwayOrders.find(order => order.order_id === originalOrderId);
   
   if (!originalOrder && remainingProducts.length > 0) {
     throw new Error(`Original order ${originalOrderId} not found in Shipway for store ${accountCode} after update`);
@@ -4449,23 +4255,12 @@ async function callShipwayPushOrderAPI(requestBody, generateLabel = false, accou
     console.log('📦 ==========================================');
     
     // Check if Shipway returned an error
-    // Handle both 'success' and 'status' fields (Shipway uses different response formats)
-    if (!response.ok || data.success === false || data.status === false) {
+    if (!response.ok || data.success === false) {
       console.log('❌ Shipway API returned an error');
       console.log('  - Success flag:', data.success);
-      console.log('  - Status flag:', data.status);
       console.log('  - Error message:', data.message);
       console.log('  - Full error data:', JSON.stringify(data, null, 2));
-      
       const errorMessage = data.message || response.statusText || 'Unknown Shipway API error';
-      
-      // Check if this is "AWB assignment in progress" - this is a retriable error
-      if (errorMessage.toLowerCase().includes('awb assignment is in progress') || 
-          errorMessage.toLowerCase().includes('have patience')) {
-        console.log('⏳ AWB assignment is in progress - this is a retriable error');
-        throw new Error(errorMessage); // Will be caught and retried by carrier loop
-      }
-      
       throw new Error(errorMessage);
     }
     
