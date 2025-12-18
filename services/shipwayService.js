@@ -1390,6 +1390,95 @@ class ShipwayService {
   }
 
   /**
+   * Fetch a single order by order ID from Shipway API
+   * @param {string} orderId - The order ID to fetch
+   * @returns {Promise<Object|null>} Order object if found, null if not found
+   */
+  async fetchOrderById(orderId) {
+    await this.initialize();
+    
+    if (!orderId) {
+      throw new Error('Order ID is required');
+    }
+
+    const url = `${this.baseURL}/getorders`;
+    const params = { orderid: orderId };
+    
+    try {
+      this.logApiActivity({
+        type: 'shipway-get-order',
+        orderId,
+        accountCode: this.accountCode,
+        url,
+        params,
+        headers: { Authorization: '***' }
+      });
+      
+      console.log(`🔍 Fetching single order from Shipway: ${orderId}`);
+      
+      const response = await axios.get(url, {
+        params,
+        headers: {
+          'Authorization': this.basicAuthHeader,
+          'Content-Type': 'application/json',
+        },
+        timeout: 10000, // 10 second timeout
+      });
+      
+      if (response.status !== 200 || !response.data) {
+        throw new Error('Invalid response from Shipway API');
+      }
+      
+      // Handle different response formats
+      let order = null;
+      if (Array.isArray(response.data)) {
+        // If array, take first order
+        order = response.data.length > 0 ? response.data[0] : null;
+      } else if (response.data.order_id) {
+        // Single order object
+        order = response.data;
+      } else if (Array.isArray(response.data.orders) && response.data.orders.length > 0) {
+        order = response.data.orders[0];
+      } else if (Array.isArray(response.data.message) && response.data.message.length > 0) {
+        order = response.data.message[0];
+      } else if (typeof response.data === 'object' && response.data.message === 'No orders found') {
+        // Order not found
+        order = null;
+      }
+      
+      if (order && order.order_id === orderId) {
+        console.log(`✅ Order found in Shipway: ${orderId}`);
+        return order;
+      } else {
+        console.log(`ℹ️ Order not found in Shipway: ${orderId}`);
+        return null;
+      }
+      
+    } catch (error) {
+      this.logApiActivity({
+        type: 'shipway-get-order-error',
+        orderId,
+        accountCode: this.accountCode,
+        error: error.message
+      });
+      
+      // If 404 or "not found" error, return null instead of throwing
+      if (error.response && error.response.status === 404) {
+        console.log(`ℹ️ Order not found (404): ${orderId}`);
+        return null;
+      }
+      
+      if (error.message && error.message.toLowerCase().includes('not found')) {
+        console.log(`ℹ️ Order not found: ${orderId}`);
+        return null;
+      }
+      
+      console.error(`❌ Error fetching order ${orderId} from Shipway:`, error.message);
+      throw new Error(`Failed to fetch order from Shipway API: ${error.message}`);
+    }
+  }
+
+  /**
    * Cancel shipment using Shipway API
    * @param {Array} awbNumbers - Array of AWB numbers to cancel
    * @returns {Object} Cancel result from Shipway API
