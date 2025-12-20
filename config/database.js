@@ -42,16 +42,25 @@ class Database {
       await connection.execute(`CREATE DATABASE IF NOT EXISTS ${dbConfig.database}`);
       await connection.end();
 
-      // Now connect to the specific database with IST timezone
-      this.mysqlConnection = await mysql.createConnection({
+      // Create connection pool for parallel query execution (20 connections)
+      this.mysqlPool = mysql.createPool({
         host: dbConfig.host,
         user: dbConfig.user,
         password: dbConfig.password,
         database: dbConfig.database,
-        timezone: '+05:30' // Set to IST (Indian Standard Time)
+        timezone: '+05:30', // Set to IST (Indian Standard Time)
+        connectionLimit: 20, // 20 connections in pool for parallel execution
+        queueLimit: 0, // No limit on queued requests
+        waitForConnections: true, // Wait if all connections are busy
+        enableKeepAlive: true, // Keep connections alive
+        keepAliveInitialDelay: 0 // Start keepalive immediately
       });
       
-      console.log('✅ MySQL connection established with IST timezone (+05:30)');
+      // Keep mysqlConnection for backward compatibility (point to pool for single-connection operations)
+      // Pool can be used as connection for single operations
+      this.mysqlConnection = this.mysqlPool;
+      
+      console.log('✅ MySQL connection pool established with IST timezone (+05:30) - 20 connections available');
       await this.createUtilityTable();
       await this.createStoreInfoTable();
       await this.createCarriersTable();
@@ -65,8 +74,9 @@ class Database {
       await this.createWhMappingTable();
       this.mysqlInitialized = true;
     } catch (error) {
-      console.error('❌ MySQL connection failed:', error.message);
+      console.error('❌ MySQL connection pool failed:', error.message);
       // MySQL connection failed - application will not function without database
+      this.mysqlPool = null;
       this.mysqlConnection = null;
       this.mysqlInitialized = true; // Mark as initialized even if failed
       throw new Error(`Database initialization failed: ${error.message}`);
@@ -3332,7 +3342,9 @@ class Database {
    * @returns {Array} Array of all orders
    */
   async getAllOrders(cutoffDate = null) {
-    if (!this.mysqlConnection) {
+    // Use pool if available (preferred for parallel execution), otherwise fall back to connection
+    const db = this.mysqlPool || this.mysqlConnection;
+    if (!db) {
       throw new Error('MySQL connection not available');
     }
 
@@ -3391,12 +3403,164 @@ class Database {
       
       query += ` ORDER BY o.order_date DESC, o.order_id, o.product_name`;
       
-      const [rows] = await this.mysqlConnection.execute(query, params);
+      const [rows] = await db.execute(query, params);
       
       return rows;
     } catch (error) {
       console.error('Error getting all orders:', error);
       throw new Error('Failed to get orders from database');
+    }
+  }
+
+  /**
+   * Get orders with pagination, filtering, and search (optimized with LIMIT/OFFSET)
+   * @param {Object} options - Query options
+   * @param {string} options.status - Filter by status (e.g., 'unclaimed')
+   * @param {string} options.search - Search term for order_id, product_name, product_code, customer_name
+   * @param {string} options.dateFrom - Start date (YYYY-MM-DD format)
+   * @param {string} options.dateTo - End date (YYYY-MM-DD format)
+   * @param {number} options.limit - Number of records per page
+   * @param {number} options.offset - Number of records to skip
+   * @returns {Promise<Object>} Object with orders array, totalCount, and totalQuantity
+   */
+  async getOrdersPaginated(options = {}) {
+    const {
+      status = null,
+      search = '',
+      dateFrom = null,
+      dateTo = null,
+      limit = 50,
+      offset = 0
+    } = options;
+
+    // Use pool if available (preferred for parallel execution), otherwise fall back to connection
+    const db = this.mysqlPool || this.mysqlConnection;
+    if (!db) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      // Build WHERE clause conditions (reusable for both COUNT and SELECT queries)
+      let whereConditions = '(o.is_in_new_order = 1 OR c.label_downloaded = 1)';
+      const params = [];
+      const countParams = [];
+      
+      // Apply status filter (unclaimed logic matches dashboard-stats)
+      if (status === 'unclaimed') {
+        whereConditions += ` AND (
+          (
+            (l.current_shipment_status IS NULL OR l.current_shipment_status = '') 
+            AND c.status = 'unclaimed'
+          )
+          OR l.current_shipment_status = 'unclaimed'
+        )`;
+      }
+      
+      // Apply search filter (SQL LIKE for order_id, product_name, product_code, customer_name)
+      if (search && search.trim() !== '') {
+        const searchTerm = `%${search.trim()}%`;
+        whereConditions += ` AND (
+          o.order_id LIKE ? OR
+          o.product_name LIKE ? OR
+          o.product_code LIKE ? OR
+          o.customer_name LIKE ?
+        )`;
+        params.push(searchTerm, searchTerm, searchTerm, searchTerm);
+        countParams.push(searchTerm, searchTerm, searchTerm, searchTerm);
+      }
+      
+      // Apply date range filter
+      if (dateFrom || dateTo) {
+        if (dateFrom && dateTo) {
+          whereConditions += ` AND o.order_date >= ? AND o.order_date <= ?`;
+          const dateToEnd = dateTo + ' 23:59:59';
+          params.push(dateFrom, dateToEnd);
+          countParams.push(dateFrom, dateToEnd);
+        } else if (dateFrom) {
+          whereConditions += ` AND o.order_date >= ?`;
+          params.push(dateFrom);
+          countParams.push(dateFrom);
+        } else if (dateTo) {
+          whereConditions += ` AND o.order_date <= ?`;
+          const dateToEnd = dateTo + ' 23:59:59';
+          params.push(dateToEnd);
+          countParams.push(dateToEnd);
+        }
+      }
+      
+      // Build data query with LIMIT/OFFSET
+      const dataQuery = `
+        SELECT 
+          o.*,
+          p.image as product_image,
+          c.status as claims_status,
+          c.claimed_by,
+          c.claimed_at,
+          c.last_claimed_by,
+          c.last_claimed_at,
+          c.clone_status,
+          c.cloned_order_id,
+          c.is_cloned_row,
+          c.label_downloaded,
+          l.label_url,
+          l.awb,
+          l.carrier_id,
+          l.carrier_name,
+          l.handover_at,
+          c.priority_carrier,
+          l.is_manifest,
+          l.manifest_id,
+          l.current_shipment_status,
+          l.is_handover,
+          s.store_name,
+          CASE 
+            WHEN l.current_shipment_status IS NOT NULL AND l.current_shipment_status != '' 
+            THEN l.current_shipment_status 
+            ELSE c.status 
+          END as status
+        FROM orders o
+        LEFT JOIN products p ON (
+          (REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id)
+          AND o.account_code = p.account_code
+        )
+        LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
+        LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
+        LEFT JOIN store_info s ON o.account_code = s.account_code
+        WHERE ${whereConditions}
+        ORDER BY o.order_date DESC, o.order_id, o.product_name
+        LIMIT ${parseInt(limit)} OFFSET ${parseInt(offset)}`;
+      
+      // Build COUNT query for total count and quantity (same WHERE clause, no JOINs needed for count)
+      const countQuery = `
+        SELECT 
+          COUNT(DISTINCT o.unique_id) as total_count,
+          COALESCE(SUM(o.quantity), 0) as total_quantity
+        FROM orders o
+        LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
+        LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
+        WHERE ${whereConditions}`;
+      
+      // Execute COUNT query and data query in parallel using connection pool
+      // Note: LIMIT and OFFSET are interpolated directly (not parameterized) as MySQL doesn't support placeholders for them
+      const [countResult, dataResult] = await Promise.all([
+        db.execute(countQuery, countParams),
+        db.execute(dataQuery, params)
+      ]);
+      
+      const totalCount = parseInt(countResult[0][0]?.total_count || 0);
+      const totalQuantity = parseInt(countResult[0][0]?.total_quantity || 0);
+      const orders = dataResult[0];
+      
+      return {
+        orders,
+        totalCount,
+        totalQuantity
+      };
+    } catch (error) {
+      console.error('Error getting paginated orders:', error);
+      throw new Error('Failed to get paginated orders from database');
     }
   }
 
@@ -3942,7 +4106,8 @@ class Database {
    * @returns {boolean} True if MySQL is available
    */
   isMySQLAvailable() {
-    return this.mysqlConnection !== null;
+    // Check pool first (preferred), then fall back to connection for backward compatibility
+    return (this.mysqlPool !== null) || (this.mysqlConnection !== null);
   }
 
   /**

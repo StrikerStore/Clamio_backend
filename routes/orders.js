@@ -208,8 +208,58 @@ router.get('/', async (req, res) => {
       return res.status(500).json({ success: false, message: 'Database connection not available' });
     }
     
-    const orders = await database.getAllOrders();
-    return res.status(200).json({ success: true, data: { orders } });
+    // Extract pagination parameters
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 50;
+    const status = req.query.status || 'unclaimed'; // Filter by status (default: unclaimed)
+    const search = req.query.search || ''; // Search term
+    const dateFrom = req.query.dateFrom; // Date from filter
+    const dateTo = req.query.dateTo; // Date to filter
+    
+    console.log('📄 Orders pagination params:', { page, limit, status, search, dateFrom, dateTo });
+    
+    // Calculate offset for pagination
+    const offset = (page - 1) * limit;
+    
+    // Use optimized paginated query with LIMIT/OFFSET in SQL
+    // This is MUCH faster than fetching all orders and filtering in JavaScript
+    const result = await database.getOrdersPaginated({
+      status: status || null,
+      search: search || '',
+      dateFrom: dateFrom || null,
+      dateTo: dateTo || null,
+      limit: limit,
+      offset: offset
+    });
+    
+    const paginatedOrders = result.orders;
+    const totalCount = result.totalCount;
+    const totalQuantity = result.totalQuantity;
+    const hasMore = (offset + paginatedOrders.length) < totalCount;
+    
+    console.log('📊 Orders pagination result:', {
+      total: totalCount,
+      totalQuantity: totalQuantity,
+      page: page,
+      limit: limit,
+      returned: paginatedOrders.length,
+      hasMore: hasMore
+    });
+    
+    return res.status(200).json({ 
+      success: true, 
+      data: { 
+        orders: paginatedOrders,
+        pagination: {
+          page: page,
+          limit: limit,
+          total: totalCount,
+          totalQuantity: totalQuantity,
+          hasMore: hasMore,
+          returnedCount: paginatedOrders.length
+        }
+      } 
+    });
   } catch (err) {
     console.error('Error getting orders:', err);
     return res.status(500).json({ success: false, message: 'Failed to read orders', error: err.message });
@@ -1257,11 +1307,29 @@ router.get('/order-tracking', async (req, res) => {
     
     const totalCount = groupedOrdersArray.length;
     
+    // Extract pagination parameters
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 50;
+    console.log('📄 Order Tracking pagination params:', { page, limit });
+    
+    // Apply pagination
+    const startIndex = (page - 1) * limit;
+    const endIndex = startIndex + limit;
+    const paginatedOrders = groupedOrdersArray.slice(startIndex, endIndex);
+    const hasMore = endIndex < totalCount;
+    
     const responseData = {
       success: true,
       message: 'Order Tracking Orders retrieved successfully',
       data: {
-        trackingOrders: groupedOrdersArray,
+        trackingOrders: paginatedOrders,
+        pagination: {
+          page: page,
+          limit: limit,
+          total: totalCount,
+          hasMore: hasMore,
+          returnedCount: paginatedOrders.length
+        },
         summary: {
           total_orders: totalCount,
           total_products: groupedOrdersArray.reduce((sum, order) => sum + order.total_products, 0),
@@ -1272,11 +1340,14 @@ router.get('/order-tracking', async (req, res) => {
     };
     
     console.log('✅ ORDER TRACKING ORDERS SUCCESS');
-    console.log('  - Order Tracking Orders Count:', responseData.data.trackingOrders.length);
+    console.log('  - Total Orders:', totalCount);
+    console.log('  - Returned Orders:', paginatedOrders.length);
+    console.log('  - Page:', page);
+    console.log('  - Has More:', hasMore);
     
     // Debug: Log each grouped order's total_quantity
-    if (responseData.data.trackingOrders.length > 0) {
-      responseData.data.trackingOrders.forEach((order, index) => {
+    if (paginatedOrders.length > 0) {
+      paginatedOrders.forEach((order, index) => {
         console.log(`  - Order ${index + 1}: ${order.order_id} - ${order.total_quantity} items`);
       });
     }
@@ -1345,18 +1416,20 @@ router.get('/dashboard-stats', async (req, res) => {
     const warehouseId = vendor.warehouseId;
 
     // Calculate all statistics using SQL aggregations (much faster than JavaScript)
-    console.log('📊 Calculating dashboard statistics...');
+    // Run all 4 queries in parallel using connection pool for maximum performance
+    console.log('📊 Calculating dashboard statistics in parallel...');
     
-    // 1. All Orders (unclaimed) - Total Quantity
+    // 1. All Orders (unclaimed) - Total Count and Total Quantity
     // Orders that are unclaimed (must match frontend logic: status = 'unclaimed')
-    // Frontend filters by: order.status === 'unclaimed'
     // Status is computed as: CASE WHEN l.current_shipment_status IS NOT NULL AND != '' THEN l.current_shipment_status ELSE c.status END
     // So for status = 'unclaimed', we need:
     //   - (l.current_shipment_status IS NULL OR l.current_shipment_status = '') AND c.status = 'unclaimed'
     //   - OR l.current_shipment_status = 'unclaimed'
     // Also must match getAllOrders filter: (o.is_in_new_order = 1 OR c.label_downloaded = 1)
-    const allOrdersResult = await database.query(`
-      SELECT COALESCE(SUM(o.quantity), 0) as total_quantity
+    const allOrdersQuery = database.query(`
+      SELECT 
+        COUNT(DISTINCT o.unique_id) as total_count,
+        COALESCE(SUM(o.quantity), 0) as total_quantity
       FROM orders o
       LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
       LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
@@ -1369,12 +1442,13 @@ router.get('/dashboard-stats', async (req, res) => {
       )
       AND (o.is_in_new_order = 1 OR c.label_downloaded = 1)
     `);
-    const allOrdersQuantity = parseInt(allOrdersResult[0]?.total_quantity || 0);
 
-    // 2. My Orders - Total Quantity
+    // 2. My Orders - Total Count and Total Quantity
     // Orders claimed by this vendor, status claimed or ready_for_handover, not manifested
-    const myOrdersResult = await database.query(`
-      SELECT COALESCE(SUM(o.quantity), 0) as total_quantity
+    const myOrdersQuery = database.query(`
+      SELECT 
+        COUNT(DISTINCT o.order_id) as total_count,
+        COALESCE(SUM(o.quantity), 0) as total_quantity
       FROM orders o
       LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
       LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
@@ -1383,12 +1457,13 @@ router.get('/dashboard-stats', async (req, res) => {
         AND (o.is_in_new_order = 1 OR c.label_downloaded = 1)
         AND (l.is_manifest IS NULL OR l.is_manifest = 0)
     `, [warehouseId]);
-    const myOrdersQuantity = parseInt(myOrdersResult[0]?.total_quantity || 0);
 
-    // 3. Handover - Total Quantity
+    // 3. Handover - Total Count and Total Quantity
     // Orders claimed by this vendor, manifested (is_manifest=1), not handed over (is_handover=0 or null)
-    const handoverResult = await database.query(`
-      SELECT COALESCE(SUM(o.quantity), 0) as total_quantity
+    const handoverQuery = database.query(`
+      SELECT 
+        COUNT(DISTINCT o.order_id) as total_count,
+        COALESCE(SUM(o.quantity), 0) as total_quantity
       FROM orders o
       LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
       LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
@@ -1398,12 +1473,13 @@ router.get('/dashboard-stats', async (req, res) => {
         AND l.is_manifest = 1
         AND (l.is_handover = 0 OR l.is_handover IS NULL)
     `, [warehouseId]);
-    const handoverQuantity = parseInt(handoverResult[0]?.total_quantity || 0);
 
-    // 4. Order Tracking - Total Quantity
+    // 4. Order Tracking - Total Count and Total Quantity
     // Orders claimed by this vendor, manifested (is_manifest=1), handed over (is_handover=1)
-    const orderTrackingResult = await database.query(`
-      SELECT COALESCE(SUM(o.quantity), 0) as total_quantity
+    const orderTrackingQuery = database.query(`
+      SELECT 
+        COUNT(DISTINCT o.order_id) as total_count,
+        COALESCE(SUM(o.quantity), 0) as total_quantity
       FROM orders o
       LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
       LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
@@ -1413,28 +1489,49 @@ router.get('/dashboard-stats', async (req, res) => {
         AND l.is_manifest = 1
         AND l.is_handover = 1
     `, [warehouseId]);
+
+    // Execute all 4 queries in parallel using connection pool
+    const [allOrdersResult, myOrdersResult, handoverResult, orderTrackingResult] = await Promise.all([
+      allOrdersQuery,
+      myOrdersQuery,
+      handoverQuery,
+      orderTrackingQuery
+    ]);
+
+    // Extract results
+    const allOrdersCount = parseInt(allOrdersResult[0]?.total_count || 0);
+    const allOrdersQuantity = parseInt(allOrdersResult[0]?.total_quantity || 0);
+    const myOrdersCount = parseInt(myOrdersResult[0]?.total_count || 0);
+    const myOrdersQuantity = parseInt(myOrdersResult[0]?.total_quantity || 0);
+    const handoverCount = parseInt(handoverResult[0]?.total_count || 0);
+    const handoverQuantity = parseInt(handoverResult[0]?.total_quantity || 0);
+    const orderTrackingCount = parseInt(orderTrackingResult[0]?.total_count || 0);
     const orderTrackingQuantity = parseInt(orderTrackingResult[0]?.total_quantity || 0);
 
     console.log('✅ Dashboard statistics calculated:');
-    console.log('  - All Orders:', allOrdersQuantity);
-    console.log('  - My Orders:', myOrdersQuantity);
-    console.log('  - Handover:', handoverQuantity);
-    console.log('  - Order Tracking:', orderTrackingQuantity);
+    console.log('  - All Orders:', { count: allOrdersCount, quantity: allOrdersQuantity });
+    console.log('  - My Orders:', { count: myOrdersCount, quantity: myOrdersQuantity });
+    console.log('  - Handover:', { count: handoverCount, quantity: handoverQuantity });
+    console.log('  - Order Tracking:', { count: orderTrackingCount, quantity: orderTrackingQuantity });
 
     const responseData = {
       success: true,
       message: 'Dashboard statistics retrieved successfully',
       data: {
         allOrders: {
+          totalCount: allOrdersCount,
           totalQuantity: allOrdersQuantity
         },
         myOrders: {
+          totalCount: myOrdersCount,
           totalQuantity: myOrdersQuantity
         },
         handover: {
+          totalCount: handoverCount,
           totalQuantity: handoverQuantity
         },
         orderTracking: {
+          totalCount: orderTrackingCount,
           totalQuantity: orderTrackingQuantity
         },
         lastUpdated: new Date().toISOString()
@@ -2630,11 +2727,11 @@ router.post('/download-label', async (req, res) => {
     console.log('  - Role:', vendor.role);
     console.log('  - Active session:', vendor.active_session);
 
-    // OPTIMIZATION #1: Fetch only products for this specific order_id instead of all orders
-    // This reduces query time from 1-5 seconds to 0.1-0.5 seconds
-    console.log('📦 Fetching products for order_id:', order_id);
-    const orderProducts = await database.getOrdersByOrderId(order_id);
-    console.log(`✅ Fetched ${orderProducts.length} products for order ${order_id}`);
+    // Get orders from MySQL
+    const orders = await database.getAllOrders();
+
+    // Get all products for this order_id
+    const orderProducts = orders.filter(order => order.order_id === order_id);
     const claimedProducts = orderProducts.filter(order => 
       order.claimed_by === vendor.warehouseId && 
       (order.is_handover !== 1 && order.is_handover !== '1')  // Allow download until handed over
@@ -3855,13 +3952,14 @@ async function verifyCloneExists(inputData) {
   }
   
   // Call Shipway API to verify clone order exists (using store-specific credentials)
-  // OPTIMIZATION: Use single order API instead of fetching all orders
   const ShipwayService = require('../services/shipwayService');
   const shipwayService = new ShipwayService(accountCode);
   await shipwayService.initialize();
-  const cloneOrder = await shipwayService.fetchOrderById(cloneOrderId);
+  const shipwayOrders = await shipwayService.fetchOrdersFromShipway();
   
-  if (!cloneOrder) {
+  const cloneExists = shipwayOrders.some(order => order.order_id === cloneOrderId);
+  
+  if (!cloneExists) {
     throw new Error(`Clone order ${cloneOrderId} not found in Shipway for store ${accountCode}`);
   }
   
@@ -3925,11 +4023,12 @@ async function verifyOriginalOrderUpdate(inputData) {
   }
   
   // Call Shipway API to verify original order was updated correctly (using store-specific credentials)
-  // OPTIMIZATION: Use single order API instead of fetching all orders
   const ShipwayService = require('../services/shipwayService');
   const shipwayService = new ShipwayService(accountCode);
   await shipwayService.initialize();
-  const originalOrder = await shipwayService.fetchOrderById(originalOrderId);
+  const shipwayOrders = await shipwayService.fetchOrdersFromShipway();
+  
+  const originalOrder = shipwayOrders.find(order => order.order_id === originalOrderId);
   
   if (!originalOrder && remainingProducts.length > 0) {
     throw new Error(`Original order ${originalOrderId} not found in Shipway for store ${accountCode} after update`);
@@ -3960,11 +4059,7 @@ async function updateLocalDatabaseAfterClone(inputData) {
     throw error;
   }
   
-    // Update products in database AND update the claimedProducts array in memory
-    // This ensures the products array has the updated clone order_id for subsequent steps
-    for (let i = 0; i < claimedProducts.length; i++) {
-      const product = claimedProducts[i];
-      
+    for (const product of claimedProducts) {
       // Update both orders and claims tables in a single call
       await database.updateOrder(product.unique_id, {
         order_id: cloneOrderId,           // ✅ Update orders & claims tables with clone ID
@@ -3973,24 +4068,15 @@ async function updateLocalDatabaseAfterClone(inputData) {
         label_downloaded: 0               // ✅ Initially 0 (not downloaded)
       });
       
-      // ✅ CRITICAL: Update the product object in the array to use clone ID
-      // This ensures subsequent steps (like label generation) use the correct clone ID
-      claimedProducts[i] = {
-        ...product,
-        order_id: cloneOrderId  // Update order_id in memory to match database
-      };
-      
       console.log(`  ✅ Updated product ${product.unique_id} after clone creation:`);
       console.log(`     - orders.order_id: ${cloneOrderId}`);
       console.log(`     - claims.order_id: ${cloneOrderId}`);
-      console.log(`     - product.order_id (in memory): ${cloneOrderId}`);
       console.log(`     - clone_status: cloned`);
       console.log(`     - cloned_order_id: ${originalOrderId}`);
       console.log(`     - label_downloaded: 0`);
     }
   
   console.log('✅ Local database updated after clone creation');
-  console.log(`  - Updated ${claimedProducts.length} products with clone ID: ${cloneOrderId}`);
   return { success: true, updatedProducts: claimedProducts.length };
 }
 
@@ -4001,52 +4087,11 @@ async function generateLabelForClone(inputData) {
   console.log(`🔒 Generating label with consistent data:`);
   console.log(`  - Clone ID: ${cloneOrderId}`);
   console.log(`  - Products for label: ${claimedProducts.length}`);
+  console.log(`  - Account Code: ${accountCode} (for store-specific operations)`);
   console.log(`  - Timestamp: ${inputData.timestamp}`);
   
-  // OPTIMIZATION: Pre-fetch all data needed for label generation to avoid multiple queries
-  console.log(`📦 Pre-fetching data for clone label generation...`);
-  const database = require('../config/database');
-  
-  // 1. Fetch customer info for clone order (already copied from original in Step 5)
-  const customerInfo = await database.getCustomerInfoByOrderId(cloneOrderId);
-  const customerInfoMap = new Map();
-  if (customerInfo) {
-    customerInfoMap.set(cloneOrderId, customerInfo);
-  }
-  console.log(`✅ Fetched customer info for clone order ${cloneOrderId}`);
-  
-  // 2. Fetch store info using account_code
-  const store = await database.getStoreByAccountCode(accountCode);
-  const storesMap = new Map();
-  if (store) {
-    storesMap.set(accountCode, store);
-  }
-  console.log(`✅ Fetched store info for account_code ${accountCode}`);
-  
-  // 3. Load carriers once (cache in memory)
-  const carrierServiceabilityService = require('../services/carrierServiceabilityService');
-  const allCarriers = await carrierServiceabilityService.readCarriersFromDatabase();
-  const carrierMap = new Map(allCarriers.map(c => [c.carrier_id, c]));
-  console.log(`✅ Loaded ${allCarriers.length} carriers (cached in memory)`);
-  
-  // 4. Fetch warehouse mapping
-  const whMapping = await database.getWhMappingByClaimioWhIdAndAccountCode(vendor.warehouseId, accountCode);
-  const whMappingsMap = new Map();
-  if (whMapping) {
-    whMappingsMap.set(`${vendor.warehouseId}_${accountCode}`, whMapping);
-  }
-  console.log(`✅ Fetched warehouse mapping for vendor ${vendor.warehouseId} and account_code ${accountCode}`);
-  
-  // Build data maps object
-  const dataMaps = {
-    customerInfoMap,
-    storesMap,
-    carrierMap,
-    whMappingsMap
-  };
-  
-  // Generate label for the clone order with pre-fetched data
-  const labelResponse = await generateLabelForOrder(cloneOrderId, claimedProducts, vendor, 'thermal', dataMaps);
+  // Generate label for the clone order
+  const labelResponse = await generateLabelForOrder(cloneOrderId, claimedProducts, vendor);
   
   if (!labelResponse.success) {
     throw new Error(`Failed to generate label for clone: ${labelResponse.message || 'Unknown error'}`);
