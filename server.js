@@ -482,6 +482,29 @@ app.listen(PORT, async () => {
     console.log('⚠️ Automatic migrations disabled (RUN_MIGRATIONS=false)');
   }
 
+  // Run collectable_amount correction script on startup
+  // This fixes corrupted collectable_amount values caused by cascading 90% bug
+  // Safe to run multiple times (idempotent)
+  // Set FIX_COLLECTABLE_AMOUNT=false in .env to disable
+  const runCollectableAmountFix = process.env.FIX_COLLECTABLE_AMOUNT !== 'false';
+  if (runCollectableAmountFix) {
+    try {
+      console.log('\n🔧 Running collectable_amount correction script...');
+      const { fixCollectableAmounts } = require('./scripts/fix-collectable-amount');
+      const fixResult = await fixCollectableAmounts();
+      
+      if (fixResult.success) {
+        console.log(`✅ Collectable amount correction completed: ${fixResult.correctedCount}/${fixResult.totalCount} orders fixed`);
+      } else {
+        console.error('❌ Collectable amount correction failed:', fixResult.message);
+      }
+    } catch (error) {
+      console.error('⚠️ Collectable amount correction error (server will continue):', error.message);
+    }
+  } else {
+    console.log('⚠️ Collectable amount correction disabled (FIX_COLLECTABLE_AMOUNT=false)');
+  }
+
   // Start periodic database health check (every 15 minutes)
   setInterval(async () => {
     try {
