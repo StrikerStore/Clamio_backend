@@ -483,14 +483,22 @@ class ShipwayService {
          : parseFloat((orderTotal * 0.1).toFixed(2));
       
       // Calculate total selling price for all products in this order for ratio calculation
+      // IMPORTANT: Multiply by quantity to get total value per product
       const totalSellingPriceInOrder = order.products.reduce((sum, prod) => {
-        return sum + (parseFloat(prod.price) || 0);
+        const price = parseFloat(prod.price) || 0;
+        const quantity = parseInt(prod.amount) || 1;
+        return sum + (price * quantity);
       }, 0);
       
-             // Calculate ratio parts for each product
-       let productRatios = [];
-       if (totalSellingPriceInOrder > 0) {
-         const prices = order.products.map(prod => parseFloat(prod.price) || 0);
+      // Calculate ratio parts for each product
+      let productRatios = [];
+      if (totalSellingPriceInOrder > 0) {
+        // IMPORTANT: Multiply by quantity to get total value per product
+        const prices = order.products.map(prod => {
+          const price = parseFloat(prod.price) || 0;
+          const quantity = parseInt(prod.amount) || 1;
+          return price * quantity;
+        });
          
          // Convert prices to integers to handle decimals (multiply by 100 for 2 decimal places)
          const intPrices = prices.map(price => Math.round(price * 100));
@@ -927,14 +935,22 @@ class ShipwayService {
       }
       
       // Calculate total selling price for all products in this order for ratio calculation
+      // IMPORTANT: Multiply by quantity to get total value per product
       const totalSellingPriceInOrder = order.products.reduce((sum, prod) => {
-        return sum + (parseFloat(prod.price) || 0);
+        const price = parseFloat(prod.price) || 0;
+        const quantity = parseInt(prod.amount) || 1;
+        return sum + (price * quantity);
       }, 0);
       
       // Calculate ratio parts for each product
       let productRatios = [];
       if (totalSellingPriceInOrder > 0) {
-        const prices = order.products.map(prod => parseFloat(prod.price) || 0);
+        // IMPORTANT: Multiply by quantity to get total value per product
+        const prices = order.products.map(prod => {
+          const price = parseFloat(prod.price) || 0;
+          const quantity = parseInt(prod.amount) || 1;
+          return price * quantity;
+        });
         
         // Convert prices to integers to handle decimals (multiply by 100 for 2 decimal places)
         const intPrices = prices.map(price => Math.round(price * 100));
@@ -1076,23 +1092,19 @@ class ShipwayService {
           // IMPORTANT: Include account_code in matching to prevent cross-store data interaction
           const existingOrder = existingOrders.find(o => `${o.account_code}|${o.order_id}|${o.product_code}` === key);
           if (existingOrder) {
-            // Only update if there are actual changes to order data
-            const hasDataChanges = (
+            // Check if payment_type has changed (trigger for financial recalculation)
+            const paymentTypeChanged = existingOrder.payment_type !== orderRow.payment_type;
+            const isPartialPaidChanged = Boolean(existingOrder.is_partial_paid) !== Boolean(orderRow.is_partial_paid);
+            
+            // Check for non-financial data changes
+            const hasNonFinancialChanges = (
               existingOrder.order_date !== orderRow.order_date ||
               existingOrder.product_name !== orderRow.product_name ||
-              parseFloat(existingOrder.selling_price || 0) !== parseFloat(orderRow.selling_price || 0) ||
-              parseFloat(existingOrder.order_total || 0) !== parseFloat(orderRow.order_total || 0) ||
-              existingOrder.payment_type !== orderRow.payment_type ||
-              Boolean(existingOrder.is_partial_paid) !== Boolean(orderRow.is_partial_paid) ||
-              parseFloat(existingOrder.prepaid_amount || 0) !== parseFloat(orderRow.prepaid_amount || 0) ||
-              parseFloat(existingOrder.order_total_ratio || 0) !== parseFloat(orderRow.order_total_ratio || 0) ||
-              parseFloat(existingOrder.order_total_split || 0) !== parseFloat(orderRow.order_total_split || 0) ||
-              parseFloat(existingOrder.collectable_amount || 0) !== parseFloat(orderRow.collectable_amount || 0) ||
               existingOrder.pincode !== orderRow.pincode
             );
             
-            if (hasDataChanges) {
-              // Only update if there are actual data changes
+            if (paymentTypeChanged || isPartialPaidChanged) {
+              // RECALCULATE: Payment type changed - update all financial values
               await database.updateOrder(existingOrder.unique_id, {
                 order_date: orderRow.order_date,
                 product_name: orderRow.product_name,
@@ -1109,13 +1121,24 @@ class ShipwayService {
               });
               updatedOrdersCount++;
               changed = true;
-              console.log(`🔄 Updated existing order: ${orderRow.order_id}|${orderRow.product_code}`);
+              console.log(`🔄 Payment type changed - Recalculated financial values: ${orderRow.order_id}|${orderRow.product_code}`);
+            } else if (hasNonFinancialChanges) {
+              // FREEZE: Payment type unchanged - preserve financial values, only update non-financial fields
+              await database.updateOrder(existingOrder.unique_id, {
+                order_date: orderRow.order_date,
+                product_name: orderRow.product_name,
+                pincode: orderRow.pincode,
+                is_in_new_order: true
+              });
+              updatedOrdersCount++;
+              changed = true;
+              console.log(`✅ Non-financial update (frozen financial values): ${orderRow.order_id}|${orderRow.product_code}`);
             } else {
-              // Just update the is_in_new_order flag without changing other data
+              // No changes at all - just update the is_in_new_order flag
               await database.updateOrder(existingOrder.unique_id, {
                 is_in_new_order: true
               });
-              console.log(`✅ Preserved existing order: ${orderRow.order_id}|${orderRow.product_code}`);
+              console.log(`✅ No changes - Preserved all values: ${orderRow.order_id}|${orderRow.product_code}`);
             }
           }
         } else {
