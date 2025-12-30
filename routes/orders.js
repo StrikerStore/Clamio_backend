@@ -4169,10 +4169,12 @@ async function prepareShipwayRequestBody(orderId, products, originalOrder, vendo
   const paymentType = products[0]?.payment_type || 'P';
   console.log('🔍 Payment type from order data:', paymentType);
   
-  // FIXED: Always use order_total_split (actual product value) instead of collectable_amount
-  // This prevents cascading 90% bug when orders are cloned or reclaimed
   const orderTotal = products.reduce((sum, product) => {
-    return sum + (parseFloat(product.order_total_split) || 0);
+    if (paymentType === 'C') {
+      return sum + (parseFloat(product.collectable_amount) || 0);
+    } else {
+      return sum + (parseFloat(product.order_total_split) || 0);
+    }
   }, 0);
   
   // Calculate order weight
