@@ -1433,6 +1433,7 @@ router.get('/dashboard-stats', async (req, res) => {
       FROM orders o
       LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
       LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
+      LEFT JOIN store_info s ON o.account_code = s.account_code
       WHERE (
         (
           (l.current_shipment_status IS NULL OR l.current_shipment_status = '') 
@@ -1441,6 +1442,7 @@ router.get('/dashboard-stats', async (req, res) => {
         OR l.current_shipment_status = 'unclaimed'
       )
       AND (o.is_in_new_order = 1 OR c.label_downloaded = 1)
+      AND s.status = 'active'
     `);
 
     // 2. My Orders - Total Count and Total Quantity
@@ -1861,6 +1863,7 @@ router.get('/admin/all', authenticateBasicAuth, requireAdminOrSuperadmin, async 
         claimed_by: order.claimed_by || null,
         image: order.product_image || order.image || '/placeholder.svg',
         store_name: order.store_name || null,
+        store_status: order.store_status || 'active',
         account_code: order.account_code || null,
         awb: order.awb || null
       };
@@ -1893,7 +1896,7 @@ router.get('/admin/all', authenticateBasicAuth, requireAdminOrSuperadmin, async 
         orders: processedOrders,
         totalOrders: processedOrders.length,
         claimedOrders: processedOrders.filter(o => o.status === 'claimed').length,
-        unclaimedOrders: processedOrders.filter(o => o.status === 'unclaimed').length
+        unclaimedOrders: processedOrders.filter(o => o.status === 'unclaimed' && o.store_status === 'active').length
       } 
     });
     
@@ -1959,6 +1962,16 @@ router.post('/admin/assign', authenticateBasicAuth, requireAdminOrSuperadmin, as
     }
     
     console.log('✅ ORDER FOUND:', order.order_id);
+    
+    // Check if store is active (prevent assigning orders from inactive stores)
+    const store = await database.getStoreByAccountCode(order.account_code);
+    if (store && store.status !== 'active') {
+      console.log('❌ Cannot assign order from inactive store');
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Cannot assign order from inactive store. Please activate the store first.' 
+      });
+    }
     
     // Update order assignment in MySQL
     const now = new Date().toISOString().replace('T', ' ').substring(0, 19);

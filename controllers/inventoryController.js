@@ -64,7 +64,7 @@ async function getAggregatedInventory(req, res) {
   try {
     console.log('📊 Fetching aggregated inventory for unclaimed orders...');
 
-    // Query unclaimed orders with products
+    // Query unclaimed orders with products (only from active stores)
     const query = `
       SELECT 
         o.product_name,
@@ -82,8 +82,10 @@ async function getAggregatedInventory(req, res) {
         AND o.account_code = p.account_code
       )
       LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
+      LEFT JOIN store_info s ON o.account_code = s.account_code
       WHERE (c.status = 'unclaimed' OR c.status IS NULL)
         AND o.is_in_new_order = 1
+        AND s.status = 'active'
       ORDER BY o.product_name, o.size
     `;
 

@@ -3374,6 +3374,7 @@ class Database {
           l.current_shipment_status,
           l.is_handover,
           s.store_name,
+          s.status as store_status,
           CASE 
             WHEN l.current_shipment_status IS NOT NULL AND l.current_shipment_status != '' 
             THEN l.current_shipment_status 
@@ -3454,6 +3455,8 @@ class Database {
           )
           OR l.current_shipment_status = 'unclaimed'
         )`;
+        // Filter out inactive stores for unclaimed orders (vendors should only see new orders from active stores)
+        whereConditions += ` AND s.status = 'active'`;
       }
       
       // Apply search filter (SQL LIKE for order_id, product_name, product_code, customer_name)
@@ -3532,7 +3535,7 @@ class Database {
         ORDER BY o.order_date DESC, o.order_id, o.product_name
         LIMIT ${parseInt(limit)} OFFSET ${parseInt(offset)}`;
       
-      // Build COUNT query for total count and quantity (same WHERE clause, no JOINs needed for count)
+      // Build COUNT query for total count and quantity (same WHERE clause, includes store_info for status filtering)
       const countQuery = `
         SELECT 
           COUNT(DISTINCT o.unique_id) as total_count,
@@ -3540,6 +3543,7 @@ class Database {
         FROM orders o
         LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
         LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
+        LEFT JOIN store_info s ON o.account_code = s.account_code
         WHERE ${whereConditions}`;
       
       // Execute COUNT query and data query in parallel using connection pool

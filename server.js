@@ -627,10 +627,35 @@ app.listen(PORT, async () => {
   cron.schedule('0 2 * * *', async () => {
     try {
       console.log('[Product Sync] Starting daily product refresh from Shopify...');
+      
+      // Check if store is active before syncing
+      const database = require('./config/database');
+      await database.waitForMySQLInitialization();
+      
+      const shopifyUrl = process.env.SHOPIFY_PRODUCTS_API_URL || 'https://seq5t1-mz.myshopify.com/admin/api/2025-07/graphql.json';
+      const shopifyToken = process.env.SHOPIFY_ACCESS_TOKEN;
+      
+      // Get store from database using Shopify credentials
+      const store = await database.getStoreByShopifyCredentials(shopifyUrl, shopifyToken);
+      
+      if (!store) {
+        console.log('[Product Sync] ⚠️ Store not found in database for configured Shopify credentials');
+        console.log('[Product Sync] Skipping product refresh until store is configured in admin panel');
+        return;
+      }
+      
+      if (store.status !== 'active') {
+        console.log(`[Product Sync] ⚠️ Store "${store.store_name}" (${store.account_code}) is inactive`);
+        console.log('[Product Sync] Skipping product refresh for inactive store');
+        return;
+      }
+      
+      console.log(`[Product Sync] Store "${store.store_name}" (${store.account_code}) is active, proceeding with sync...`);
+      
       await fetchAndSaveShopifyProducts(
-        process.env.SHOPIFY_PRODUCTS_API_URL || 'https://seq5t1-mz.myshopify.com/admin/api/2025-07/graphql.json',
+        shopifyUrl,
         {
-          'X-Shopify-Access-Token': process.env.SHOPIFY_ACCESS_TOKEN,
+          'X-Shopify-Access-Token': shopifyToken,
           'Content-Type': 'application/json',
         },
         true // forceNew = true to ensure fresh data
