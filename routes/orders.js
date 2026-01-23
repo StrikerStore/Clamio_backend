@@ -1773,15 +1773,14 @@ router.get('/grouped', async (req, res) => {
 });
 
 /**
- * @route   GET /api/orders/admin/all
- * @desc    Get all orders with vendor information for admin panel
+ * @route   GET /api/orders/admin/dashboard-stats
+ * @desc    Get dashboard statistics for admin panel (with optional filters)
  * @access  Admin/Superadmin only
  */
-router.get('/admin/all', authenticateBasicAuth, requireAdminOrSuperadmin, async (req, res) => {
-  console.log('🔵 ADMIN ORDERS REQUEST START');
+router.get('/admin/dashboard-stats', authenticateBasicAuth, requireAdminOrSuperadmin, async (req, res) => {
+  console.log('🔵 ADMIN DASHBOARD STATS REQUEST START');
   
   try {
-    // Load orders from MySQL
     const database = require('../config/database');
     await database.waitForMySQLInitialization();
     
@@ -1792,120 +1791,195 @@ router.get('/admin/all', authenticateBasicAuth, requireAdminOrSuperadmin, async 
       });
     }
     
-    // Get date filter from utility table (same as sync uses)
+    // Get date filter from utility table
     let numberOfDays = 60; // default
     try {
       const daysValue = await database.getUtilityParameter('number_of_day_of_order_include');
       if (daysValue) {
         numberOfDays = parseInt(daysValue, 10);
-        console.log(`📅 Using ${numberOfDays} days from utility configuration for frontend filter`);
-      } else {
-        console.log(`⚠️ Utility parameter not found, using default: ${numberOfDays} days`);
       }
     } catch (dbError) {
-      console.log(`⚠️ Could not fetch utility parameter, using default: ${numberOfDays} days`, dbError.message);
+      console.log(`⚠️ Could not fetch utility parameter, using default: ${numberOfDays} days`);
     }
     
     // Calculate cutoff date
     const cutoffDate = new Date();
     cutoffDate.setDate(cutoffDate.getDate() - numberOfDays);
-    cutoffDate.setHours(0, 0, 0, 0); // Start of day
+    cutoffDate.setHours(0, 0, 0, 0);
     
-    console.log(`📅 Filtering orders from last ${numberOfDays} days (since ${cutoffDate.toISOString()})`);
+    // Extract filter parameters from query
+    const search = req.query.search || '';
+    const dateFrom = req.query.dateFrom;
+    const dateTo = req.query.dateTo;
+    const status = req.query.status || 'all';
+    const vendor = req.query.vendor;
+    const store = req.query.store;
+    const showInactiveStores = req.query.showInactiveStores === 'true';
     
-    // Pass cutoffDate to getAllOrders to filter at SQL level (more efficient)
-    const orders = await database.getAllOrders(cutoffDate);
-    console.log(`📦 Orders loaded from MySQL (with ${numberOfDays}-day date filter): ${orders.length}`);
+    console.log('📊 Admin Dashboard Stats params:', { search, dateFrom, dateTo, status, vendor, store });
     
-    const allUsers = await database.getAllUsers();
-    const vendors = allUsers.filter(user => user.role === 'vendor');
-    console.log('👥 Vendors loaded from MySQL:', vendors.length);
-    
-    // Create vendor lookup map
-    const vendorMap = {};
-    vendors.forEach(vendor => {
-      vendorMap[vendor.warehouseId] = {
-        name: vendor.name,
-        email: vendor.email,
-        phone: vendor.phone,
-        status: vendor.status || 'inactive',
-      };
+    // Get stats from database
+    const stats = await database.getAdminDashboardStats({
+      search,
+      dateFrom,
+      dateTo,
+      status,
+      vendor,
+      store,
+      showInactiveStores,
+      cutoffDate
     });
     
-    // Process orders and add vendor information
-    const rowsNeedingFix = [];
-    const processedOrders = orders.map((order, idx) => {
-      const vendorInfo = order.claimed_by ? vendorMap[order.claimed_by] : null;
-      const vendorIsActive = vendorInfo && String(vendorInfo.status).toLowerCase() === 'active';
-      let status = order.status || 'unclaimed';
-      let vendorName = vendorInfo ? vendorInfo.name : (order.claimed_by ? order.claimed_by : 'Unclaimed');
-
-      // If order is claimed but vendor is missing or inactive, treat as unclaimed and queue a fix
-      if ((order.claimed_by && !vendorIsActive) && status !== 'unclaimed') {
-        status = 'unclaimed';
-        vendorName = 'Unclaimed';
-        rowsNeedingFix.push(idx);
-      }
-
-      return {
-        unique_id: order.unique_id,
-        order_id: order.order_id,
-        customer_name: order.customer_name || order.customer || 'N/A',
-        vendor_name: vendorName,
-        product_name: order.product_name || order.product || 'N/A',
-        product_code: order.product_code || order.sku || 'N/A',
-        quantity: order.quantity || '1',
-        status,
-        value: order.value || order.price || order.selling_price || '0',
-        priority: order.priority || 'medium',
-        created_at: order.created_at || order.order_date || 'N/A',
-        claimed_at: order.claimed_at || null,
-        claimed_by: order.claimed_by || null,
-        image: order.product_image || order.image || '/placeholder.svg',
-        store_name: order.store_name || null,
-        store_status: order.store_status || 'active',
-        account_code: order.account_code || null,
-        awb: order.awb || null
-      };
-    });
-
-    // Persist fixes back to MySQL if necessary
-    if (rowsNeedingFix.length > 0) {
-      const database = require('../config/database');
-      for (const idx of rowsNeedingFix) {
-        const order = orders[idx];
-        try {
-          await database.updateOrder(order.unique_id, {
-            status: 'unclaimed',
-            claimed_by: '',
-            claimed_at: null
-          });
-        } catch (error) {
-          console.error(`❌ Failed to update order ${order.unique_id}:`, error.message);
-        }
-      }
-      console.log(`🧹 Cleaned ${rowsNeedingFix.length} orders claimed by missing/inactive vendors`);
-    }
+    console.log('✅ ADMIN DASHBOARD STATS SUCCESS');
+    console.log('  - Total:', stats.totalOrders);
+    console.log('  - Claimed:', stats.claimedOrders);
+    console.log('  - Unclaimed:', stats.unclaimedOrders);
     
-    console.log('🟢 ADMIN ORDERS SUCCESS');
-    console.log('  - Processed orders:', processedOrders.length);
-    
-    return res.status(200).json({ 
-      success: true, 
-      data: { 
-        orders: processedOrders,
-        totalOrders: processedOrders.length,
-        claimedOrders: processedOrders.filter(o => o.status === 'claimed').length,
-        unclaimedOrders: processedOrders.filter(o => o.status === 'unclaimed' && o.store_status === 'active').length
-      } 
+    return res.status(200).json({
+      success: true,
+      data: stats
     });
     
   } catch (error) {
-    console.log('💥 ADMIN ORDERS ERROR:', error.message);
-    return res.status(500).json({ 
-      success: false, 
-      message: 'Failed to fetch orders for admin panel', 
-      error: error.message 
+    console.error('💥 ADMIN DASHBOARD STATS ERROR:', error.message);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch admin dashboard stats',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * @route   GET /api/orders/admin/all
+ * @desc    Get paginated orders with vendor information for admin panel
+ * @access  Admin/Superadmin only
+ */
+router.get('/admin/all', authenticateBasicAuth, requireAdminOrSuperadmin, async (req, res) => {
+  console.log('🔵 ADMIN ORDERS REQUEST START');
+  
+  try {
+    const database = require('../config/database');
+    await database.waitForMySQLInitialization();
+    
+    if (!database.isMySQLAvailable()) {
+      return res.status(500).json({
+        success: false,
+        message: 'Database connection not available'
+      });
+    }
+    
+    // Get date filter from utility table
+    let numberOfDays = 60; // default
+    try {
+      const daysValue = await database.getUtilityParameter('number_of_day_of_order_include');
+      if (daysValue) {
+        numberOfDays = parseInt(daysValue, 10);
+        console.log(`📅 Using ${numberOfDays} days from utility configuration`);
+      }
+    } catch (dbError) {
+      console.log(`⚠️ Could not fetch utility parameter, using default: ${numberOfDays} days`);
+    }
+    
+    // Calculate cutoff date
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - numberOfDays);
+    cutoffDate.setHours(0, 0, 0, 0);
+    
+    // Extract pagination and filter parameters
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 50;
+    const search = req.query.search || '';
+    const dateFrom = req.query.dateFrom;
+    const dateTo = req.query.dateTo;
+    const status = req.query.status || 'all';
+    const vendor = req.query.vendor;
+    const store = req.query.store;
+    const showInactiveStores = req.query.showInactiveStores === 'true';
+    
+    console.log('📄 Admin Orders pagination params:', { page, limit, search, dateFrom, dateTo, status, vendor, store });
+    
+    // Calculate offset
+    const offset = (page - 1) * limit;
+    
+    // Use paginated query
+    const result = await database.getAdminOrdersPaginated({
+      search,
+      dateFrom,
+      dateTo,
+      status,
+      vendor,
+      store,
+      showInactiveStores,
+      limit,
+      offset,
+      cutoffDate
+    });
+    
+    const paginatedOrders = result.orders;
+    const totalCount = result.totalCount;
+    const totalQuantity = result.totalQuantity;
+    
+    // Count unique orders in the paginated result (not rows - one order can have multiple products)
+    const uniqueOrdersReturned = new Set(paginatedOrders.map(o => o.unique_id)).size;
+    const hasMore = (offset + uniqueOrdersReturned) < totalCount;
+    
+    console.log('📊 Admin Orders pagination result:', {
+      total: totalCount,
+      totalQuantity: totalQuantity,
+      page: page,
+      limit: limit,
+      returned: paginatedOrders.length,
+      uniqueOrdersReturned: uniqueOrdersReturned,
+      hasMore: hasMore
+    });
+    
+    // Process orders (format for frontend)
+    const processedOrders = paginatedOrders.map(order => ({
+      unique_id: order.unique_id,
+      order_id: order.order_id,
+      customer_name: order.customer_name || order.customer || 'N/A',
+      vendor_name: order.vendor_name || (order.claimed_by ? order.claimed_by : 'Unclaimed'),
+      product_name: order.product_name || order.product || 'N/A',
+      product_code: order.product_code || order.sku || 'N/A',
+      quantity: order.quantity || '1',
+      status: order.status || 'unclaimed',
+      value: order.value || order.price || order.selling_price || '0',
+      priority: order.priority || 'medium',
+      created_at: order.created_at || order.order_date || 'N/A',
+      claimed_at: order.claimed_at || null,
+      claimed_by: order.claimed_by || null,
+      image: order.product_image || order.image || '/placeholder.svg',
+      store_name: order.store_name || null,
+      store_status: order.store_status || 'active',
+      account_code: order.account_code || null,
+      awb: order.awb || null
+    }));
+    
+    console.log('✅ ADMIN ORDERS SUCCESS');
+    console.log('  - Processed orders:', processedOrders.length);
+    
+    return res.status(200).json({
+      success: true,
+      data: {
+        orders: processedOrders,
+        pagination: {
+          page: page,
+          limit: limit,
+          total: totalCount,
+          totalQuantity: totalQuantity,
+          hasMore: hasMore,
+          returnedCount: processedOrders.length
+        }
+      }
+    });
+    
+  } catch (error) {
+    console.error('💥 ADMIN ORDERS ERROR:', error.message);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch orders for admin panel',
+      error: error.message
     });
   }
 });

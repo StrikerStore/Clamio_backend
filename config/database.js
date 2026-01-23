@@ -1686,12 +1686,16 @@ class Database {
    * @returns {Promise<void>}
    */
   async reorderCarrierPriorities(carriers, accountCode = null) {
-    if (!this.mysqlConnection) {
+    if (!this.mysqlConnection && !this.mysqlPool) {
       throw new Error('MySQL connection not available');
     }
 
+    // Get a connection from the pool for transaction support
+    const db = this.mysqlPool || this.mysqlConnection;
+    const connection = await db.getConnection();
+
     try {
-      await this.mysqlConnection.beginTransaction();
+      await connection.beginTransaction();
 
       // Update priorities sequentially starting from 1
       for (let i = 0; i < carriers.length; i++) {
@@ -1704,18 +1708,20 @@ class Database {
         }
 
         // Update with both carrier_id and account_code to ensure store-specific update
-        await this.mysqlConnection.execute(
+        await connection.execute(
           'UPDATE carriers SET priority = ? WHERE carrier_id = ? AND account_code = ?',
           [newPriority, carrier.carrier_id, carrierAccountCode]
         );
       }
 
-      await this.mysqlConnection.commit();
+      await connection.commit();
       console.log(`✅ Reordered ${carriers.length} carrier priorities sequentially${accountCode ? ` for store ${accountCode}` : ''}`);
     } catch (error) {
-      await this.mysqlConnection.rollback();
+      await connection.rollback();
       console.error('Error reordering carrier priorities:', error);
       throw new Error('Failed to reorder carrier priorities');
+    } finally {
+      connection.release();
     }
   }
 
@@ -2054,6 +2060,36 @@ class Database {
     } catch (error) {
       console.error('Error getting all users:', error);
       throw new Error('Failed to get users from database');
+    }
+  }
+
+  /**
+   * Get vendor statistics (counts only, optimized for performance)
+   * @returns {Promise<Object>} Object with vendor counts
+   */
+  async getVendorStats() {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      // Execute both queries in parallel for better performance
+      const [totalResult, activeResult] = await Promise.all([
+        this.mysqlConnection.execute(
+          "SELECT COUNT(*) as count FROM users WHERE role = 'vendor'"
+        ),
+        this.mysqlConnection.execute(
+          "SELECT COUNT(*) as count FROM users WHERE role = 'vendor' AND status = 'active'"
+        )
+      ]);
+
+      return {
+        totalVendors: parseInt(totalResult[0][0]?.count || 0),
+        activeVendors: parseInt(activeResult[0][0]?.count || 0)
+      };
+    } catch (error) {
+      console.error('Error getting vendor stats:', error);
+      throw new Error('Failed to get vendor stats from database');
     }
   }
 
@@ -3565,6 +3601,399 @@ class Database {
     } catch (error) {
       console.error('Error getting paginated orders:', error);
       throw new Error('Failed to get paginated orders from database');
+    }
+  }
+
+  /**
+   * Get admin orders with pagination, filtering, and search (optimized with LIMIT/OFFSET)
+   * @param {Object} options - Query options
+   * @param {string} options.search - Search term for order_id, product_name, product_code, customer_name
+   * @param {string} options.dateFrom - Start date (YYYY-MM-DD format)
+   * @param {string} options.dateTo - End date (YYYY-MM-DD format)
+   * @param {string} options.status - Filter by status ('all', 'claimed', 'unclaimed', or specific status)
+   * @param {string} options.vendor - Filter by vendor warehouse ID
+   * @param {string} options.store - Filter by store account code
+   * @param {boolean} options.showInactiveStores - Include orders from inactive stores (default: false)
+   * @param {number} options.limit - Number of records per page
+   * @param {number} options.offset - Number of records to skip
+   * @param {Date} options.cutoffDate - Only include orders after this date
+   * @returns {Promise<Object>} Object with orders array, totalCount, and totalQuantity
+   */
+  async getAdminOrdersPaginated(options = {}) {
+    const {
+      search = '',
+      dateFrom = null,
+      dateTo = null,
+      status = 'all',
+      vendor = null,
+      store = null,
+      showInactiveStores = false,
+      limit = 50,
+      offset = 0,
+      cutoffDate = null
+    } = options;
+
+    // Use pool if available (preferred for parallel execution), otherwise fall back to connection
+    const db = this.mysqlPool || this.mysqlConnection;
+    if (!db) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      // Build WHERE clause conditions (reusable for both COUNT and SELECT queries)
+      let whereConditions = '(o.is_in_new_order = 1 OR c.label_downloaded = 1)';
+      const params = [];
+      const countParams = [];
+      
+      // Apply cutoff date filter (for performance - only recent orders)
+      if (cutoffDate) {
+        whereConditions += ` AND o.order_date >= ?`;
+        const mysqlDate = cutoffDate.toISOString().slice(0, 19).replace('T', ' ');
+        params.push(mysqlDate);
+        countParams.push(mysqlDate);
+      }
+      
+      // Apply search filter (SQL LIKE for order_id, product_name, product_code, customer_name)
+      if (search && search.trim() !== '') {
+        const searchTerm = `%${search.trim()}%`;
+        whereConditions += ` AND (
+          o.order_id LIKE ? OR
+          o.product_name LIKE ? OR
+          o.product_code LIKE ? OR
+          o.customer_name LIKE ?
+        )`;
+        params.push(searchTerm, searchTerm, searchTerm, searchTerm);
+        countParams.push(searchTerm, searchTerm, searchTerm, searchTerm);
+      }
+      
+      // Apply date range filter
+      if (dateFrom || dateTo) {
+        if (dateFrom && dateTo) {
+          whereConditions += ` AND o.order_date >= ? AND o.order_date <= ?`;
+          const dateToEnd = dateTo + ' 23:59:59';
+          params.push(dateFrom, dateToEnd);
+          countParams.push(dateFrom, dateToEnd);
+        } else if (dateFrom) {
+          whereConditions += ` AND o.order_date >= ?`;
+          params.push(dateFrom);
+          countParams.push(dateFrom);
+        } else if (dateTo) {
+          whereConditions += ` AND o.order_date <= ?`;
+          const dateToEnd = dateTo + ' 23:59:59';
+          params.push(dateToEnd);
+          countParams.push(dateToEnd);
+        }
+      }
+      
+      // Apply status filter
+      if (status && status !== 'all') {
+        whereConditions += ` AND (
+          CASE 
+            WHEN l.current_shipment_status IS NOT NULL AND l.current_shipment_status != '' 
+            THEN l.current_shipment_status 
+            ELSE c.status 
+          END = ?
+        )`;
+        params.push(status);
+        countParams.push(status);
+      }
+      
+      // Apply vendor filter
+      if (vendor && vendor.trim() !== '') {
+        whereConditions += ` AND c.claimed_by = ?`;
+        params.push(vendor.trim());
+        countParams.push(vendor.trim());
+      }
+      
+      // Apply store filter
+      if (store && store.trim() !== '') {
+        whereConditions += ` AND o.account_code = ?`;
+        params.push(store.trim());
+        countParams.push(store.trim());
+      }
+      
+      // Filter inactive stores unless explicitly requested
+      if (!showInactiveStores) {
+        whereConditions += ` AND (s.status = 'active' OR s.status IS NULL)`;
+        // Note: OR s.status IS NULL handles edge case where store_info might not have a record
+      }
+      
+      // Build data query with LIMIT/OFFSET and vendor info
+      const dataQuery = `
+        SELECT 
+          o.*,
+          p.image as product_image,
+          c.status as claims_status,
+          c.claimed_by,
+          c.claimed_at,
+          c.last_claimed_by,
+          c.last_claimed_at,
+          c.clone_status,
+          c.cloned_order_id,
+          c.is_cloned_row,
+          c.label_downloaded,
+          l.label_url,
+          l.awb,
+          l.carrier_id,
+          l.carrier_name,
+          l.handover_at,
+          c.priority_carrier,
+          l.is_manifest,
+          l.manifest_id,
+          l.current_shipment_status,
+          l.is_handover,
+          s.store_name,
+          s.status as store_status,
+          u.name as vendor_name,
+          u.warehouseId as vendor_warehouse_id,
+          CASE 
+            WHEN l.current_shipment_status IS NOT NULL AND l.current_shipment_status != '' 
+            THEN l.current_shipment_status 
+            ELSE c.status 
+          END as status
+        FROM orders o
+        LEFT JOIN products p ON (
+          (REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id)
+          AND o.account_code = p.account_code
+        )
+        LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
+        LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
+        LEFT JOIN store_info s ON o.account_code = s.account_code
+        LEFT JOIN users u ON c.claimed_by = u.warehouseId
+        WHERE ${whereConditions}
+        ORDER BY o.order_date DESC, o.order_id, o.product_name
+        LIMIT ${parseInt(limit)} OFFSET ${parseInt(offset)}`;
+      
+      // Build COUNT query for total count and quantity
+      const countQuery = `
+        SELECT 
+          COUNT(DISTINCT o.unique_id) as total_count,
+          COALESCE(SUM(o.quantity), 0) as total_quantity
+        FROM orders o
+        LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
+        LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
+        LEFT JOIN store_info s ON o.account_code = s.account_code
+        WHERE ${whereConditions}`;
+      
+      // Execute COUNT query and data query in parallel using connection pool
+      const [countResult, dataResult] = await Promise.all([
+        db.execute(countQuery, countParams),
+        db.execute(dataQuery, params)
+      ]);
+      
+      const totalCount = parseInt(countResult[0][0]?.total_count || 0);
+      const totalQuantity = parseInt(countResult[0][0]?.total_quantity || 0);
+      const orders = dataResult[0];
+      
+      console.log(`📊 Admin Orders Paginated: Found ${totalCount} total orders, returning ${orders.length} orders (offset: ${offset}, limit: ${limit})`);
+      
+      return {
+        orders,
+        totalCount,
+        totalQuantity
+      };
+    } catch (error) {
+      console.error('Error getting admin paginated orders:', error);
+      throw new Error('Failed to get admin paginated orders from database');
+    }
+  }
+
+  /**
+   * Get admin dashboard statistics (total counts for cards)
+   * @param {Object} options - Filter options
+   * @param {string} options.search - Search term
+   * @param {string} options.dateFrom - Start date (YYYY-MM-DD format)
+   * @param {string} options.dateTo - End date (YYYY-MM-DD format)
+   * @param {string} options.status - Filter by status
+   * @param {string} options.vendor - Filter by vendor warehouse ID
+   * @param {string} options.store - Filter by store account code
+   * @param {boolean} options.showInactiveStores - Include inactive stores
+   * @param {Date} options.cutoffDate - Only include orders after this date
+   * @returns {Promise<Object>} Statistics object
+   */
+  async getAdminDashboardStats(options = {}) {
+    const {
+      search = '',
+      dateFrom = null,
+      dateTo = null,
+      status = 'all',
+      vendor = null,
+      store = null,
+      showInactiveStores = false,
+      cutoffDate = null
+    } = options;
+
+    // Use pool if available (preferred for parallel execution)
+    const db = this.mysqlPool || this.mysqlConnection;
+    if (!db) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      // Build WHERE clause conditions (same as pagination for consistency)
+      let whereConditions = '(o.is_in_new_order = 1 OR c.label_downloaded = 1)';
+      const params = [];
+      
+      // Apply cutoff date filter
+      if (cutoffDate) {
+        whereConditions += ` AND o.order_date >= ?`;
+        const mysqlDate = cutoffDate.toISOString().slice(0, 19).replace('T', ' ');
+        params.push(mysqlDate);
+      }
+      
+      // Apply search filter
+      if (search && search.trim() !== '') {
+        const searchTerm = `%${search.trim()}%`;
+        whereConditions += ` AND (
+          o.order_id LIKE ? OR
+          o.product_name LIKE ? OR
+          o.product_code LIKE ? OR
+          o.customer_name LIKE ?
+        )`;
+        params.push(searchTerm, searchTerm, searchTerm, searchTerm);
+      }
+      
+      // Apply date range filter
+      if (dateFrom || dateTo) {
+        if (dateFrom && dateTo) {
+          whereConditions += ` AND o.order_date >= ? AND o.order_date <= ?`;
+          const dateToEnd = dateTo + ' 23:59:59';
+          params.push(dateFrom, dateToEnd);
+        } else if (dateFrom) {
+          whereConditions += ` AND o.order_date >= ?`;
+          params.push(dateFrom);
+        } else if (dateTo) {
+          whereConditions += ` AND o.order_date <= ?`;
+          const dateToEnd = dateTo + ' 23:59:59';
+          params.push(dateToEnd);
+        }
+      }
+      
+      // Apply vendor filter
+      if (vendor && vendor.trim() !== '') {
+        whereConditions += ` AND c.claimed_by = ?`;
+        params.push(vendor.trim());
+      }
+      
+      // Apply store filter
+      if (store && store.trim() !== '') {
+        whereConditions += ` AND o.account_code = ?`;
+        params.push(store.trim());
+      }
+      
+      // Filter inactive stores unless explicitly requested
+      if (!showInactiveStores) {
+        whereConditions += ` AND (s.status = 'active' OR s.status IS NULL)`;
+        // Note: OR s.status IS NULL handles edge case where store_info might not have a record
+      }
+      
+      // If status filter is applied, we calculate stats for that status only
+      // Otherwise, calculate all stats in parallel
+      if (status && status !== 'all') {
+        whereConditions += ` AND (
+          CASE 
+            WHEN l.current_shipment_status IS NOT NULL AND l.current_shipment_status != '' 
+            THEN l.current_shipment_status 
+            ELSE c.status 
+          END = ?
+        )`;
+        params.push(status);
+        
+        // Single query for filtered status
+        const query = `
+          SELECT 
+            COUNT(DISTINCT o.unique_id) as total_count,
+            COALESCE(SUM(o.quantity), 0) as total_quantity
+          FROM orders o
+          LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
+          LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
+          LEFT JOIN store_info s ON o.account_code = s.account_code
+          WHERE ${whereConditions}`;
+        
+        const [result] = await db.execute(query, params);
+        const totalCount = parseInt(result[0]?.total_count || 0);
+        const totalQuantity = parseInt(result[0]?.total_quantity || 0);
+        
+        return {
+          totalOrders: totalCount,
+          totalQuantity: totalQuantity,
+          claimedOrders: status === 'claimed' ? totalCount : 0,
+          unclaimedOrders: status === 'unclaimed' ? totalCount : 0,
+          hasFilters: !!(search || dateFrom || dateTo || vendor || store || (status !== 'all'))
+        };
+      }
+      
+      // Calculate all stats in parallel (total, claimed, unclaimed)
+      const totalQuery = `
+        SELECT 
+          COUNT(DISTINCT o.unique_id) as total_count,
+          COALESCE(SUM(o.quantity), 0) as total_quantity
+        FROM orders o
+        LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
+        LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
+        LEFT JOIN store_info s ON o.account_code = s.account_code
+        WHERE ${whereConditions}`;
+      
+      const claimedQuery = `
+        SELECT 
+          COUNT(DISTINCT o.unique_id) as total_count,
+          COALESCE(SUM(o.quantity), 0) as total_quantity
+        FROM orders o
+        LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
+        LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
+        LEFT JOIN store_info s ON o.account_code = s.account_code
+        WHERE ${whereConditions}
+        AND (
+          CASE 
+            WHEN l.current_shipment_status IS NOT NULL AND l.current_shipment_status != '' 
+            THEN l.current_shipment_status 
+            ELSE c.status 
+          END = 'claimed'
+        )`;
+      
+      const unclaimedQuery = `
+        SELECT 
+          COUNT(DISTINCT o.unique_id) as total_count,
+          COALESCE(SUM(o.quantity), 0) as total_quantity
+        FROM orders o
+        LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
+        LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
+        LEFT JOIN store_info s ON o.account_code = s.account_code
+        WHERE ${whereConditions}
+        AND (
+          CASE 
+            WHEN l.current_shipment_status IS NOT NULL AND l.current_shipment_status != '' 
+            THEN l.current_shipment_status 
+            ELSE c.status 
+          END = 'unclaimed'
+        )`;
+      
+      // Execute all 3 queries in parallel using connection pool
+      const [totalResult, claimedResult, unclaimedResult] = await Promise.all([
+        db.execute(totalQuery, params),
+        db.execute(claimedQuery, params),
+        db.execute(unclaimedQuery, params)
+      ]);
+      
+      const totalCount = parseInt(totalResult[0][0]?.total_count || 0);
+      const totalQuantity = parseInt(totalResult[0][0]?.total_quantity || 0);
+      const claimedCount = parseInt(claimedResult[0][0]?.total_count || 0);
+      const unclaimedCount = parseInt(unclaimedResult[0][0]?.total_count || 0);
+      
+      console.log(`📊 Admin Dashboard Stats: Total=${totalCount}, Claimed=${claimedCount}, Unclaimed=${unclaimedCount}`);
+      
+      return {
+        totalOrders: totalCount,
+        totalQuantity: totalQuantity,
+        claimedOrders: claimedCount,
+        unclaimedOrders: unclaimedCount,
+        hasFilters: !!(search || dateFrom || dateTo || vendor || store)
+      };
+    } catch (error) {
+      console.error('Error getting admin dashboard stats:', error);
+      throw new Error('Failed to get admin dashboard stats from database');
     }
   }
 

@@ -54,6 +54,33 @@ router.post('/vendor', requireAdminOrSuperadmin, (req, res, next) => {
 }, validateUserRegistration, userController.createUser);
 
 /**
+ * @route   GET /api/users/vendors-stats
+ * @desc    Get lightweight vendor statistics (counts only) for dashboard cards
+ * @access  Admin/Superadmin
+ */
+router.get('/vendors-stats', requireAdminOrSuperadmin, async (req, res) => {
+  console.log('📊 GET VENDOR STATS REQUEST START');
+  
+  try {
+    // Get vendor counts from database (optimized - just COUNT queries)
+    const stats = await database.getVendorStats();
+    
+    console.log('✅ VENDOR STATS SUCCESS:', stats);
+    return res.json({ 
+      success: true, 
+      data: stats 
+    });
+  } catch (err) {
+    console.error('❌ VENDOR STATS ERROR:', err);
+    return res.status(500).json({ 
+      success: false, 
+      message: 'Failed to get vendor statistics', 
+      error: err.message 
+    });
+  }
+});
+
+/**
  * @route   GET /api/users/vendors-report
  * @desc    Get enriched vendor list with stats for admin panel
  * @access  Admin/Superadmin
