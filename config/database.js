@@ -3685,31 +3685,62 @@ class Database {
         }
       }
       
-      // Apply status filter
+      // Apply status filter (supports single status or array of statuses)
       if (status && status !== 'all') {
-        whereConditions += ` AND (
-          CASE 
-            WHEN l.current_shipment_status IS NOT NULL AND l.current_shipment_status != '' 
-            THEN l.current_shipment_status 
-            ELSE c.status 
-          END = ?
-        )`;
-        params.push(status);
-        countParams.push(status);
+        const statusArray = Array.isArray(status) ? status : [status];
+        if (statusArray.length > 0) {
+          const placeholders = statusArray.map(() => '?').join(',');
+          whereConditions += ` AND (
+            CASE 
+              WHEN l.current_shipment_status IS NOT NULL AND l.current_shipment_status != '' 
+              THEN l.current_shipment_status 
+              ELSE c.status 
+            END IN (${placeholders})
+          )`;
+          params.push(...statusArray);
+          countParams.push(...statusArray);
+        }
       }
       
-      // Apply vendor filter
-      if (vendor && vendor.trim() !== '') {
-        whereConditions += ` AND c.claimed_by = ?`;
-        params.push(vendor.trim());
-        countParams.push(vendor.trim());
+      // Apply vendor filter (supports single vendor or array of vendors, including unclaimed)
+      if (vendor) {
+        const vendorArray = Array.isArray(vendor) ? vendor : [vendor];
+        const validVendors = vendorArray.filter(v => v && typeof v === 'string' && v.trim() !== '');
+        
+        if (validVendors.length > 0) {
+          const hasUnclaimed = validVendors.includes('__UNCLAIMED__');
+          const warehouseIds = validVendors.filter(v => v !== '__UNCLAIMED__');
+          
+          if (hasUnclaimed && warehouseIds.length > 0) {
+            // Both unclaimed and specific vendors
+            const placeholders = warehouseIds.map(() => '?').join(',');
+            whereConditions += ` AND (c.claimed_by IS NULL OR c.claimed_by = '' OR c.claimed_by IN (${placeholders}))`;
+            params.push(...warehouseIds);
+            countParams.push(...warehouseIds);
+          } else if (hasUnclaimed) {
+            // Only unclaimed
+            whereConditions += ` AND (c.claimed_by IS NULL OR c.claimed_by = '')`;
+          } else {
+            // Only specific vendors
+            const placeholders = warehouseIds.map(() => '?').join(',');
+            whereConditions += ` AND c.claimed_by IN (${placeholders})`;
+            params.push(...warehouseIds);
+            countParams.push(...warehouseIds);
+          }
+        }
       }
       
-      // Apply store filter
-      if (store && store.trim() !== '') {
-        whereConditions += ` AND o.account_code = ?`;
-        params.push(store.trim());
-        countParams.push(store.trim());
+      // Apply store filter (supports single store or array of stores)
+      if (store) {
+        const storeArray = Array.isArray(store) ? store : [store];
+        const validStores = storeArray.filter(s => s && typeof s === 'string' && s.trim() !== '');
+        
+        if (validStores.length > 0) {
+          const placeholders = validStores.map(() => '?').join(',');
+          whereConditions += ` AND o.account_code IN (${placeholders})`;
+          params.push(...validStores);
+          countParams.push(...validStores);
+        }
       }
       
       // Filter inactive stores unless explicitly requested
@@ -3750,7 +3781,16 @@ class Database {
             WHEN l.current_shipment_status IS NOT NULL AND l.current_shipment_status != '' 
             THEN l.current_shipment_status 
             ELSE c.status 
-          END as status
+          END as status,
+          CASE
+            WHEN ci.billing_firstname IS NOT NULL AND ci.billing_firstname != '' 
+            THEN TRIM(CONCAT(COALESCE(ci.billing_firstname, ''), ' ', COALESCE(ci.billing_lastname, '')))
+            WHEN ci.shipping_firstname IS NOT NULL AND ci.shipping_firstname != ''
+            THEN TRIM(CONCAT(COALESCE(ci.shipping_firstname, ''), ' ', COALESCE(ci.shipping_lastname, '')))
+            WHEN o.customer_name IS NOT NULL AND o.customer_name != ''
+            THEN o.customer_name
+            ELSE NULL
+          END as customer_name_from_info
         FROM orders o
         LEFT JOIN products p ON (
           (REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
@@ -3762,6 +3802,7 @@ class Database {
         LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
         LEFT JOIN store_info s ON o.account_code = s.account_code
         LEFT JOIN users u ON c.claimed_by = u.warehouseId
+        LEFT JOIN customer_info ci ON o.order_id = ci.order_id AND o.account_code = ci.account_code
         WHERE ${whereConditions}
         ORDER BY o.order_date DESC, o.order_id, o.product_name
         LIMIT ${parseInt(limit)} OFFSET ${parseInt(offset)}`;
@@ -3871,16 +3912,42 @@ class Database {
         }
       }
       
-      // Apply vendor filter
-      if (vendor && vendor.trim() !== '') {
-        whereConditions += ` AND c.claimed_by = ?`;
-        params.push(vendor.trim());
+      // Apply vendor filter (supports single vendor or array of vendors, including unclaimed)
+      if (vendor) {
+        const vendorArray = Array.isArray(vendor) ? vendor : [vendor];
+        const validVendors = vendorArray.filter(v => v && typeof v === 'string' && v.trim() !== '');
+        
+        if (validVendors.length > 0) {
+          const hasUnclaimed = validVendors.includes('__UNCLAIMED__');
+          const warehouseIds = validVendors.filter(v => v !== '__UNCLAIMED__');
+          
+          if (hasUnclaimed && warehouseIds.length > 0) {
+            // Both unclaimed and specific vendors
+            const placeholders = warehouseIds.map(() => '?').join(',');
+            whereConditions += ` AND (c.claimed_by IS NULL OR c.claimed_by = '' OR c.claimed_by IN (${placeholders}))`;
+            params.push(...warehouseIds);
+          } else if (hasUnclaimed) {
+            // Only unclaimed
+            whereConditions += ` AND (c.claimed_by IS NULL OR c.claimed_by = '')`;
+          } else {
+            // Only specific vendors
+            const placeholders = warehouseIds.map(() => '?').join(',');
+            whereConditions += ` AND c.claimed_by IN (${placeholders})`;
+            params.push(...warehouseIds);
+          }
+        }
       }
       
-      // Apply store filter
-      if (store && store.trim() !== '') {
-        whereConditions += ` AND o.account_code = ?`;
-        params.push(store.trim());
+      // Apply store filter (supports single store or array of stores)
+      if (store) {
+        const storeArray = Array.isArray(store) ? store : [store];
+        const validStores = storeArray.filter(s => s && typeof s === 'string' && s.trim() !== '');
+        
+        if (validStores.length > 0) {
+          const placeholders = validStores.map(() => '?').join(',');
+          whereConditions += ` AND o.account_code IN (${placeholders})`;
+          params.push(...validStores);
+        }
       }
       
       // Filter inactive stores unless explicitly requested
@@ -3889,40 +3956,84 @@ class Database {
         // Note: OR s.status IS NULL handles edge case where store_info might not have a record
       }
       
-      // If status filter is applied, we calculate stats for that status only
+      // If status filter is applied, we calculate stats for those statuses
       // Otherwise, calculate all stats in parallel
       if (status && status !== 'all') {
-        whereConditions += ` AND (
-          CASE 
-            WHEN l.current_shipment_status IS NOT NULL AND l.current_shipment_status != '' 
-            THEN l.current_shipment_status 
-            ELSE c.status 
-          END = ?
-        )`;
-        params.push(status);
-        
-        // Single query for filtered status
-        const query = `
-          SELECT 
-            COUNT(DISTINCT o.unique_id) as total_count,
-            COALESCE(SUM(o.quantity), 0) as total_quantity
-          FROM orders o
-          LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
-          LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
-          LEFT JOIN store_info s ON o.account_code = s.account_code
-          WHERE ${whereConditions}`;
-        
-        const [result] = await db.execute(query, params);
-        const totalCount = parseInt(result[0]?.total_count || 0);
-        const totalQuantity = parseInt(result[0]?.total_quantity || 0);
-        
-        return {
-          totalOrders: totalCount,
-          totalQuantity: totalQuantity,
-          claimedOrders: status === 'claimed' ? totalCount : 0,
-          unclaimedOrders: status === 'unclaimed' ? totalCount : 0,
-          hasFilters: !!(search || dateFrom || dateTo || vendor || store || (status !== 'all'))
-        };
+        const statusArray = Array.isArray(status) ? status : [status];
+        if (statusArray.length > 0) {
+          const placeholders = statusArray.map(() => '?').join(',');
+          const statusCondition = ` AND (
+            CASE 
+              WHEN l.current_shipment_status IS NOT NULL AND l.current_shipment_status != '' 
+              THEN l.current_shipment_status 
+              ELSE c.status 
+            END IN (${placeholders})
+          )`;
+          
+          // Total query with status filter
+          const totalQuery = `
+            SELECT 
+              COUNT(DISTINCT o.unique_id) as total_count,
+              COALESCE(SUM(o.quantity), 0) as total_quantity
+            FROM orders o
+            LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
+            LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
+            LEFT JOIN store_info s ON o.account_code = s.account_code
+            WHERE ${whereConditions}${statusCondition}`;
+          
+          const totalParams = [...params, ...statusArray];
+          const [totalResult] = await db.execute(totalQuery, totalParams);
+          const totalCount = parseInt(totalResult[0]?.total_count || 0);
+          const totalQuantity = parseInt(totalResult[0]?.total_quantity || 0);
+          
+          // Calculate claimed and unclaimed counts if those statuses are in the filter
+          let claimedCount = 0;
+          let unclaimedCount = 0;
+          
+          if (statusArray.includes('claimed')) {
+            const claimedQuery = `
+              SELECT COUNT(DISTINCT o.unique_id) as total_count
+              FROM orders o
+              LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
+              LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
+              LEFT JOIN store_info s ON o.account_code = s.account_code
+              WHERE ${whereConditions} AND (
+                CASE 
+                  WHEN l.current_shipment_status IS NOT NULL AND l.current_shipment_status != '' 
+                  THEN l.current_shipment_status 
+                  ELSE c.status 
+                END = 'claimed'
+              )`;
+            const [claimedResult] = await db.execute(claimedQuery, params);
+            claimedCount = parseInt(claimedResult[0]?.total_count || 0);
+          }
+          
+          if (statusArray.includes('unclaimed')) {
+            const unclaimedQuery = `
+              SELECT COUNT(DISTINCT o.unique_id) as total_count
+              FROM orders o
+              LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
+              LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
+              LEFT JOIN store_info s ON o.account_code = s.account_code
+              WHERE ${whereConditions} AND (
+                CASE 
+                  WHEN l.current_shipment_status IS NOT NULL AND l.current_shipment_status != '' 
+                  THEN l.current_shipment_status 
+                  ELSE c.status 
+                END = 'unclaimed'
+              )`;
+            const [unclaimedResult] = await db.execute(unclaimedQuery, params);
+            unclaimedCount = parseInt(unclaimedResult[0]?.total_count || 0);
+          }
+          
+          return {
+            totalOrders: totalCount,
+            totalQuantity: totalQuantity,
+            claimedOrders: claimedCount,
+            unclaimedOrders: unclaimedCount,
+            hasFilters: !!(search || dateFrom || dateTo || vendor || store || (statusArray.length > 0))
+          };
+        }
       }
       
       // Calculate all stats in parallel (total, claimed, unclaimed)
@@ -5075,29 +5186,55 @@ class Database {
       }
       const accountCode = orderData[0].account_code;
 
-      // Clear existing tracking data for this order to avoid duplicates (with account_code for store isolation)
-      await this.mysqlConnection.execute(
-        'DELETE FROM order_tracking WHERE order_id = ? AND account_code = ?',
-        [orderId, accountCode]
-      );
-
-      // Insert new tracking events
-      for (const event of trackingEvents) {
-        await this.mysqlConnection.execute(`
-          INSERT INTO order_tracking 
-          (order_id, order_type, shipment_status, timestamp, ndr_reason, account_code)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `, [
-          orderId,
-          orderType,
-          event.name || 'Unknown',
-          event.time || new Date(),
-          event.ndr_reason || null,
-          accountCode
-        ]);
+      // Get the latest/newest status from tracking events (should be only one now)
+      const latestEvent = trackingEvents[trackingEvents.length - 1];
+      if (!latestEvent || !latestEvent.name) {
+        throw new Error('No valid tracking event found');
       }
+
+      const newStatus = latestEvent.name;
+      const newTimestamp = latestEvent.time || new Date();
+
+      // Check the latest status in order_tracking for this order
+      const [existingTracking] = await this.mysqlConnection.execute(`
+        SELECT id, shipment_status, timestamp, updated_at
+        FROM order_tracking 
+        WHERE order_id = ? AND account_code = ?
+        ORDER BY timestamp DESC, id DESC
+        LIMIT 1
+      `, [orderId, accountCode]);
+
+      if (existingTracking.length > 0) {
+        const latestExistingStatus = existingTracking[0].shipment_status;
+        
+        // If status is the same, just update the updated_at timestamp
+        if (latestExistingStatus === newStatus) {
+          await this.mysqlConnection.execute(`
+            UPDATE order_tracking 
+            SET updated_at = NOW(), timestamp = ?
+            WHERE id = ?
+          `, [newTimestamp, existingTracking[0].id]);
+          
+          console.log(`✅ Updated existing tracking record (same status: ${newStatus}) for order ${orderId}`);
+          return;
+        }
+      }
+
+      // Status is different or no existing record - insert new row
+      await this.mysqlConnection.execute(`
+        INSERT INTO order_tracking 
+        (order_id, order_type, shipment_status, timestamp, ndr_reason, account_code)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `, [
+        orderId,
+        orderType,
+        newStatus,
+        newTimestamp,
+        latestEvent.ndr_reason || null,
+        accountCode
+      ]);
       
-      console.log(`✅ Stored ${trackingEvents.length} tracking events for order ${orderId}`);
+      console.log(`✅ Stored new tracking event (status: ${newStatus}) for order ${orderId}`);
       
     } catch (error) {
       console.error(`❌ Error storing tracking data for order ${orderId}:`, error);

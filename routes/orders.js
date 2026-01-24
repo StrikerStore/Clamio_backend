@@ -1811,9 +1811,28 @@ router.get('/admin/dashboard-stats', authenticateBasicAuth, requireAdminOrSupera
     const search = req.query.search || '';
     const dateFrom = req.query.dateFrom;
     const dateTo = req.query.dateTo;
-    const status = req.query.status || 'all';
-    const vendor = req.query.vendor;
-    const store = req.query.store;
+    // Handle status as array or single value
+    let status = req.query.status || 'all';
+    if (Array.isArray(status)) {
+      status = status.filter(s => s && s !== 'all'); // Remove 'all' and empty values
+      status = status.length > 0 ? status : 'all';
+    }
+    // Handle vendor as array or single value
+    let vendor = req.query.vendor;
+    if (Array.isArray(vendor)) {
+      vendor = vendor.filter(v => v && typeof v === 'string' && v.trim() !== ''); // Remove empty values
+      vendor = vendor.length > 0 ? vendor : null;
+    } else if (vendor && typeof vendor === 'string' && vendor.trim() === '') {
+      vendor = null; // Convert empty string to null
+    }
+    // Handle store as array or single value
+    let store = req.query.store;
+    if (Array.isArray(store)) {
+      store = store.filter(s => s && typeof s === 'string' && s.trim() !== ''); // Remove empty values
+      store = store.length > 0 ? store : null;
+    } else if (store && typeof store === 'string' && store.trim() === '') {
+      store = null; // Convert empty string to null
+    }
     const showInactiveStores = req.query.showInactiveStores === 'true';
     
     console.log('📊 Admin Dashboard Stats params:', { search, dateFrom, dateTo, status, vendor, store });
@@ -1892,9 +1911,28 @@ router.get('/admin/all', authenticateBasicAuth, requireAdminOrSuperadmin, async 
     const search = req.query.search || '';
     const dateFrom = req.query.dateFrom;
     const dateTo = req.query.dateTo;
-    const status = req.query.status || 'all';
-    const vendor = req.query.vendor;
-    const store = req.query.store;
+    // Handle status as array or single value
+    let status = req.query.status || 'all';
+    if (Array.isArray(status)) {
+      status = status.filter(s => s && s !== 'all'); // Remove 'all' and empty values
+      status = status.length > 0 ? status : 'all';
+    }
+    // Handle vendor as array or single value
+    let vendor = req.query.vendor;
+    if (Array.isArray(vendor)) {
+      vendor = vendor.filter(v => v && typeof v === 'string' && v.trim() !== ''); // Remove empty values
+      vendor = vendor.length > 0 ? vendor : null;
+    } else if (vendor && typeof vendor === 'string' && vendor.trim() === '') {
+      vendor = null; // Convert empty string to null
+    }
+    // Handle store as array or single value
+    let store = req.query.store;
+    if (Array.isArray(store)) {
+      store = store.filter(s => s && typeof s === 'string' && s.trim() !== ''); // Remove empty values
+      store = store.length > 0 ? store : null;
+    } else if (store && typeof store === 'string' && store.trim() === '') {
+      store = null; // Convert empty string to null
+    }
     const showInactiveStores = req.query.showInactiveStores === 'true';
     
     console.log('📄 Admin Orders pagination params:', { page, limit, search, dateFrom, dateTo, status, vendor, store });
@@ -1938,7 +1976,7 @@ router.get('/admin/all', authenticateBasicAuth, requireAdminOrSuperadmin, async 
     const processedOrders = paginatedOrders.map(order => ({
       unique_id: order.unique_id,
       order_id: order.order_id,
-      customer_name: order.customer_name || order.customer || 'N/A',
+      customer_name: order.customer_name_from_info || order.customer_name || order.customer || 'N/A',
       vendor_name: order.vendor_name || (order.claimed_by ? order.claimed_by : 'Unclaimed'),
       product_name: order.product_name || order.product || 'N/A',
       product_code: order.product_code || order.sku || 'N/A',

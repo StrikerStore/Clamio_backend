@@ -217,38 +217,55 @@ class OrderTrackingService {
         return { success: true, message: 'Invalid tracking status data' };
       }
 
-      // Determine actual order type based on latest status
-      const actualOrderType = this.determineOrderType(trackingData);
+      // Normalize all tracking events before storing (for order_tracking table)
+      const normalizedTrackingEvents = trackingData.shipment_status_history.map(event => {
+        if (event && event.name) {
+          return {
+            ...event,
+            name: this.normalizeShipmentStatus(event.name)
+          };
+        }
+        return event;
+      });
+
+      // Determine actual order type based on latest status (using normalized status)
+      const actualOrderType = this.determineOrderType({ ...trackingData, shipment_status_history: normalizedTrackingEvents });
       
-      // Store tracking data
+      // Store tracking data with normalized statuses
       const database = require('../config/database');
-      await database.storeOrderTracking(orderId, actualOrderType, trackingData.shipment_status_history);
+      await database.storeOrderTracking(orderId, actualOrderType, normalizedTrackingEvents);
       
-      console.log(`✅ [Tracking] Stored ${trackingData.shipment_status_history.length} tracking events for order ${orderId}`);
+      console.log(`✅ [Tracking] Stored ${normalizedTrackingEvents.length} tracking events for order ${orderId}`);
+      
+      // Normalize latest status for labels table
+      const normalizedLatestStatus = this.normalizeShipmentStatus(latestStatus.name);
       
       // Update labels table with current shipment status and handover logic
-      const isHandover = latestStatus.name === 'In Transit';
+      // Check if normalized status is "In Transit" (case-insensitive)
+      const isHandover = normalizedLatestStatus === 'In Transit';
       
       // Get the timestamp for handover event (if available)
-      // IMPORTANT: We want the FIRST "In Transit" event, not the latest
+      // IMPORTANT: We want the FIRST "In Transit" event (normalized), not the latest
       let handoverTimestamp = null;
       if (isHandover) {
-        // Find the first occurrence of "In Transit" status
-        const firstInTransitEvent = trackingData.shipment_status_history.find(event => event && event.name === 'In Transit');
+        // Find the first occurrence of "In Transit" status (events are already normalized)
+        const firstInTransitEvent = normalizedTrackingEvents.find(event => {
+          return event && event.name === 'In Transit';
+        });
         if (firstInTransitEvent && firstInTransitEvent.time) {
           handoverTimestamp = firstInTransitEvent.time;
-          console.log(`🚚 [Tracking] Found first "In Transit" event for order ${orderId} at timestamp: ${handoverTimestamp}`);
+          console.log(`🚚 [Tracking] Found first "In Transit" event (normalized) for order ${orderId} at timestamp: ${handoverTimestamp}`);
         }
       }
       
-      await database.updateLabelsShipmentStatus(orderId, accountCode, latestStatus.name, isHandover, handoverTimestamp);
+      await database.updateLabelsShipmentStatus(orderId, accountCode, normalizedLatestStatus, isHandover, handoverTimestamp);
       
       return {
         success: true,
         message: 'Tracking data processed successfully',
-        eventsCount: trackingData.shipment_status_history.length,
+        eventsCount: normalizedTrackingEvents.length,
         orderType: actualOrderType,
-        currentStatus: latestStatus.name,
+        currentStatus: normalizedLatestStatus,
         isHandover: isHandover
       };
       
@@ -256,6 +273,73 @@ class OrderTrackingService {
       console.error(`❌ [Tracking] Failed to process order ${orderId}:`, error.message);
       throw error;
     }
+  }
+
+  /**
+   * Normalize shipment status to handle case-insensitive matching and map pickup variations to "In Transit"
+   * @param {string} status - The raw status from Shipway API
+   * @returns {string} Normalized status (e.g., "In Transit" for all pickup variations)
+   */
+  normalizeShipmentStatus(status) {
+    if (!status || typeof status !== 'string') {
+      return status || 'Unknown';
+    }
+
+    // Convert to lowercase and replace underscores with spaces for consistent comparison
+    // This handles: "picked_up", "PICKED_UP", "IN_TRANSIT", "in_transit", etc.
+    const normalized = status.trim().toLowerCase().replace(/_/g, ' ');
+
+    // First, handle failure statuses that should NOT be mapped to "In Transit"
+    // These should be handled separately
+    if (normalized.includes('pickup failed') || normalized.includes('failed pickup')) {
+      return 'Pickup Failed';
+    }
+
+    // Map all pickup variations to "In Transit" (case-insensitive, handles underscores)
+    // Matches: 
+    // - "picked up", "PICKED UP", "Picked Up" 
+    // - "picked_up", "PICKED_UP", "picked_UP"
+    // - "shipment picked up", "shipment_picked_up"
+    // - "pickup done", "pickup_done"
+    // - "picked", "PICKED"
+    // - "in transit", "IN TRANSIT", "In Transit"
+    // - "in_transit", "IN_TRANSIT", "in_TRANSIT"
+    // Note: "pickup failed" is excluded above
+    if (
+      normalized.includes('picked') ||
+      normalized.includes('pickup') ||
+      normalized === 'in transit'
+    ) {
+      return 'In Transit';
+    }
+
+    // Normalize "Delivered" variations (case-insensitive, handles underscores)
+    if (normalized === 'delivered') {
+      return 'Delivered';
+    }
+
+    // Return original status with proper casing for common statuses
+    // For other statuses, return as-is (preserve original casing)
+    const commonStatuses = {
+      'out for delivery': 'Out for Delivery',
+      'rto': 'RTO',
+      'cancelled': 'Cancelled',
+      'returned': 'Returned',
+      'failed delivery': 'Failed Delivery',
+      'attempted delivery': 'Attempted Delivery',
+      'shipment booked': 'Shipment Booked',
+      'dispatched': 'Dispatched',
+      'in warehouse': 'In Warehouse',
+      'out for pickup': 'Out for Pickup',
+      'rto delivered': 'RTO Delivered'
+    };
+
+    if (commonStatuses[normalized]) {
+      return commonStatuses[normalized];
+    }
+
+    // Return original status if no normalization needed
+    return status;
   }
 
   /**
@@ -327,14 +411,57 @@ class OrderTrackingService {
 
       const data = response.data;
 
-      // Validate response structure
-      if (!data || data.success !== "1") {
-        throw new Error(`API error: ${data.message || 'Unknown error'}`);
+      // Handle array response (new API format)
+      let trackingDetails = null;
+      if (Array.isArray(data) && data.length > 0) {
+        // Take first element from array
+        const firstItem = data[0];
+        if (firstItem.tracking_details) {
+          trackingDetails = firstItem.tracking_details;
+        }
+      } else if (data && data.tracking_details) {
+        // Direct object with tracking_details
+        trackingDetails = data.tracking_details;
+      } else if (data && data.success === "1" && data.shipment_status_history) {
+        // Old API format - return as is
+        console.log(`✅ [API] Received tracking data for order ${orderId}: ${data.shipment_status_history?.length || 0} events`);
+        return data;
       }
 
-      console.log(`✅ [API] Received tracking data for order ${orderId}: ${data.shipment_status_history?.length || 0} events`);
-      
-      return data;
+      // Extract shipment_status from new API format
+      if (trackingDetails && trackingDetails.shipment_status) {
+        const currentStatus = trackingDetails.shipment_status;
+        const currentDateTime = new Date().toISOString().slice(0, 19).replace('T', ' '); // Format: YYYY-MM-DD HH:MM:SS
+        
+        // Create our own history with single entry
+        const shipmentStatusHistory = [
+          {
+            name: currentStatus,
+            time: currentDateTime
+          }
+        ];
+
+        console.log(`✅ [API] Received tracking data for order ${orderId}: Extracted status "${currentStatus}" at ${currentDateTime}`);
+        
+        // Return in the expected format
+        return {
+          success: "1",
+          shipment_status_history: shipmentStatusHistory
+        };
+      }
+
+      // If no tracking_details found, check for old format
+      if (!data || data.success !== "1") {
+        throw new Error(`API error: ${data?.message || 'Unknown error'}`);
+      }
+
+      // Fallback to old format if shipment_status_history exists
+      if (data.shipment_status_history) {
+        console.log(`✅ [API] Received tracking data for order ${orderId}: ${data.shipment_status_history?.length || 0} events`);
+        return data;
+      }
+
+      throw new Error('Invalid API response format: No tracking_details or shipment_status_history found');
       
     } catch (error) {
       if (error.response) {
@@ -350,7 +477,7 @@ class OrderTrackingService {
 
   /**
    * Determine order type based on latest tracking status
-   * @param {Object} trackingData - Tracking data from Shipway API
+   * @param {Object} trackingData - Tracking data from Shipway API (should already be normalized)
    */
   determineOrderType(trackingData) {
     if (!trackingData.shipment_status_history || trackingData.shipment_status_history.length === 0) {
@@ -366,7 +493,10 @@ class OrderTrackingService {
       return 'active'; // Default to active if invalid
     }
     
-    if (latestStatus.name === 'Delivered') {
+    // Use normalized status for comparison (should already be normalized, but normalize again for safety)
+    const normalizedStatus = this.normalizeShipmentStatus(latestStatus.name);
+    
+    if (normalizedStatus === 'Delivered') {
       return 'inactive';
     } else {
       return 'active';
