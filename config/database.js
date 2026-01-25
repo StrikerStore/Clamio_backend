@@ -55,11 +55,11 @@ class Database {
         enableKeepAlive: true, // Keep connections alive
         keepAliveInitialDelay: 0 // Start keepalive immediately
       });
-      
+
       // Keep mysqlConnection for backward compatibility (point to pool for single-connection operations)
       // Pool can be used as connection for single operations
       this.mysqlConnection = this.mysqlPool;
-      
+
       console.log('✅ MySQL connection pool established with IST timezone (+05:30) - 20 connections available');
       await this.createUtilityTable();
       await this.createStoreInfoTable();
@@ -103,10 +103,10 @@ class Database {
           UNIQUE KEY unique_parameter_value (parameter, value)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `;
-      
+
       await this.mysqlConnection.execute(createTableQuery);
       console.log('✅ Utility table created/verified');
-      
+
       // Initialize with default parameters
       const initQueries = [
         `INSERT INTO utility (parameter, value, created_by)
@@ -116,7 +116,7 @@ class Database {
          VALUES ('shipping_partner', 'Shipway', 'system')
          ON DUPLICATE KEY UPDATE modified_at = modified_at`
       ];
-      
+
       for (const query of initQueries) {
         await this.mysqlConnection.execute(query);
       }
@@ -150,7 +150,7 @@ class Database {
           UNIQUE KEY unique_carrier_store (carrier_id, account_code)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `;
-      
+
       await this.mysqlConnection.execute(createTableQuery);
       console.log('✅ Carriers table created/verified');
 
@@ -175,17 +175,17 @@ class Database {
 
       if (columns.length === 0) {
         console.log('🔄 Adding account_code column to existing carriers table...');
-        
+
         // Add account_code column as NOT NULL (will require data migration for existing rows)
         await this.mysqlConnection.execute(
           `ALTER TABLE carriers ADD COLUMN account_code VARCHAR(50) NOT NULL AFTER priority`
         );
-        
+
         // Add index for account_code
         await this.mysqlConnection.execute(
           `ALTER TABLE carriers ADD INDEX idx_account_code (account_code)`
         );
-        
+
         console.log('✅ account_code column added to carriers table');
       } else {
         console.log('✅ account_code column already exists in carriers table');
@@ -216,7 +216,7 @@ class Database {
           INDEX idx_account_code (account_code)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `;
-      
+
       await this.mysqlConnection.execute(createTableQuery);
       console.log('✅ Products table created/verified');
 
@@ -287,17 +287,17 @@ class Database {
 
       if (columns.length === 0) {
         console.log('🔄 Adding account_code column to existing products table...');
-        
+
         // Add account_code column as NOT NULL (will require data migration for existing rows)
         await this.mysqlConnection.execute(
           `ALTER TABLE products ADD COLUMN account_code VARCHAR(50) NOT NULL AFTER sku_id`
         );
-        
+
         // Add index for account_code
         await this.mysqlConnection.execute(
           `ALTER TABLE products ADD INDEX idx_account_code (account_code)`
         );
-        
+
         console.log('✅ account_code column added to products table');
       } else {
         console.log('✅ account_code column already exists in products table');
@@ -339,7 +339,7 @@ class Database {
           INDEX idx_role (role)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `;
-      
+
       await this.mysqlConnection.execute(createTableQuery);
       console.log('✅ Users table created/verified');
     } catch (error) {
@@ -382,7 +382,7 @@ class Database {
           INDEX idx_createdAt (createdAt)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `;
-      
+
       await this.mysqlConnection.execute(createTableQuery);
       console.log('✅ Settlements table created/verified');
     } catch (error) {
@@ -410,7 +410,7 @@ class Database {
           INDEX idx_createdAt (createdAt)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `;
-      
+
       await this.mysqlConnection.execute(createTableQuery);
       console.log('✅ Transactions table created/verified');
     } catch (error) {
@@ -458,7 +458,7 @@ class Database {
           INDEX idx_account_code (account_code)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `;
-      
+
       await this.mysqlConnection.execute(createTableQuery);
       console.log('✅ Fresh orders table created with clean structure');
 
@@ -498,19 +498,19 @@ class Database {
 
       if (columns.length === 0) {
         console.log('🔄 Adding size column to existing orders table...');
-        
+
         // Add size column
         await this.mysqlConnection.execute(
           `ALTER TABLE orders ADD COLUMN size VARCHAR(20) AFTER product_code`
         );
-        
+
         // Add index for size column
         await this.mysqlConnection.execute(
           `ALTER TABLE orders ADD INDEX idx_size (size)`
         );
-        
+
         console.log('✅ Size column added to orders table');
-        
+
         // Update existing orders with extracted size
         await this.updateExistingOrdersWithSize();
       } else {
@@ -538,17 +538,17 @@ class Database {
 
       if (columns.length === 0) {
         console.log('🔄 Adding account_code column to existing orders table...');
-        
+
         // Add account_code column as NOT NULL (will require data migration for existing rows)
         await this.mysqlConnection.execute(
           `ALTER TABLE orders ADD COLUMN account_code VARCHAR(50) NOT NULL AFTER is_in_new_order`
         );
-        
+
         // Add index for account_code
         await this.mysqlConnection.execute(
           `ALTER TABLE orders ADD INDEX idx_account_code (account_code)`
         );
-        
+
         console.log('✅ account_code column added to orders table');
       } else {
         console.log('✅ account_code column already exists in orders table');
@@ -570,19 +570,19 @@ class Database {
       if (columns.length > 0) {
         const idColumn = columns[0];
         const currentType = idColumn.Type.toUpperCase();
-        
+
         // Check if it's VARCHAR(50) or smaller
         const match = currentType.match(/VARCHAR\((\d+)\)/);
         if (match) {
           const currentSize = parseInt(match[1]);
           if (currentSize < 255) {
             console.log(`🔄 Increasing id column size from VARCHAR(${currentSize}) to VARCHAR(255)...`);
-            
+
             // Note: Don't specify PRIMARY KEY here - MySQL preserves it when modifying the column
             await this.mysqlConnection.execute(
               `ALTER TABLE orders MODIFY COLUMN id VARCHAR(255)`
             );
-            
+
             console.log('✅ id column size increased to VARCHAR(255)');
           } else {
             console.log(`✅ id column size is already VARCHAR(${currentSize})`);
@@ -602,7 +602,7 @@ class Database {
 
     try {
       console.log('🔄 Updating existing orders with size information...');
-      
+
       // Get all orders that don't have size information
       const [orders] = await this.mysqlConnection.execute(
         `SELECT unique_id, product_code FROM orders WHERE size IS NULL AND product_code IS NOT NULL`
@@ -662,10 +662,10 @@ class Database {
           INDEX idx_account_code (account_code)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `;
-      
+
       await this.mysqlConnection.execute(createLabelsTableQuery);
       console.log('✅ Labels table created/verified (existing data preserved)');
-      
+
       // Add is_manifest column if it doesn't exist (for existing tables)
       try {
         await this.mysqlConnection.execute(`
@@ -682,7 +682,7 @@ class Database {
           console.error('❌ Error adding is_manifest column to labels table:', error.message);
         }
       }
-      
+
       // Add is_handover column if it doesn't exist (for existing tables)
       try {
         await this.mysqlConnection.execute(`
@@ -733,8 +733,8 @@ class Database {
 
       // Add account_code column if it doesn't exist (for existing tables)
       await this.addAccountCodeToLabelsIfNotExists();
-      
-      } catch (error) {
+
+    } catch (error) {
       console.error('❌ Error creating labels table:', error.message);
     }
   }
@@ -753,17 +753,17 @@ class Database {
 
       if (columns.length === 0) {
         console.log('🔄 Adding account_code column to existing labels table...');
-        
+
         // Add account_code column as NOT NULL (will require data migration for existing rows)
         await this.mysqlConnection.execute(
           `ALTER TABLE labels ADD COLUMN account_code VARCHAR(50) NOT NULL AFTER manifest_id`
         );
-        
+
         // Add index for account_code
         await this.mysqlConnection.execute(
           `ALTER TABLE labels ADD INDEX idx_account_code (account_code)`
         );
-        
+
         console.log('✅ account_code column added to labels table');
       } else {
         console.log('✅ account_code column already exists in labels table');
@@ -804,7 +804,7 @@ class Database {
           INDEX idx_account_code (account_code)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `;
-      
+
       await this.mysqlConnection.execute(createOrderTrackingTableQuery);
       console.log('✅ Order tracking table created/verified');
 
@@ -829,17 +829,17 @@ class Database {
 
       if (columns.length === 0) {
         console.log('🔄 Adding account_code column to existing order_tracking table...');
-        
+
         // Add account_code column as NOT NULL (will require data migration for existing rows)
         await this.mysqlConnection.execute(
           `ALTER TABLE order_tracking ADD COLUMN account_code VARCHAR(50) NOT NULL AFTER ndr_reason`
         );
-        
+
         // Add index for account_code
         await this.mysqlConnection.execute(
           `ALTER TABLE order_tracking ADD INDEX idx_account_code (account_code)`
         );
-        
+
         console.log('✅ account_code column added to order_tracking table');
       } else {
         console.log('✅ account_code column already exists in order_tracking table');
@@ -895,13 +895,13 @@ class Database {
           INDEX idx_account_code (account_code)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `;
-      
+
       await this.mysqlConnection.execute(createCustomerInfoTableQuery);
       console.log('✅ Customer info table created/verified');
 
       // Add account_code column to existing customer_info table if it doesn't exist (migration)
       await this.addAccountCodeToCustomerInfoIfNotExists();
-      
+
       // Add store_code column to existing customer_info table if it doesn't exist (migration)
       await this.addStoreCodeToCustomerInfoIfNotExists();
     } catch (error) {
@@ -923,17 +923,17 @@ class Database {
 
       if (columns.length === 0) {
         console.log('🔄 Adding account_code column to existing customer_info table...');
-        
+
         // Add account_code column as NOT NULL (will require data migration for existing rows)
         await this.mysqlConnection.execute(
           `ALTER TABLE customer_info ADD COLUMN account_code VARCHAR(50) NOT NULL AFTER shipping_longitude`
         );
-        
+
         // Add index for account_code
         await this.mysqlConnection.execute(
           `ALTER TABLE customer_info ADD INDEX idx_account_code (account_code)`
         );
-        
+
         console.log('✅ account_code column added to customer_info table');
       } else {
         console.log('✅ account_code column already exists in customer_info table');
@@ -957,12 +957,12 @@ class Database {
 
       if (columns.length === 0) {
         console.log('🔄 Adding store_code column to existing customer_info table...');
-        
+
         // Add store_code column after order_id (to match production database structure)
         await this.mysqlConnection.execute(
           `ALTER TABLE customer_info ADD COLUMN store_code VARCHAR(20) AFTER order_id`
         );
-        
+
         console.log('✅ store_code column added to customer_info table');
       } else {
         console.log('✅ store_code column already exists in customer_info table');
@@ -1001,18 +1001,18 @@ class Database {
         SELECT COUNT(*) as count FROM information_schema.tables 
         WHERE table_schema = DATABASE() AND table_name = 'claims'
       `);
-      
+
       const tableExists = tables[0].count > 0;
-      
+
       if (tableExists) {
         // Check if the table has the correct structure (check for 'status' column)
         const [columns] = await this.mysqlConnection.execute(`
           SELECT COUNT(*) as count FROM information_schema.columns 
           WHERE table_schema = DATABASE() AND table_name = 'claims' AND column_name = 'status'
         `);
-        
+
         const hasCorrectStructure = columns[0].count > 0;
-        
+
         if (!hasCorrectStructure) {
           console.log('🔄 Claims table exists but has old structure, recreating...');
           // Drop the old table
@@ -1043,16 +1043,16 @@ class Database {
           INDEX idx_account_code (account_code)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `;
-      
+
       await this.mysqlConnection.execute(createClaimsTableQuery);
       console.log('✅ Claims table created/verified');
-      
+
       // Add priority_carrier column if it doesn't exist (migration for existing tables)
       await this.addPriorityCarrierColumnToClaims();
 
       // Add account_code column if it doesn't exist (for existing tables)
       await this.addAccountCodeToClaimsIfNotExists();
-      
+
       // Migrate existing claims data from orders table if claims table is empty
       await this.migrateClaimsData();
     } catch (error) {
@@ -1074,17 +1074,17 @@ class Database {
 
       if (columns.length === 0) {
         console.log('🔄 Adding account_code column to existing claims table...');
-        
+
         // Add account_code column as NOT NULL (will require data migration for existing rows)
         await this.mysqlConnection.execute(
           `ALTER TABLE claims ADD COLUMN account_code VARCHAR(50) NOT NULL AFTER priority_carrier`
         );
-        
+
         // Add index for account_code
         await this.mysqlConnection.execute(
           `ALTER TABLE claims ADD INDEX idx_account_code (account_code)`
         );
-        
+
         console.log('✅ account_code column added to claims table');
       } else {
         console.log('✅ account_code column already exists in claims table');
@@ -1103,7 +1103,7 @@ class Database {
     try {
       // Check if claims table is empty
       const [claimsCount] = await this.mysqlConnection.execute('SELECT COUNT(*) as count FROM claims');
-      
+
       if (claimsCount[0].count > 0) {
         console.log('✅ Claims table already has data, skipping migration');
         return;
@@ -1133,12 +1133,12 @@ class Database {
 
       if (columns.length === 0) {
         console.log('🔄 Adding priority_carrier column to existing claims table...');
-        
+
         // Add priority_carrier column
         await this.mysqlConnection.execute(
           `ALTER TABLE claims ADD COLUMN priority_carrier TEXT AFTER label_downloaded`
         );
-        
+
         console.log('✅ priority_carrier column added to claims table');
       } else {
         console.log('✅ priority_carrier column already exists in claims table');
@@ -1228,7 +1228,7 @@ class Database {
           FOREIGN KEY (resolved_by) REFERENCES users(id) ON DELETE SET NULL
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `;
-      
+
       await this.mysqlConnection.execute(createNotificationsTableQuery);
       console.log('✅ Notifications table created/verified');
 
@@ -1248,7 +1248,7 @@ class Database {
           INDEX idx_admin (admin_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `;
-      
+
       await this.mysqlConnection.execute(createNotificationViewsTableQuery);
       console.log('✅ Notification views table created/verified');
 
@@ -1270,7 +1270,7 @@ class Database {
           INDEX idx_created_at (created_at)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `;
-      
+
       await this.mysqlConnection.execute(createPushSubscriptionsTableQuery);
       console.log('✅ Push subscriptions table created/verified');
 
@@ -1293,7 +1293,7 @@ class Database {
           FOREIGN KEY (admin_id) REFERENCES users(id) ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `;
-      
+
       await this.mysqlConnection.execute(createPushNotificationLogsTableQuery);
       console.log('✅ Push notification logs table created/verified');
 
@@ -1307,7 +1307,7 @@ class Database {
           AND COLUMN_NAME = 'push_notifications_enabled'
           AND TABLE_SCHEMA = DATABASE()
         `);
-        
+
         if (columns.length === 0) {
           await this.mysqlConnection.execute(`
             ALTER TABLE users 
@@ -1526,7 +1526,7 @@ class Database {
         query = 'SELECT * FROM carriers WHERE carrier_id = ?';
         params = [carrierId];
       }
-      
+
       const [rows] = await this.mysqlConnection.execute(query, params);
       return rows.length > 0 ? rows[0] : null;
     } catch (error) {
@@ -1547,11 +1547,11 @@ class Database {
 
     try {
       const { carrier_id, carrier_name, status, weight_in_kg, priority, account_code } = carrierData;
-      
+
       if (!account_code) {
         throw new Error('account_code is required for creating carrier');
       }
-      
+
       const [result] = await this.mysqlConnection.execute(
         'INSERT INTO carriers (carrier_id, carrier_name, status, weight_in_kg, priority, account_code) VALUES (?, ?, ?, ?, ?, ?)',
         [carrier_id, carrier_name, status || 'Active', weight_in_kg || null, priority, account_code]
@@ -1617,7 +1617,7 @@ class Database {
       // Build WHERE clause - use account_code if provided
       let whereClause = 'carrier_id = ?';
       values.push(carrierId);
-      
+
       if (accountCode) {
         whereClause += ' AND account_code = ?';
         values.push(accountCode);
@@ -1702,7 +1702,7 @@ class Database {
         const newPriority = i + 1;
         const carrier = carriers[i];
         const carrierAccountCode = accountCode || carrier.account_code;
-        
+
         if (!carrierAccountCode) {
           throw new Error('account_code is required for reordering priorities');
         }
@@ -1774,7 +1774,7 @@ class Database {
         // Check by both carrier_id and account_code (store-specific)
         const accountCode = carrier.account_code || null;
         const existing = await this.getCarrierById(carrier.carrier_id, accountCode);
-        
+
         if (existing) {
           await this.updateCarrier(carrier.carrier_id, carrier, accountCode);
           updated++;
@@ -1874,11 +1874,11 @@ class Database {
 
     try {
       const { id, name, image, altText, totalImages, sku_id, account_code } = productData;
-      
+
       if (!account_code) {
         throw new Error('account_code is required for creating product');
       }
-      
+
       const [result] = await this.mysqlConnection.execute(
         'INSERT INTO products (id, name, image, altText, totalImages, sku_id, account_code) VALUES (?, ?, ?, ?, ?, ?, ?)',
         [id, name, image || null, altText || null, totalImages || 0, sku_id || null, account_code]
@@ -1997,7 +1997,7 @@ class Database {
 
       for (const product of products) {
         const existing = await this.getProductById(product.id);
-        
+
         if (existing) {
           await this.updateProduct(product.id, product);
           updated++;
@@ -2214,15 +2214,15 @@ class Database {
     }
 
     try {
-      const { 
-        id, name, email, phone, password, role, status, 
-        token, active_session, contactNumber, warehouseId, 
-        address, city, pincode 
+      const {
+        id, name, email, phone, password, role, status,
+        token, active_session, contactNumber, warehouseId,
+        address, city, pincode
       } = userData;
-      
+
       // Generate ID if not provided
       const userId = id || `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-      
+
       const [result] = await this.mysqlConnection.execute(
         'INSERT INTO users (id, name, email, phone, password, role, status, token, active_session, contactNumber, warehouseId, address, city, pincode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         [userId, name, email, phone || null, password || null, role, status || 'active', token || null, active_session || null, contactNumber || null, warehouseId || null, address || null, city || null, pincode || null]
@@ -2534,13 +2534,13 @@ class Database {
     }
 
     try {
-      const { 
-        id, vendorId, vendorName, amount, upiId, orderIds, numberOfOrders, 
-        currency, status, paymentStatus, amountPaid, transactionId, 
-        paymentProofPath, approvedBy, approvedAt, rejectionReason, 
-        rejectedBy, rejectedAt 
+      const {
+        id, vendorId, vendorName, amount, upiId, orderIds, numberOfOrders,
+        currency, status, paymentStatus, amountPaid, transactionId,
+        paymentProofPath, approvedBy, approvedAt, rejectionReason,
+        rejectedBy, rejectedAt
       } = settlementData;
-      
+
       const [result] = await this.mysqlConnection.execute(
         'INSERT INTO settlements (id, vendorId, vendorName, amount, upiId, orderIds, numberOfOrders, currency, status, paymentStatus, amountPaid, transactionId, paymentProofPath, approvedBy, approvedAt, rejectionReason, rejectedBy, rejectedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         [
@@ -2823,7 +2823,7 @@ class Database {
 
     try {
       const { id, vendor_id, amount, type, description } = transactionData;
-      
+
       const [result] = await this.mysqlConnection.execute(
         'INSERT INTO transactions (id, vendor_id, amount, type, description) VALUES (?, ?, ?, ?, ?)',
         [
@@ -3069,9 +3069,9 @@ class Database {
    */
   removeSizeFromProductName(productName) {
     if (!productName) return '';
-    
+
     let cleanName = productName.trim();
-    
+
     // Check if it's a kids product
     if (cleanName.toLowerCase().includes('kids')) {
       // For kids products, only remove numeric size patterns like 24-26, 16-18, 20-22
@@ -3088,17 +3088,17 @@ class Database {
         / - (XS|S|M|L|XL|2XL|3XL|4XL|5XL)(?= - |$)/gi,
         / - (Small|Medium|Large|Extra Large)(?= - |$)/gi,
       ];
-      
+
       for (const pattern of sizePatterns) {
         cleanName = cleanName.replace(pattern, '');
       }
     }
-    
+
     // Clean up any double spaces or trailing dashes
     cleanName = cleanName.replace(/\s*-\s*$/, ''); // Remove trailing dash
     cleanName = cleanName.replace(/\s+/g, ' '); // Replace multiple spaces with single space
     cleanName = cleanName.trim();
-    
+
     return cleanName;
   }
 
@@ -3109,7 +3109,7 @@ class Database {
    */
   cleanSkuId(skuId) {
     if (!skuId) return skuId;
-    
+
     // Remove size information from the end
     let cleanedSku = skuId
       // Remove size codes (S, M, L, XL, etc.) at the end
@@ -3123,7 +3123,7 @@ class Database {
       // Remove trailing dashes/underscores
       .replace(/[-_]+$/, '')
       .trim();
-      
+
     return cleanedSku;
   }
 
@@ -3134,25 +3134,25 @@ class Database {
    */
   extractSizeFromSku(skuId) {
     if (!skuId) return null;
-    
+
     // Try to extract size codes (S, M, L, XL, etc.) at the end
     const sizeMatch = skuId.match(/[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$/i);
     if (sizeMatch) {
       return sizeMatch[1].toUpperCase();
     }
-    
+
     // Try to extract age ranges (24-26, 25-26, etc.) at the end
     const ageRangeMatch = skuId.match(/[-_]([0-9]+-[0-9]+)$/);
     if (ageRangeMatch) {
       return ageRangeMatch[1];
     }
-    
+
     // Try to extract single numbers at the end (size numbers like 32, 34, etc.)
     const numberMatch = skuId.match(/[-_]([0-9]+)$/);
     if (numberMatch) {
       return numberMatch[1];
     }
-    
+
     return null;
   }
 
@@ -3198,7 +3198,7 @@ class Database {
         LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
         WHERE o.unique_id = ?
       `, [unique_id]);
-      
+
       return rows.length > 0 ? rows[0] : null;
     } catch (error) {
       console.error('Error getting order by unique_id:', error);
@@ -3249,7 +3249,7 @@ class Database {
         WHERE o.order_id = ? 
         ORDER BY o.product_name
       `, [order_id]);
-      
+
       return rows;
     } catch (error) {
       console.error('Error getting orders by order_id:', error);
@@ -3275,7 +3275,7 @@ class Database {
     try {
       // Create placeholders for IN clause (?, ?, ?, ...)
       const placeholders = order_ids.map(() => '?').join(',');
-      
+
       const [rows] = await this.mysqlConnection.execute(`
         SELECT 
           o.*,
@@ -3308,7 +3308,7 @@ class Database {
         WHERE o.order_id IN (${placeholders})
         ORDER BY o.order_id, o.product_name
       `, order_ids);
-      
+
       return rows || [];
     } catch (error) {
       console.error('Error getting orders by order_ids:', error);
@@ -3333,7 +3333,7 @@ class Database {
     try {
       // Create placeholders for IN clause (?, ?, ?, ...)
       const placeholders = unique_ids.map(() => '?').join(',');
-      
+
       const [rows] = await this.mysqlConnection.execute(`
         SELECT 
           o.*,
@@ -3365,7 +3365,7 @@ class Database {
         LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
         WHERE o.unique_id IN (${placeholders})
       `, unique_ids);
-      
+
       return rows || [];
     } catch (error) {
       console.error('Error getting orders by unique_ids:', error);
@@ -3427,9 +3427,9 @@ class Database {
         LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
         LEFT JOIN store_info s ON o.account_code = s.account_code
         WHERE (o.is_in_new_order = 1 OR c.label_downloaded = 1)`;
-      
+
       const params = [];
-      
+
       // Add date filter if cutoffDate is provided
       if (cutoffDate) {
         query += ` AND o.order_date >= ?`;
@@ -3437,11 +3437,11 @@ class Database {
         const mysqlDate = cutoffDate.toISOString().slice(0, 19).replace('T', ' ');
         params.push(mysqlDate);
       }
-      
+
       query += ` ORDER BY o.order_date DESC, o.order_id, o.product_name`;
-      
+
       const [rows] = await db.execute(query, params);
-      
+
       return rows;
     } catch (error) {
       console.error('Error getting all orders:', error);
@@ -3481,7 +3481,7 @@ class Database {
       let whereConditions = '(o.is_in_new_order = 1 OR c.label_downloaded = 1)';
       const params = [];
       const countParams = [];
-      
+
       // Apply status filter (unclaimed logic matches dashboard-stats)
       if (status === 'unclaimed') {
         whereConditions += ` AND (
@@ -3494,7 +3494,7 @@ class Database {
         // Filter out inactive stores for unclaimed orders (vendors should only see new orders from active stores)
         whereConditions += ` AND s.status = 'active'`;
       }
-      
+
       // Apply search filter (SQL LIKE for order_id, product_name, product_code, customer_name)
       if (search && search.trim() !== '') {
         const searchTerm = `%${search.trim()}%`;
@@ -3507,7 +3507,7 @@ class Database {
         params.push(searchTerm, searchTerm, searchTerm, searchTerm);
         countParams.push(searchTerm, searchTerm, searchTerm, searchTerm);
       }
-      
+
       // Apply date range filter
       if (dateFrom || dateTo) {
         if (dateFrom && dateTo) {
@@ -3526,7 +3526,7 @@ class Database {
           countParams.push(dateToEnd);
         }
       }
-      
+
       // Build data query with LIMIT/OFFSET
       const dataQuery = `
         SELECT 
@@ -3570,7 +3570,7 @@ class Database {
         WHERE ${whereConditions}
         ORDER BY o.order_date DESC, o.order_id, o.product_name
         LIMIT ${parseInt(limit)} OFFSET ${parseInt(offset)}`;
-      
+
       // Build COUNT query for total count and quantity (same WHERE clause, includes store_info for status filtering)
       const countQuery = `
         SELECT 
@@ -3581,18 +3581,18 @@ class Database {
         LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
         LEFT JOIN store_info s ON o.account_code = s.account_code
         WHERE ${whereConditions}`;
-      
+
       // Execute COUNT query and data query in parallel using connection pool
       // Note: LIMIT and OFFSET are interpolated directly (not parameterized) as MySQL doesn't support placeholders for them
       const [countResult, dataResult] = await Promise.all([
         db.execute(countQuery, countParams),
         db.execute(dataQuery, params)
       ]);
-      
+
       const totalCount = parseInt(countResult[0][0]?.total_count || 0);
       const totalQuantity = parseInt(countResult[0][0]?.total_quantity || 0);
       const orders = dataResult[0];
-      
+
       return {
         orders,
         totalCount,
@@ -3644,7 +3644,7 @@ class Database {
       let whereConditions = '(o.is_in_new_order = 1 OR c.label_downloaded = 1)';
       const params = [];
       const countParams = [];
-      
+
       // Apply cutoff date filter (for performance - only recent orders)
       if (cutoffDate) {
         whereConditions += ` AND o.order_date >= ?`;
@@ -3652,7 +3652,7 @@ class Database {
         params.push(mysqlDate);
         countParams.push(mysqlDate);
       }
-      
+
       // Apply search filter (SQL LIKE for order_id, product_name, product_code, customer_name)
       if (search && search.trim() !== '') {
         const searchTerm = `%${search.trim()}%`;
@@ -3665,7 +3665,7 @@ class Database {
         params.push(searchTerm, searchTerm, searchTerm, searchTerm);
         countParams.push(searchTerm, searchTerm, searchTerm, searchTerm);
       }
-      
+
       // Apply date range filter
       if (dateFrom || dateTo) {
         if (dateFrom && dateTo) {
@@ -3684,7 +3684,7 @@ class Database {
           countParams.push(dateToEnd);
         }
       }
-      
+
       // Apply status filter (supports single status or array of statuses)
       if (status && status !== 'all') {
         const statusArray = Array.isArray(status) ? status : [status];
@@ -3701,16 +3701,16 @@ class Database {
           countParams.push(...statusArray);
         }
       }
-      
+
       // Apply vendor filter (supports single vendor or array of vendors, including unclaimed)
       if (vendor) {
         const vendorArray = Array.isArray(vendor) ? vendor : [vendor];
         const validVendors = vendorArray.filter(v => v && typeof v === 'string' && v.trim() !== '');
-        
+
         if (validVendors.length > 0) {
           const hasUnclaimed = validVendors.includes('__UNCLAIMED__');
           const warehouseIds = validVendors.filter(v => v !== '__UNCLAIMED__');
-          
+
           if (hasUnclaimed && warehouseIds.length > 0) {
             // Both unclaimed and specific vendors
             const placeholders = warehouseIds.map(() => '?').join(',');
@@ -3729,12 +3729,12 @@ class Database {
           }
         }
       }
-      
+
       // Apply store filter (supports single store or array of stores)
       if (store) {
         const storeArray = Array.isArray(store) ? store : [store];
         const validStores = storeArray.filter(s => s && typeof s === 'string' && s.trim() !== '');
-        
+
         if (validStores.length > 0) {
           const placeholders = validStores.map(() => '?').join(',');
           whereConditions += ` AND o.account_code IN (${placeholders})`;
@@ -3742,13 +3742,13 @@ class Database {
           countParams.push(...validStores);
         }
       }
-      
+
       // Filter inactive stores unless explicitly requested
       if (!showInactiveStores) {
         whereConditions += ` AND (s.status = 'active' OR s.status IS NULL)`;
         // Note: OR s.status IS NULL handles edge case where store_info might not have a record
       }
-      
+
       // Build data query with LIMIT/OFFSET and vendor info
       const dataQuery = `
         SELECT 
@@ -3806,7 +3806,7 @@ class Database {
         WHERE ${whereConditions}
         ORDER BY o.order_date DESC, o.order_id, o.product_name
         LIMIT ${parseInt(limit)} OFFSET ${parseInt(offset)}`;
-      
+
       // Build COUNT query for total count and quantity
       const countQuery = `
         SELECT 
@@ -3817,19 +3817,19 @@ class Database {
         LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
         LEFT JOIN store_info s ON o.account_code = s.account_code
         WHERE ${whereConditions}`;
-      
+
       // Execute COUNT query and data query in parallel using connection pool
       const [countResult, dataResult] = await Promise.all([
         db.execute(countQuery, countParams),
         db.execute(dataQuery, params)
       ]);
-      
+
       const totalCount = parseInt(countResult[0][0]?.total_count || 0);
       const totalQuantity = parseInt(countResult[0][0]?.total_quantity || 0);
       const orders = dataResult[0];
-      
+
       console.log(`📊 Admin Orders Paginated: Found ${totalCount} total orders, returning ${orders.length} orders (offset: ${offset}, limit: ${limit})`);
-      
+
       return {
         orders,
         totalCount,
@@ -3876,14 +3876,14 @@ class Database {
       // Build WHERE clause conditions (same as pagination for consistency)
       let whereConditions = '(o.is_in_new_order = 1 OR c.label_downloaded = 1)';
       const params = [];
-      
+
       // Apply cutoff date filter
       if (cutoffDate) {
         whereConditions += ` AND o.order_date >= ?`;
         const mysqlDate = cutoffDate.toISOString().slice(0, 19).replace('T', ' ');
         params.push(mysqlDate);
       }
-      
+
       // Apply search filter
       if (search && search.trim() !== '') {
         const searchTerm = `%${search.trim()}%`;
@@ -3895,7 +3895,7 @@ class Database {
         )`;
         params.push(searchTerm, searchTerm, searchTerm, searchTerm);
       }
-      
+
       // Apply date range filter
       if (dateFrom || dateTo) {
         if (dateFrom && dateTo) {
@@ -3911,16 +3911,16 @@ class Database {
           params.push(dateToEnd);
         }
       }
-      
+
       // Apply vendor filter (supports single vendor or array of vendors, including unclaimed)
       if (vendor) {
         const vendorArray = Array.isArray(vendor) ? vendor : [vendor];
         const validVendors = vendorArray.filter(v => v && typeof v === 'string' && v.trim() !== '');
-        
+
         if (validVendors.length > 0) {
           const hasUnclaimed = validVendors.includes('__UNCLAIMED__');
           const warehouseIds = validVendors.filter(v => v !== '__UNCLAIMED__');
-          
+
           if (hasUnclaimed && warehouseIds.length > 0) {
             // Both unclaimed and specific vendors
             const placeholders = warehouseIds.map(() => '?').join(',');
@@ -3937,25 +3937,25 @@ class Database {
           }
         }
       }
-      
+
       // Apply store filter (supports single store or array of stores)
       if (store) {
         const storeArray = Array.isArray(store) ? store : [store];
         const validStores = storeArray.filter(s => s && typeof s === 'string' && s.trim() !== '');
-        
+
         if (validStores.length > 0) {
           const placeholders = validStores.map(() => '?').join(',');
           whereConditions += ` AND o.account_code IN (${placeholders})`;
           params.push(...validStores);
         }
       }
-      
+
       // Filter inactive stores unless explicitly requested
       if (!showInactiveStores) {
         whereConditions += ` AND (s.status = 'active' OR s.status IS NULL)`;
         // Note: OR s.status IS NULL handles edge case where store_info might not have a record
       }
-      
+
       // If status filter is applied, we calculate stats for those statuses
       // Otherwise, calculate all stats in parallel
       if (status && status !== 'all') {
@@ -3969,7 +3969,7 @@ class Database {
               ELSE c.status 
             END IN (${placeholders})
           )`;
-          
+
           // Total query with status filter
           const totalQuery = `
             SELECT 
@@ -3980,16 +3980,16 @@ class Database {
             LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
             LEFT JOIN store_info s ON o.account_code = s.account_code
             WHERE ${whereConditions}${statusCondition}`;
-          
+
           const totalParams = [...params, ...statusArray];
           const [totalResult] = await db.execute(totalQuery, totalParams);
           const totalCount = parseInt(totalResult[0]?.total_count || 0);
           const totalQuantity = parseInt(totalResult[0]?.total_quantity || 0);
-          
+
           // Calculate claimed and unclaimed counts if those statuses are in the filter
           let claimedCount = 0;
           let unclaimedCount = 0;
-          
+
           if (statusArray.includes('claimed')) {
             const claimedQuery = `
               SELECT COUNT(DISTINCT o.unique_id) as total_count
@@ -4007,7 +4007,7 @@ class Database {
             const [claimedResult] = await db.execute(claimedQuery, params);
             claimedCount = parseInt(claimedResult[0]?.total_count || 0);
           }
-          
+
           if (statusArray.includes('unclaimed')) {
             const unclaimedQuery = `
               SELECT COUNT(DISTINCT o.unique_id) as total_count
@@ -4025,7 +4025,7 @@ class Database {
             const [unclaimedResult] = await db.execute(unclaimedQuery, params);
             unclaimedCount = parseInt(unclaimedResult[0]?.total_count || 0);
           }
-          
+
           return {
             totalOrders: totalCount,
             totalQuantity: totalQuantity,
@@ -4035,7 +4035,7 @@ class Database {
           };
         }
       }
-      
+
       // Calculate all stats in parallel (total, claimed, unclaimed)
       const totalQuery = `
         SELECT 
@@ -4046,7 +4046,7 @@ class Database {
         LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
         LEFT JOIN store_info s ON o.account_code = s.account_code
         WHERE ${whereConditions}`;
-      
+
       const claimedQuery = `
         SELECT 
           COUNT(DISTINCT o.unique_id) as total_count,
@@ -4063,7 +4063,7 @@ class Database {
             ELSE c.status 
           END = 'claimed'
         )`;
-      
+
       const unclaimedQuery = `
         SELECT 
           COUNT(DISTINCT o.unique_id) as total_count,
@@ -4080,21 +4080,21 @@ class Database {
             ELSE c.status 
           END = 'unclaimed'
         )`;
-      
+
       // Execute all 3 queries in parallel using connection pool
       const [totalResult, claimedResult, unclaimedResult] = await Promise.all([
         db.execute(totalQuery, params),
         db.execute(claimedQuery, params),
         db.execute(unclaimedQuery, params)
       ]);
-      
+
       const totalCount = parseInt(totalResult[0][0]?.total_count || 0);
       const totalQuantity = parseInt(totalResult[0][0]?.total_quantity || 0);
       const claimedCount = parseInt(claimedResult[0][0]?.total_count || 0);
       const unclaimedCount = parseInt(unclaimedResult[0][0]?.total_count || 0);
-      
+
       console.log(`📊 Admin Dashboard Stats: Total=${totalCount}, Claimed=${claimedCount}, Unclaimed=${unclaimedCount}`);
-      
+
       return {
         totalOrders: totalCount,
         totalQuantity: totalQuantity,
@@ -4151,7 +4151,7 @@ class Database {
         WHERE c.claimed_by = ? AND (o.is_in_new_order = 1 OR c.label_downloaded = 1) 
         ORDER BY c.claimed_at DESC
       `, [warehouseId]);
-      
+
       return rows;
     } catch (error) {
       console.error('Error getting orders by vendor:', error);
@@ -4213,7 +4213,7 @@ class Database {
         AND (l.is_manifest IS NULL OR l.is_manifest = 0)
         ORDER BY o.order_date DESC, o.order_id
       `, [warehouseId]);
-      
+
       return rows;
     } catch (error) {
       console.error('Error getting vendor orders:', error);
@@ -4273,7 +4273,7 @@ class Database {
         AND (l.is_manifest IS NULL OR l.is_manifest = 0)
         ORDER BY o.order_date DESC, o.order_id
       `, [warehouseId]);
-      
+
       return rows;
     } catch (error) {
       console.error('Error getting My Orders:', error);
@@ -4336,7 +4336,7 @@ class Database {
         AND (l.is_handover = 0 OR l.is_handover IS NULL)
         ORDER BY o.order_date DESC, o.order_id
       `, [warehouseId]);
-      
+
       return rows;
     } catch (error) {
       console.error('Error getting Handover Orders:', error);
@@ -4399,7 +4399,7 @@ class Database {
         AND l.is_handover = 1
         ORDER BY o.order_date DESC, o.order_id
       `, [warehouseId]);
-      
+
       return rows;
     } catch (error) {
       console.error('Error getting Order Tracking Orders:', error);
@@ -4475,7 +4475,7 @@ class Database {
           `UPDATE orders SET ${orderFields.join(', ')} WHERE unique_id = ?`,
           orderValues
         );
-        
+
         // Don't return early - we still need to update claims and labels tables
         // if (orderResult.affectedRows === 0) {
         //   return null;
@@ -4559,7 +4559,7 @@ class Database {
 
     try {
       const updatedOrders = [];
-      
+
       for (const update of updates) {
         const updatedOrder = await this.updateOrder(update.unique_id, update.updateData);
         if (updatedOrder) {
@@ -4668,15 +4668,15 @@ class Database {
       return true;
     } catch (error) {
       console.error('❌ Database connection test failed:', error.message);
-      
+
       // Check if it's a connection lost error
-      if (error.code === 'PROTOCOL_CONNECTION_LOST' || 
-          error.code === 'ECONNRESET' ||
-          error.code === 'ETIMEDOUT' ||
-          error.code === 'ENOTFOUND') {
+      if (error.code === 'PROTOCOL_CONNECTION_LOST' ||
+        error.code === 'ECONNRESET' ||
+        error.code === 'ETIMEDOUT' ||
+        error.code === 'ENOTFOUND') {
         console.log('🔄 Stale connection detected');
       }
-      
+
       return false;
     }
   }
@@ -4688,7 +4688,7 @@ class Database {
   async reconnect() {
     try {
       console.log('🔄 Attempting to reconnect to database...');
-      
+
       // Close existing connection
       if (this.mysqlConnection) {
         try {
@@ -4697,14 +4697,14 @@ class Database {
           console.log('ℹ️ Error closing old connection (expected if connection was lost):', error.message);
         }
       }
-      
+
       // Reset state
       this.mysqlConnection = null;
       this.mysqlInitialized = false;
-      
+
       // Reinitialize connection
       await this.initializeMySQL();
-      
+
       console.log('✅ Database reconnected successfully');
       return true;
     } catch (error) {
@@ -4730,13 +4730,13 @@ class Database {
     try {
       let query = 'SELECT * FROM labels WHERE order_id = ?';
       const params = [orderId];
-      
+
       // If account_code is provided, filter by it to ensure store-specific label retrieval
       if (accountCode) {
         query += ' AND account_code = ?';
         params.push(accountCode);
       }
-      
+
       const [rows] = await this.mysqlConnection.execute(query, params);
       return rows.length > 0 ? rows[0] : null;
     } catch (error) {
@@ -4763,7 +4763,7 @@ class Database {
       // Handle partial updates by only updating provided fields
       const updateFields = [];
       const updateValues = [];
-      
+
       // Build dynamic update clause based on provided fields
       if (labelData.hasOwnProperty('label_url')) {
         updateFields.push('label_url = ?');
@@ -4793,12 +4793,12 @@ class Database {
         updateFields.push('manifest_id = ?');
         updateValues.push(labelData.manifest_id || null);
       }
-      
+
       // Always add updated_at
       updateFields.push('updated_at = CURRENT_TIMESTAMP');
-      
+
       const updateClause = updateFields.join(', ');
-      
+
       const [result] = await this.mysqlConnection.execute(
         `INSERT INTO labels (order_id, label_url, awb, carrier_id, carrier_name, priority_carrier, is_manifest, manifest_id, account_code) 
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) 
@@ -4843,12 +4843,12 @@ class Database {
     try {
       // Create placeholders for IN clause (?, ?, ?, ...)
       const placeholders = order_ids.map(() => '?').join(',');
-      
+
       const [rows] = await this.mysqlConnection.execute(
         `SELECT * FROM labels WHERE order_id IN (${placeholders})`,
         order_ids
       );
-      
+
       return rows || [];
     } catch (error) {
       console.error('Error getting labels by order_ids:', error);
@@ -4929,12 +4929,12 @@ class Database {
 
     try {
       const placeholders = order_ids.map(() => '?').join(',');
-      
+
       const [rows] = await this.mysqlConnection.execute(
         `SELECT * FROM customer_info WHERE order_id IN (${placeholders})`,
         order_ids
       );
-      
+
       return rows || [];
     } catch (error) {
       console.error('Error getting customer info by order_ids:', error);
@@ -5028,7 +5028,7 @@ class Database {
     try {
       // Get source customer info
       const sourceCustomer = await this.getCustomerInfoByOrderId(sourceOrderId);
-      
+
       if (!sourceCustomer) {
         throw new Error(`Customer info not found for order ${sourceOrderId}`);
       }
@@ -5088,9 +5088,10 @@ class Database {
 
     try {
       const [rows] = await this.mysqlConnection.execute(`
-        SELECT DISTINCT c.order_id, o.account_code 
+        SELECT DISTINCT c.order_id, o.account_code, l.awb
         FROM claims c
         INNER JOIN orders o ON c.order_id = o.order_id AND c.account_code = o.account_code
+        LEFT JOIN labels l ON c.order_id = l.order_id AND c.account_code = l.account_code
         WHERE c.label_downloaded = 1 
         AND c.order_id IS NOT NULL
         AND o.account_code IS NOT NULL
@@ -5115,9 +5116,10 @@ class Database {
 
     try {
       const [rows] = await this.mysqlConnection.execute(`
-        SELECT DISTINCT c.order_id, o.account_code 
+        SELECT DISTINCT c.order_id, o.account_code, l.awb
         FROM claims c
         INNER JOIN orders o ON c.order_id = o.order_id AND c.account_code = o.account_code
+        LEFT JOIN labels l ON c.order_id = l.order_id AND c.account_code = l.account_code
         WHERE c.label_downloaded = 1 
         AND c.order_id IS NOT NULL
         AND o.account_code IS NOT NULL
@@ -5206,7 +5208,7 @@ class Database {
 
       if (existingTracking.length > 0) {
         const latestExistingStatus = existingTracking[0].shipment_status;
-        
+
         // If status is the same, just update the updated_at timestamp
         if (latestExistingStatus === newStatus) {
           await this.mysqlConnection.execute(`
@@ -5214,7 +5216,7 @@ class Database {
             SET updated_at = NOW(), timestamp = ?
             WHERE id = ?
           `, [newTimestamp, existingTracking[0].id]);
-          
+
           console.log(`✅ Updated existing tracking record (same status: ${newStatus}) for order ${orderId}`);
           return;
         }
@@ -5233,9 +5235,9 @@ class Database {
         latestEvent.ndr_reason || null,
         accountCode
       ]);
-      
+
       console.log(`✅ Stored new tracking event (status: ${newStatus}) for order ${orderId}`);
-      
+
     } catch (error) {
       console.error(`❌ Error storing tracking data for order ${orderId}:`, error);
       throw error;
@@ -5272,7 +5274,7 @@ class Database {
         WHERE order_id = ? AND account_code = ?
         ORDER BY timestamp ASC
       `, [orderId, accountCode]);
-      
+
       return rows;
     } catch (error) {
       console.error(`Error getting tracking data for order ${orderId} (${accountCode}):`, error);
@@ -5311,7 +5313,7 @@ class Database {
         WHERE o.label_downloaded = 1
         ORDER BY o.order_id
       `);
-      
+
       return rows;
     } catch (error) {
       console.error('Error getting orders with tracking status:', error);
@@ -5333,7 +5335,7 @@ class Database {
         DELETE FROM order_tracking 
         WHERE created_at < DATE_SUB(NOW(), INTERVAL ? DAY)
       `, [daysOld]);
-      
+
       return {
         deletedCount: result.affectedRows,
         message: `Deleted ${result.affectedRows} old tracking records`
@@ -5363,7 +5365,7 @@ class Database {
           COUNT(DISTINCT CASE WHEN order_type = 'inactive' THEN order_id END) as inactive_orders
         FROM order_tracking
       `);
-      
+
       return stats[0];
     } catch (error) {
       console.error('Error getting tracking statistics:', error);
@@ -5418,7 +5420,7 @@ class Database {
       if (isHandover && currentHandoverStatus === 0) {
         updateQuery += `, is_handover = 1`;
         handoverJustSet = true;
-        
+
         // Set handover_at timestamp ONLY if it doesn't already exist (first "In Transit" event)
         if (!existingHandoverAt) {
           if (handoverTimestamp) {
@@ -5433,7 +5435,7 @@ class Database {
         } else {
           console.log(`🚚 Order ${orderId} (${accountCode}) already has handover_at = ${existingHandoverAt}, preserving original timestamp`);
         }
-        
+
         console.log(`🚚 Order ${orderId} (${accountCode}) status changed to In Transit (handed over)`);
       }
 
@@ -5441,9 +5443,9 @@ class Database {
       queryParams.push(orderId, accountCode);
 
       await this.mysqlConnection.execute(updateQuery, queryParams);
-      
+
       console.log(`✅ Updated labels table for order ${orderId} (${accountCode}): status=${currentStatus}, handover=${isHandover ? '1' : 'unchanged'}`);
-      
+
     } catch (error) {
       console.error(`❌ Error updating labels table for order ${orderId} (${accountCode}):`, error);
       throw error;
@@ -5462,7 +5464,7 @@ class Database {
 
     try {
       console.log('🔍 [Handover/Tracking Validation] Starting validation check...');
-      
+
       // Get all orders with handover_at timestamp and is_manifest = 1 (grouped by account_code for store isolation)
       const [orders] = await this.mysqlConnection.execute(`
         SELECT 
@@ -5495,12 +5497,12 @@ class Database {
       console.log(`   - Orders without handover_at: ${ordersWithoutHandover.length}`);
 
       // Log orders that are close to the 24-hour threshold (within 1 hour)
-      const nearThreshold = orders.filter(o => 
-        o.handover_at !== null && 
-        o.hours_since_handover >= 23 && 
+      const nearThreshold = orders.filter(o =>
+        o.handover_at !== null &&
+        o.hours_since_handover >= 23 &&
         o.hours_since_handover < 24
       );
-      
+
       if (nearThreshold.length > 0) {
         console.log(`⚠️ [Handover/Tracking Validation] ${nearThreshold.length} order(s) approaching 24-hour threshold:`);
         nearThreshold.forEach(order => {
@@ -5509,12 +5511,12 @@ class Database {
       }
 
       // Log orders that just crossed the 24-hour threshold (within last hour)
-      const justCrossed = orders.filter(o => 
-        o.handover_at !== null && 
-        o.hours_since_handover >= 24 && 
+      const justCrossed = orders.filter(o =>
+        o.handover_at !== null &&
+        o.hours_since_handover >= 24 &&
         o.hours_since_handover < 25
       );
-      
+
       if (justCrossed.length > 0) {
         console.log(`🔄 [Handover/Tracking Validation] ${justCrossed.length} order(s) recently moved to tracking tab:`);
         justCrossed.forEach(order => {
@@ -5532,7 +5534,7 @@ class Database {
         justCrossed: justCrossed.length,
         timestamp: new Date().toISOString()
       };
-      
+
     } catch (error) {
       console.error('❌ [Handover/Tracking Validation] Validation failed:', error);
       throw error;
@@ -5564,7 +5566,7 @@ class Database {
         LEFT JOIN orders o ON l.order_id = o.order_id AND l.account_code = o.account_code
         ORDER BY l.updated_at DESC
       `);
-      
+
       return rows;
     } catch (error) {
       console.error('Error getting labels with shipment status:', error);
@@ -5597,7 +5599,7 @@ class Database {
         WHERE l.is_handover = 1
         ORDER BY l.updated_at DESC
       `);
-      
+
       return rows;
     } catch (error) {
       console.error('Error getting handed over labels:', error);
@@ -5638,7 +5640,7 @@ class Database {
           INDEX idx_shipping_partner (shipping_partner)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `;
-      
+
       await this.mysqlConnection.execute(createTableQuery);
       console.log('✅ store_info table created/verified');
     } catch (error) {
@@ -5671,10 +5673,10 @@ class Database {
           FOREIGN KEY (account_code) REFERENCES store_info(account_code) ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `;
-      
+
       await this.mysqlConnection.execute(createTableQuery);
       console.log('✅ wh_mapping table created/verified');
-      
+
       // Add return_warehouse_id column if it doesn't exist (migration)
       try {
         const [columns] = await this.mysqlConnection.execute(`
@@ -5684,7 +5686,7 @@ class Database {
           AND TABLE_NAME = 'wh_mapping' 
           AND COLUMN_NAME = 'return_warehouse_id'
         `);
-        
+
         if (columns.length === 0) {
           await this.mysqlConnection.execute(`
             ALTER TABLE wh_mapping 
@@ -5715,7 +5717,7 @@ class Database {
         'SELECT * FROM store_info WHERE account_code = ?',
         [accountCode]
       );
-      
+
       return rows.length > 0 ? rows[0] : null;
     } catch (error) {
       console.error('Error getting store by account code:', error);
@@ -5740,12 +5742,12 @@ class Database {
 
     try {
       const placeholders = account_codes.map(() => '?').join(',');
-      
+
       const [rows] = await this.mysqlConnection.execute(
         `SELECT * FROM store_info WHERE account_code IN (${placeholders})`,
         account_codes
       );
-      
+
       return rows || [];
     } catch (error) {
       console.error('Error getting stores by account_codes:', error);
@@ -5774,21 +5776,21 @@ class Database {
           storeDomain = urlMatch[1];
         }
       }
-      
+
       // Remove 'admin/api' part if present and clean up
       storeDomain = storeDomain.split('/')[0].trim();
-      
+
       // Remove protocol if still present
       storeDomain = storeDomain.replace(/^https?:\/\//, '');
-      
+
       console.log(`🔍 [Store Lookup] Searching for store with domain: ${storeDomain}`);
-      
+
       // Try exact match first (ACTIVE stores only)
       let [rows] = await this.mysqlConnection.execute(
         'SELECT * FROM store_info WHERE shopify_store_url = ? AND status = "active"',
         [storeDomain]
       );
-      
+
       // Try with https:// prefix
       if (rows.length === 0) {
         [rows] = await this.mysqlConnection.execute(
@@ -5796,7 +5798,7 @@ class Database {
           [`https://${storeDomain}`]
         );
       }
-      
+
       // Try with http:// prefix
       if (rows.length === 0) {
         [rows] = await this.mysqlConnection.execute(
@@ -5804,7 +5806,7 @@ class Database {
           [`http://${storeDomain}`]
         );
       }
-      
+
       // Try partial match (LIKE)
       if (rows.length === 0) {
         [rows] = await this.mysqlConnection.execute(
@@ -5812,7 +5814,7 @@ class Database {
           [`%${storeDomain}%`]
         );
       }
-      
+
       // If still not found and token is provided, try to find by token (ACTIVE stores only)
       if (rows.length === 0 && shopifyToken) {
         console.log(`🔍 [Store Lookup] Trying to find store by Shopify token...`);
@@ -5821,7 +5823,7 @@ class Database {
           [shopifyToken]
         );
       }
-      
+
       if (rows.length > 0) {
         console.log(`✅ [Store Lookup] Found store: ${rows[0].store_name} (account_code: ${rows[0].account_code})`);
         return rows[0];
@@ -5865,7 +5867,7 @@ class Database {
       const [rows] = await this.mysqlConnection.execute(
         'SELECT * FROM store_info ORDER BY created_at DESC'
       );
-      
+
       return rows;
     } catch (error) {
       console.error('Error getting all stores:', error);
@@ -5888,7 +5890,7 @@ class Database {
         'SELECT * FROM store_info WHERE status = ? ORDER BY store_name ASC',
         [status]
       );
-      
+
       return rows;
     } catch (error) {
       console.error('Error getting stores by status:', error);
@@ -6139,14 +6141,14 @@ class Database {
 
     try {
       const placeholders = account_codes.map(() => '?').join(',');
-      
+
       const [rows] = await this.mysqlConnection.execute(
         `SELECT vendor_wh_id, return_warehouse_id, account_code 
          FROM wh_mapping 
          WHERE claimio_wh_id = ? AND account_code IN (${placeholders}) AND is_active = TRUE`,
         [claimioWhId, ...account_codes]
       );
-      
+
       return rows || [];
     } catch (error) {
       console.error('Error getting warehouse mappings:', error);
@@ -6181,13 +6183,13 @@ class Database {
         LEFT JOIN users u ON wm.claimio_wh_id = u.warehouseId
         LEFT JOIN store_info s ON wm.account_code = s.account_code
       `;
-      
+
       if (!includeInactive) {
         query += ' WHERE wm.is_active = TRUE';
       }
-      
+
       query += ' ORDER BY wm.created_at DESC';
-      
+
       const [rows] = await this.mysqlConnection.execute(query);
       return rows;
     } catch (error) {

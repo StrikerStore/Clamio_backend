@@ -11,7 +11,7 @@ class OrderTrackingService {
   constructor() {
     this.isActiveSyncRunning = false;
     this.isInactiveSyncRunning = false;
-    this.shipwayApiUrl = 'https://app.shipway.com/api/Ndr/OrderDetails';
+    this.shipwayApiUrl = 'https://app.shipway.com/api/tracking';
     // Store credentials cache: account_code -> auth_token
     this.storeCredentialsCache = new Map();
   }
@@ -28,13 +28,13 @@ class OrderTrackingService {
     }
 
     this.isActiveSyncRunning = true;
-    
+
     try {
       console.log('🚀 [Active Tracking] Starting sync for active orders...');
-      
+
       const database = require('../config/database');
       await database.waitForMySQLInitialization();
-      
+
       if (!database.isMySQLAvailable()) {
         throw new Error('Database connection not available');
       }
@@ -50,11 +50,11 @@ class OrderTrackingService {
       const batchSize = 5;
       for (let i = 0; i < activeOrders.length; i += batchSize) {
         const batch = activeOrders.slice(i, i + batchSize);
-        
+
         // Process batch in parallel
-        const batchPromises = batch.map(order => this.processOrderTracking(order.order_id, 'active', order.account_code));
+        const batchPromises = batch.map(order => this.processOrderTracking(order.order_id, 'active', order.account_code, order.awb));
         const batchResults = await Promise.allSettled(batchPromises);
-        
+
         batchResults.forEach((result, index) => {
           if (result.status === 'fulfilled') {
             successCount++;
@@ -72,7 +72,7 @@ class OrderTrackingService {
       }
 
       console.log(`✅ [Active Tracking] Sync completed: ${successCount} success, ${errorCount} errors`);
-      
+
       // Validate handover/tracking logic after sync (runs hourly along with current_shipment_status update)
       try {
         console.log('[Handover/Tracking Validation] Running validation check after tracking sync...');
@@ -82,7 +82,7 @@ class OrderTrackingService {
         console.error('[Handover/Tracking Validation] Validation check failed:', validationError.message);
         // Don't fail the entire sync if validation fails
       }
-      
+
       return {
         success: true,
         message: 'Active tracking sync completed',
@@ -91,7 +91,7 @@ class OrderTrackingService {
         errorCount,
         timestamp: new Date().toISOString()
       };
-      
+
     } catch (error) {
       console.error('💥 [Active Tracking] Sync failed:', error.message);
       return {
@@ -116,13 +116,13 @@ class OrderTrackingService {
     }
 
     this.isInactiveSyncRunning = true;
-    
+
     try {
       console.log('🚀 [Inactive Tracking] Starting sync for inactive orders...');
-      
+
       const database = require('../config/database');
       await database.waitForMySQLInitialization();
-      
+
       if (!database.isMySQLAvailable()) {
         throw new Error('Database connection not available');
       }
@@ -138,11 +138,11 @@ class OrderTrackingService {
       const batchSize = 3;
       for (let i = 0; i < inactiveOrders.length; i += batchSize) {
         const batch = inactiveOrders.slice(i, i + batchSize);
-        
+
         // Process batch in parallel
-        const batchPromises = batch.map(order => this.processOrderTracking(order.order_id, 'inactive', order.account_code));
+        const batchPromises = batch.map(order => this.processOrderTracking(order.order_id, 'inactive', order.account_code, order.awb));
         const batchResults = await Promise.allSettled(batchPromises);
-        
+
         batchResults.forEach((result, index) => {
           if (result.status === 'fulfilled') {
             successCount++;
@@ -160,7 +160,7 @@ class OrderTrackingService {
       }
 
       console.log(`✅ [Inactive Tracking] Sync completed: ${successCount} success, ${errorCount} errors`);
-      
+
       return {
         success: true,
         message: 'Inactive tracking sync completed',
@@ -169,7 +169,7 @@ class OrderTrackingService {
         errorCount,
         timestamp: new Date().toISOString()
       };
-      
+
     } catch (error) {
       console.error('💥 [Inactive Tracking] Sync failed:', error.message);
       return {
@@ -187,18 +187,24 @@ class OrderTrackingService {
    * @param {string} orderId - The order ID to fetch tracking for
    * @param {string} orderType - 'active' or 'inactive'
    * @param {string} accountCode - The account_code for the store
+   * @param {string} awb - The AWB number for the shipment
    */
-  async processOrderTracking(orderId, orderType, accountCode) {
+  async processOrderTracking(orderId, orderType, accountCode, awb) {
     try {
       if (!accountCode) {
         throw new Error('account_code is required for processing order tracking');
       }
 
-      console.log(`🔄 [Tracking] Fetching tracking data for order ${orderId} (${orderType}, store: ${accountCode})`);
-      
-      // Fetch tracking data from Shipway API
-      const trackingData = await this.fetchTrackingFromShipway(orderId, accountCode);
-      
+      if (!awb) {
+        console.log(`⚠️ [Tracking] No AWB found for order ${orderId}, skipping tracking sync`);
+        return { success: true, message: 'No AWB available for tracking' };
+      }
+
+      console.log(`🔄 [Tracking] Fetching tracking data for order ${orderId} (AWB: ${awb}, ${orderType}, store: ${accountCode})`);
+
+      // Fetch tracking data from Shipway API using AWB
+      const trackingData = await this.fetchTrackingFromShipway(awb, accountCode);
+
       if (!trackingData || !trackingData.shipment_status_history) {
         console.log(`⚠️ [Tracking] No tracking data found for order ${orderId}`);
         return { success: true, message: 'No tracking data available' };
@@ -230,20 +236,20 @@ class OrderTrackingService {
 
       // Determine actual order type based on latest status (using normalized status)
       const actualOrderType = this.determineOrderType({ ...trackingData, shipment_status_history: normalizedTrackingEvents });
-      
+
       // Store tracking data with normalized statuses
       const database = require('../config/database');
       await database.storeOrderTracking(orderId, actualOrderType, normalizedTrackingEvents);
-      
+
       console.log(`✅ [Tracking] Stored ${normalizedTrackingEvents.length} tracking events for order ${orderId}`);
-      
+
       // Normalize latest status for labels table
       const normalizedLatestStatus = this.normalizeShipmentStatus(latestStatus.name);
-      
+
       // Update labels table with current shipment status and handover logic
       // Check if normalized status is "In Transit" (case-insensitive)
       const isHandover = normalizedLatestStatus === 'In Transit';
-      
+
       // Get the timestamp for handover event (if available)
       // IMPORTANT: We want the FIRST "In Transit" event (normalized), not the latest
       let handoverTimestamp = null;
@@ -257,9 +263,9 @@ class OrderTrackingService {
           console.log(`🚚 [Tracking] Found first "In Transit" event (normalized) for order ${orderId} at timestamp: ${handoverTimestamp}`);
         }
       }
-      
+
       await database.updateLabelsShipmentStatus(orderId, accountCode, normalizedLatestStatus, isHandover, handoverTimestamp);
-      
+
       return {
         success: true,
         message: 'Tracking data processed successfully',
@@ -268,7 +274,7 @@ class OrderTrackingService {
         currentStatus: normalizedLatestStatus,
         isHandover: isHandover
       };
-      
+
     } catch (error) {
       console.error(`❌ [Tracking] Failed to process order ${orderId}:`, error.message);
       throw error;
@@ -360,44 +366,49 @@ class OrderTrackingService {
     // Fetch from database
     await database.waitForMySQLInitialization();
     const store = await database.getStoreByAccountCode(accountCode);
-    
+
     if (!store) {
       throw new Error(`Store not found for account_code: ${accountCode}`);
     }
-    
+
     if (store.status !== 'active') {
       throw new Error(`Store is not active: ${accountCode}`);
     }
-    
+
     if (!store.auth_token) {
       throw new Error(`Store auth_token not found for account_code: ${accountCode}`);
     }
 
     // Cache the credentials
     this.storeCredentialsCache.set(accountCode, store.auth_token);
-    
+
     return store.auth_token;
   }
 
   /**
-   * Fetch tracking data from Shipway API
-   * @param {string} orderId - The order ID to fetch tracking for
+   * Fetch tracking data from Shipway API using the new GET /api/tracking endpoint
+   * @param {string} awb - The AWB number to fetch tracking for
    * @param {string} accountCode - The account_code for the store
    */
-  async fetchTrackingFromShipway(orderId, accountCode) {
+  async fetchTrackingFromShipway(awb, accountCode) {
     try {
       if (!accountCode) {
         throw new Error('account_code is required for fetching tracking data');
       }
 
+      if (!awb) {
+        throw new Error('AWB number is required for fetching tracking data');
+      }
+
       // Get store-specific credentials
       const basicAuthHeader = await this.getStoreCredentials(accountCode);
 
-      console.log(`📡 [API] Calling Shipway OrderDetails API for order ${orderId} (store: ${accountCode})`);
-      
-      const response = await axios.post(this.shipwayApiUrl, {
-        order_id: orderId
-      }, {
+      // Build the API URL with query parameters
+      const apiUrl = `${this.shipwayApiUrl}?awb_numbers=${awb}&tracking_history=0`;
+
+      console.log(`📡 [API] Calling Shipway Tracking API for AWB ${awb} (store: ${accountCode})`);
+
+      const response = await axios.get(apiUrl, {
         headers: {
           'Authorization': basicAuthHeader,
           'Content-Type': 'application/json'
@@ -411,61 +422,61 @@ class OrderTrackingService {
 
       const data = response.data;
 
-      // Handle array response (new API format)
-      let trackingDetails = null;
-      if (Array.isArray(data) && data.length > 0) {
-        // Take first element from array
-        const firstItem = data[0];
-        if (firstItem.tracking_details) {
-          trackingDetails = firstItem.tracking_details;
+      // The new API returns an array of tracking results
+      // Example response:
+      // [
+      //   {
+      //     "awb": 22679038356322,
+      //     "tracking_details": {
+      //       "shipment_status": "IN_TRANSIT",
+      //       "shipment_details": [...],
+      //       "track_url": "..."
+      //     }
+      //   }
+      // ]
+
+      if (!Array.isArray(data) || data.length === 0) {
+        console.log(`⚠️ [API] No tracking data returned for AWB ${awb}`);
+        return null;
+      }
+
+      // Find the tracking result for our AWB
+      const trackingResult = data.find(item => String(item.awb) === String(awb));
+
+      if (!trackingResult || !trackingResult.tracking_details) {
+        console.log(`⚠️ [API] No tracking_details found for AWB ${awb}`);
+        return null;
+      }
+
+      const trackingDetails = trackingResult.tracking_details;
+
+      if (!trackingDetails.shipment_status) {
+        console.log(`⚠️ [API] No shipment_status found for AWB ${awb}`);
+        return null;
+      }
+
+      const currentStatus = trackingDetails.shipment_status;
+      const currentDateTime = new Date().toISOString().slice(0, 19).replace('T', ' '); // Format: YYYY-MM-DD HH:MM:SS
+
+      // Create shipment_status_history in the format expected by processOrderTracking
+      const shipmentStatusHistory = [
+        {
+          name: currentStatus,
+          time: currentDateTime
         }
-      } else if (data && data.tracking_details) {
-        // Direct object with tracking_details
-        trackingDetails = data.tracking_details;
-      } else if (data && data.success === "1" && data.shipment_status_history) {
-        // Old API format - return as is
-        console.log(`✅ [API] Received tracking data for order ${orderId}: ${data.shipment_status_history?.length || 0} events`);
-        return data;
-      }
+      ];
 
-      // Extract shipment_status from new API format
-      if (trackingDetails && trackingDetails.shipment_status) {
-        const currentStatus = trackingDetails.shipment_status;
-        const currentDateTime = new Date().toISOString().slice(0, 19).replace('T', ' '); // Format: YYYY-MM-DD HH:MM:SS
-        
-        // Create our own history with single entry
-        const shipmentStatusHistory = [
-          {
-            name: currentStatus,
-            time: currentDateTime
-          }
-        ];
+      console.log(`✅ [API] Received tracking data for AWB ${awb}: status="${currentStatus}"`);
 
-        console.log(`✅ [API] Received tracking data for order ${orderId}: Extracted status "${currentStatus}" at ${currentDateTime}`);
-        
-        // Return in the expected format
-        return {
-          success: "1",
-          shipment_status_history: shipmentStatusHistory
-        };
-      }
+      // Return in the expected format
+      return {
+        success: "1",
+        shipment_status_history: shipmentStatusHistory
+      };
 
-      // If no tracking_details found, check for old format
-      if (!data || data.success !== "1") {
-        throw new Error(`API error: ${data?.message || 'Unknown error'}`);
-      }
-
-      // Fallback to old format if shipment_status_history exists
-      if (data.shipment_status_history) {
-        console.log(`✅ [API] Received tracking data for order ${orderId}: ${data.shipment_status_history?.length || 0} events`);
-        return data;
-      }
-
-      throw new Error('Invalid API response format: No tracking_details or shipment_status_history found');
-      
     } catch (error) {
       if (error.response) {
-        console.error(`❌ [API] Shipway API error for order ${orderId}:`, error.response.status, error.response.data);
+        console.error(`❌ [API] Shipway API error for AWB ${awb}:`, error.response.status, error.response.data);
         throw new Error(`Shipway API error: ${error.response.data?.message || error.response.statusText}`);
       } else if (error.code === 'ECONNABORTED') {
         throw new Error('Request timeout - Shipway API not responding');
@@ -486,16 +497,16 @@ class OrderTrackingService {
 
     // Get the latest status (last item in the array)
     const latestStatus = trackingData.shipment_status_history[trackingData.shipment_status_history.length - 1];
-    
+
     // Validate latestStatus has name property
     if (!latestStatus || !latestStatus.name) {
       console.log(`⚠️ [Tracking] Invalid latest status in determineOrderType:`, latestStatus);
       return 'active'; // Default to active if invalid
     }
-    
+
     // Use normalized status for comparison (should already be normalized, but normalize again for safety)
     const normalizedStatus = this.normalizeShipmentStatus(latestStatus.name);
-    
+
     if (normalizedStatus === 'Delivered') {
       return 'inactive';
     } else {
@@ -525,26 +536,26 @@ class OrderTrackingService {
   async cleanupOldTrackingData() {
     try {
       console.log('🧹 [Cleanup] Starting cleanup of old tracking data...');
-      
+
       const database = require('../config/database');
       await database.waitForMySQLInitialization();
-      
+
       if (!database.isMySQLAvailable()) {
         throw new Error('Database connection not available');
       }
 
       // Remove tracking data older than 90 days
       const result = await database.cleanupOldOrderTracking();
-      
+
       console.log(`✅ [Cleanup] Cleaned up ${result.deletedCount} old tracking records`);
-      
+
       return {
         success: true,
         message: 'Cleanup completed',
         deletedCount: result.deletedCount,
         timestamp: new Date().toISOString()
       };
-      
+
     } catch (error) {
       console.error('💥 [Cleanup] Failed:', error.message);
       return {
