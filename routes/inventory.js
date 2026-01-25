@@ -7,18 +7,18 @@ const productMonitorService = require('../services/productMonitorService');
 
 // Configure multer for file upload (memory storage for CSV)
 const storage = multer.memoryStorage();
-const upload = multer({ 
+const upload = multer({
   storage: storage,
   fileFilter: (req, file, cb) => {
     // Accept CSV files with various mimetypes (different systems report different types for CSV)
-    const isCSV = 
+    const isCSV =
       file.mimetype === 'text/csv' ||
       file.mimetype === 'application/csv' ||
       file.mimetype === 'text/plain' ||
       file.mimetype === 'application/vnd.ms-excel' ||
       file.mimetype === 'application/x-csv' ||
       file.originalname.toLowerCase().endsWith('.csv');
-    
+
     if (isCSV) {
       cb(null, true);
     } else {
@@ -56,6 +56,18 @@ router.post(
 );
 
 /**
+ * @route   GET /api/admin/inventory/rto
+ * @desc    Get RTO inventory from database with product names
+ * @access  Admin, Superadmin
+ */
+router.get(
+  '/rto',
+  authenticateBasicAuth,
+  requireAdminOrSuperadmin,
+  inventoryController.getRTOInventory
+);
+
+/**
  * @route   GET /api/admin/inventory/products/new
  * @desc    Check for new products added in the last 24 hours
  * @access  Admin, Superadmin
@@ -67,7 +79,7 @@ router.get(
   async (req, res) => {
     try {
       const result = await productMonitorService.checkNewProducts();
-      
+
       res.json({
         success: true,
         message: `Found ${result.count} new product(s) in the last 24 hours`,
@@ -96,7 +108,7 @@ router.get(
   async (req, res) => {
     try {
       const hours = parseInt(req.params.hours);
-      
+
       if (isNaN(hours) || hours <= 0) {
         return res.status(400).json({
           success: false,
@@ -105,7 +117,7 @@ router.get(
       }
 
       const result = await productMonitorService.checkNewProductsCustomWindow(hours);
-      
+
       res.json({
         success: true,
         message: `Found ${result.count} new product(s) in the last ${hours} hours`,
@@ -134,7 +146,7 @@ router.get(
   async (req, res) => {
     try {
       const hours = parseInt(req.params.hours);
-      
+
       if (isNaN(hours) || hours <= 0) {
         return res.status(400).json({
           success: false,
@@ -143,7 +155,7 @@ router.get(
       }
 
       const result = await productMonitorService.checkUpdatedProducts(hours);
-      
+
       res.json({
         success: true,
         message: `Found ${result.count} updated product(s) in the last ${hours} hours`,

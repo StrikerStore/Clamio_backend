@@ -7110,6 +7110,95 @@ class Database {
   }
 
   /**
+   * Get RTO inventory with product names from products table
+   * Matches rto_inventory.product_code (without size suffix) to products.sku_id
+   * Uses account_code priority: STRI > DRIB > JERS for product name selection
+   * @returns {Promise<Array>} RTO inventory with product names
+   */
+  async getRTOInventoryWithProductNames() {
+    await this.waitForMySQLInitialization();
+
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      console.log('📦 [RTO Inventory] Fetching RTO inventory with product names...');
+
+      // Query that:
+      // 1. Strips size suffix from product_code to match sku_id
+      //    (product_code = "CLU-KRM-TH-25/26-16-18", size = "16-18" → base_sku = "CLU-KRM-TH-25/26")
+      // 2. Joins with products table
+      // 3. Uses account_code priority for product name selection when multiple matches exist
+      const query = `
+        WITH rto_with_base_sku AS (
+          SELECT 
+            ri.id,
+            ri.rto_wh,
+            ri.product_code,
+            ri.size,
+            ri.quantity,
+            -- Remove "-{size}" suffix from product_code to get base SKU
+            CASE 
+              WHEN ri.size IS NOT NULL AND ri.size != '' 
+                   AND ri.product_code LIKE CONCAT('%-', ri.size)
+              THEN LEFT(ri.product_code, LENGTH(ri.product_code) - LENGTH(CONCAT('-', ri.size)))
+              ELSE ri.product_code
+            END as base_sku
+          FROM rto_inventory ri
+        ),
+        rto_with_products AS (
+          SELECT 
+            r.id,
+            r.rto_wh,
+            r.product_code,
+            r.size,
+            r.quantity,
+            r.base_sku,
+            p.name as product_name,
+            p.account_code,
+            -- Priority ranking: STRI=1, DRIB=2, JERS=3, others=4
+            CASE p.account_code
+              WHEN 'STRI' THEN 1
+              WHEN 'DRIB' THEN 2
+              WHEN 'JERS' THEN 3
+              ELSE 4
+            END as priority_rank,
+            ROW_NUMBER() OVER (
+              PARTITION BY r.id 
+              ORDER BY 
+                CASE p.account_code
+                  WHEN 'STRI' THEN 1
+                  WHEN 'DRIB' THEN 2
+                  WHEN 'JERS' THEN 3
+                  ELSE 4
+                END
+            ) as rn
+          FROM rto_with_base_sku r
+          LEFT JOIN products p ON r.base_sku = p.sku_id
+        )
+        SELECT 
+          rto_wh as Location,
+          COALESCE(product_name, product_code) as Product_Name,
+          size as Size,
+          CAST(quantity AS CHAR) as Quantity,
+          product_code,
+          base_sku
+        FROM rto_with_products
+        WHERE rn = 1
+        ORDER BY rto_wh, Product_Name, size
+      `;
+
+      const [rows] = await this.mysqlConnection.execute(query);
+      console.log(`📦 [RTO Inventory] Found ${rows.length} RTO entries with product names`);
+      return rows;
+    } catch (error) {
+      console.error('❌ [RTO Inventory] Error getting RTO inventory with product names:', error);
+      throw error;
+    }
+  }
+
+  /**
    * Process delivered RTO orders and update inventory
    * This is the main function that orchestrates the RTO inventory update process
    * @returns {Promise<Object>} Processing result with stats

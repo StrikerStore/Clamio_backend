@@ -17,26 +17,26 @@ const SIZE_ORDER = ['S', 'M', 'L', 'XL', '2XL', '3XL', '4XL', '5XL'];
  */
 function sortSizeQuantities(sizeQuantityStr) {
   if (!sizeQuantityStr) return '';
-  
+
   // Split by comma
   const pairs = sizeQuantityStr.split(',').map(p => p.trim()).filter(p => p);
-  
+
   // Sort by SIZE_ORDER
   const sorted = pairs.sort((a, b) => {
     const sizeA = a.split('-')[0].trim().toUpperCase();
     const sizeB = b.split('-')[0].trim().toUpperCase();
-    
+
     const indexA = SIZE_ORDER.indexOf(sizeA);
     const indexB = SIZE_ORDER.indexOf(sizeB);
-    
+
     // If size not in SIZE_ORDER, put at end
     if (indexA === -1 && indexB === -1) return 0;
     if (indexA === -1) return 1;
     if (indexB === -1) return -1;
-    
+
     return indexA - indexB;
   });
-  
+
   return sorted.join(', ');
 }
 
@@ -47,11 +47,11 @@ function sortSizeQuantities(sizeQuantityStr) {
  */
 function detectProductPrefix(productName) {
   if (!productName) return '';
-  
+
   const lowerName = productName.toLowerCase();
   if (lowerName.includes('player')) return 'Player';
   if (lowerName.includes('fan')) return 'Fan';
-  
+
   return '';
 }
 
@@ -90,7 +90,7 @@ async function getAggregatedInventory(req, res) {
     `;
 
     const orders = await database.query(query);
-    
+
     console.log(`📦 Found ${orders.length} unclaimed order items`);
 
     // Group by base product (using cleaned SKU)
@@ -99,12 +99,12 @@ async function getAggregatedInventory(req, res) {
     for (const order of orders) {
       // Get base SKU (clean product_code)
       const baseSku = database.cleanSkuId(order.product_code) || order.base_sku || order.product_code;
-      
+
       if (!productMap.has(baseSku)) {
         // Initialize product entry
         const productName = order.product_display_name || order.product_name;
         const prefix = detectProductPrefix(productName);
-        
+
         productMap.set(baseSku, {
           productName: productName,
           baseProductName: database.removeSizeFromProductName(productName),
@@ -116,7 +116,7 @@ async function getAggregatedInventory(req, res) {
       }
 
       const product = productMap.get(baseSku);
-      
+
       // Aggregate quantities by size
       const size = (order.size || 'Unknown').toUpperCase();
       const currentQty = product.sizes.get(size) || 0;
@@ -128,12 +128,12 @@ async function getAggregatedInventory(req, res) {
       // Build size-quantity string
       const sizeQuantityPairs = Array.from(product.sizes.entries())
         .map(([size, qty]) => `${size}-${qty}`);
-      
+
       // Sort sizes
       const sortedSizeQuantity = sortSizeQuantities(sizeQuantityPairs.join(', '));
-      
+
       // Add prefix (Player/Fan) if detected
-      const finalSizeQuantity = product.prefix 
+      const finalSizeQuantity = product.prefix
         ? `${product.prefix} ${sortedSizeQuantity}`
         : sortedSizeQuantity;
 
@@ -188,32 +188,32 @@ async function uploadRTODetails(req, res) {
     }
 
     const csvData = req.file.buffer.toString('utf-8');
-    
+
     // Parse CSV (simple parsing - handle both \n and \r\n line endings)
     const lines = csvData
       .split(/\r?\n/)
       .map(line => line.trim())
       .filter(line => line.length > 0); // Remove empty lines
-    
+
     if (lines.length === 0) {
       return res.status(400).json({
         success: false,
         error: 'CSV file is empty'
       });
     }
-    
+
     const headers = lines[0].split(',').map(h => h.trim());
-    
+
     // Map column indices based on CSV structure
     const productNameIndex = headers.findIndex(h => h.toLowerCase().includes('product_n'));
     const variantSkuIndex = headers.findIndex(h => h.toLowerCase().includes('variant_sk'));
     const sizeIndex = headers.findIndex(h => h.toLowerCase() === 'size');
     const quantityIndex = headers.findIndex(h => h.toLowerCase() === 'quantity');
     const locationIndex = headers.findIndex(h => h.toLowerCase() === 'location');
-    
+
     console.log('📋 CSV Headers:', headers);
     console.log('📋 Column indices:', { productNameIndex, variantSkuIndex, sizeIndex, quantityIndex, locationIndex });
-    
+
     // Validate required columns
     if (productNameIndex < 0 || sizeIndex < 0 || quantityIndex < 0 || locationIndex < 0) {
       return res.status(400).json({
@@ -221,24 +221,24 @@ async function uploadRTODetails(req, res) {
         error: 'Missing required columns. Expected: Product_Name, Size, Quantity, Location'
       });
     }
-    
+
     const rtoData = [];
-    
+
     for (let i = 1; i < lines.length; i++) {
       const values = lines[i].split(',').map(v => v.trim());
-      
+
       // Skip empty rows
       if (values.length < 4 || values.every(v => !v)) {
         continue;
       }
-      
+
       const row = {
         Product_Name: values[productNameIndex] || '',
         Location: values[locationIndex] || '',
         Size: values[sizeIndex] || '',
         Quantity: values[quantityIndex] || ''
       };
-      
+
       // Only add row if it has at least Product_Name and Location
       if (row.Product_Name || row.Location) {
         rtoData.push(row);
@@ -265,8 +265,39 @@ async function uploadRTODetails(req, res) {
   }
 }
 
+/**
+ * Get RTO inventory from database with product names
+ * @param {Object} req - Express request
+ * @param {Object} res - Express response
+ */
+async function getRTOInventory(req, res) {
+  try {
+    console.log('📊 Fetching RTO inventory from database...');
+
+    const rtoData = await database.getRTOInventoryWithProductNames();
+
+    console.log(`✅ Fetched ${rtoData.length} RTO entries`);
+
+    res.json({
+      success: true,
+      data: {
+        totalEntries: rtoData.length,
+        rtoData: rtoData
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error fetching RTO inventory:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch RTO inventory',
+      message: error.message
+    });
+  }
+}
+
 module.exports = {
   getAggregatedInventory,
-  uploadRTODetails
+  uploadRTODetails,
+  getRTOInventory
 };
-
