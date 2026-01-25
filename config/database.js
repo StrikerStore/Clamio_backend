@@ -6849,8 +6849,8 @@ class Database {
    * Update days_since_initiated and is_focus for all RTO records
    * This should be called daily via cron job
    * Logic:
-   * - days_since_initiated: DATEDIFF(CURRENT_DATE, DATE(created_at))
-   * - is_focus: 1 if (status contains 'RTO Initiated') AND (days > 7) AND (order not delivered)
+   * - days_since_initiated: DATEDIFF(CURRENT_DATE, DATE(activity_date))
+   * - is_focus: 1 if days_since_initiated > 7 AND status NOT contains 'delivered' AND is_delivered = 0
    */
   async updateRTODaysAndFocus() {
     if (!this.mysqlConnection) {
@@ -6860,10 +6860,11 @@ class Database {
     try {
       console.log('🔄 [RTO] Starting daily update for days_since_initiated and is_focus...');
 
-      // Step 1: Update days_since_initiated for all records
+      // Step 1: Update days_since_initiated for all records (using activity_date)
+      // If activity_date is NULL, fall back to created_at
       const [daysResult] = await this.mysqlConnection.execute(`
         UPDATE rto_tracking 
-        SET days_since_initiated = DATEDIFF(CURRENT_DATE, DATE(created_at))
+        SET days_since_initiated = DATEDIFF(CURRENT_DATE, DATE(COALESCE(activity_date, created_at)))
       `);
       console.log(`✅ [RTO] Updated days_since_initiated for ${daysResult.affectedRows} records`);
 
@@ -6884,32 +6885,14 @@ class Database {
       await this.mysqlConnection.execute(`UPDATE rto_tracking SET is_focus = 0`);
 
       // Step 4: Set is_focus = 1 for records meeting criteria:
-      // Criteria 1: Status contains 'RTO Initiated' or 'RTO_Initiated' AND days > 7 AND order not delivered
-      // Criteria 2: Status is undelivered (RTONDR5, RTOUND, RTO Undelivered, UND, Undelivered) AND order not delivered
+      // days_since_initiated > 7 AND status NOT contains 'delivered' AND is_delivered = 0
       const [focusResult] = await this.mysqlConnection.execute(`
         UPDATE rto_tracking 
         SET is_focus = 1
-        WHERE (
-          -- Criteria 1: RTO Initiated > 7 days
-          (
-            (order_status LIKE '%RTO Initiated%' OR order_status LIKE '%RTO_Initiated%')
-            AND days_since_initiated > 7
-          )
-          OR
-          -- Criteria 2: Undelivered statuses (immediate focus regardless of days)
-          (
-            order_status IN ('RTONDR5', 'RTOUND', 'RTO Undelivered', 'UND', 'Undelivered')
-            OR order_status LIKE '%RTONDR%'
-            OR order_status LIKE '%RTOUND%'
-            OR order_status LIKE '%RTO Undelivered%'
-            OR order_status LIKE '%Undelivered%'
-          )
-        )
-        AND order_id NOT IN (
-          SELECT DISTINCT order_id FROM (
-            SELECT order_id FROM rto_tracking WHERE is_delivered = 1
-          ) as delivered_orders
-        )
+        WHERE days_since_initiated > 7
+          AND order_status NOT LIKE '%delivered%'
+          AND order_status NOT LIKE '%Delivered%'
+          AND is_delivered = 0
       `);
       console.log(`✅ [RTO] Updated is_focus for ${focusResult.affectedRows} records`);
 
@@ -7191,6 +7174,7 @@ class Database {
               ELSE ri.product_code
             END as base_sku
           FROM rto_inventory ri
+          WHERE ri.quantity > 0
         ),
         rto_with_products AS (
           SELECT 
@@ -7223,10 +7207,11 @@ class Database {
           LEFT JOIN products p ON r.base_sku = p.sku_id
         )
         SELECT 
+          id,
           rto_wh as Location,
           COALESCE(product_name, product_code) as Product_Name,
           size as Size,
-          CAST(quantity AS CHAR) as Quantity,
+          CAST(quantity AS SIGNED) as Quantity,
           product_code,
           base_sku
         FROM rto_with_products
@@ -7308,6 +7293,102 @@ class Database {
       };
     } catch (error) {
       console.error('❌ [RTO Inventory] Error processing RTO inventory:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Batch update RTO inventory quantities
+   * @param {Array} updates - Array of {id, quantity} objects
+   * @returns {Promise<Object>} Update result with count
+   */
+  async updateRTOInventoryBatch(updates) {
+    await this.waitForMySQLInitialization();
+
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    if (!updates || !Array.isArray(updates) || updates.length === 0) {
+      return { success: true, updatedCount: 0, message: 'No updates provided' };
+    }
+
+    try {
+      console.log(`📦 [RTO Inventory] Batch updating ${updates.length} items...`);
+
+      let updatedCount = 0;
+
+      // Use a transaction for batch updates
+      await this.mysqlConnection.beginTransaction();
+
+      try {
+        for (const update of updates) {
+          if (update.id === undefined || update.quantity === undefined) {
+            console.warn(`⚠️ [RTO Inventory] Skipping invalid update:`, update);
+            continue;
+          }
+
+          const quantity = Math.max(0, parseInt(update.quantity) || 0);
+
+          const [result] = await this.mysqlConnection.execute(
+            `UPDATE rto_inventory SET quantity = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+            [quantity, update.id]
+          );
+
+          if (result.affectedRows > 0) {
+            updatedCount++;
+          }
+        }
+
+        await this.mysqlConnection.commit();
+        console.log(`✅ [RTO Inventory] Batch update completed: ${updatedCount} items updated`);
+
+        return {
+          success: true,
+          updatedCount: updatedCount,
+          message: `Successfully updated ${updatedCount} items`
+        };
+      } catch (txError) {
+        await this.mysqlConnection.rollback();
+        throw txError;
+      }
+    } catch (error) {
+      console.error('❌ [RTO Inventory] Error batch updating inventory:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Cleanup zero-quantity RTO inventory records older than 48 hours
+   * This should be called daily via cron job at 6 AM
+   * Deletes rows where quantity = 0 AND updated_at < NOW() - 48 hours
+   * @returns {Promise<Object>} Cleanup result with deleted count
+   */
+  async cleanupZeroQuantityRTOInventory() {
+    await this.waitForMySQLInitialization();
+
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      console.log('🧹 [RTO Inventory] Starting cleanup of zero-quantity records older than 48 hours...');
+
+      const [result] = await this.mysqlConnection.execute(`
+        DELETE FROM rto_inventory 
+        WHERE quantity = 0 
+          AND updated_at < DATE_SUB(NOW(), INTERVAL 48 HOUR)
+      `);
+
+      console.log(`✅ [RTO Inventory] Cleanup completed: ${result.affectedRows} records deleted`);
+
+      return {
+        success: true,
+        deletedCount: result.affectedRows,
+        message: `Deleted ${result.affectedRows} zero-quantity records older than 48 hours`
+      };
+    } catch (error) {
+      console.error('❌ [RTO Inventory] Error cleaning up zero-quantity inventory:', error);
       throw error;
     }
   }

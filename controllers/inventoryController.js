@@ -296,8 +296,62 @@ async function getRTOInventory(req, res) {
   }
 }
 
+/**
+ * Update RTO inventory quantities (batch update)
+ * @param {Object} req - Express request with updates array
+ * @param {Object} res - Express response
+ */
+async function updateRTOInventory(req, res) {
+  try {
+    console.log('📝 Processing RTO inventory batch update...');
+
+    const { updates } = req.body;
+
+    if (!updates || !Array.isArray(updates)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid request. Expected updates array in body.'
+      });
+    }
+
+    // Validate each update
+    for (const update of updates) {
+      if (update.id === undefined || update.id === null) {
+        return res.status(400).json({
+          success: false,
+          error: 'Each update must have an id field'
+        });
+      }
+      if (update.quantity === undefined || update.quantity === null || update.quantity < 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'Each update must have a valid quantity (>= 0)'
+        });
+      }
+    }
+
+    const result = await database.updateRTOInventoryBatch(updates);
+
+    console.log(`✅ Updated ${result.updatedCount} RTO inventory items`);
+
+    res.json({
+      success: true,
+      data: result
+    });
+
+  } catch (error) {
+    console.error('❌ Error updating RTO inventory:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to update RTO inventory',
+      message: error.message
+    });
+  }
+}
+
 module.exports = {
   getAggregatedInventory,
   uploadRTODetails,
-  getRTOInventory
+  getRTOInventory,
+  updateRTOInventory
 };

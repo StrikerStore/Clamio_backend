@@ -68,6 +68,18 @@ router.get(
 );
 
 /**
+ * @route   PUT /api/admin/inventory/rto
+ * @desc    Batch update RTO inventory quantities
+ * @access  Admin, Superadmin
+ */
+router.put(
+  '/rto',
+  authenticateBasicAuth,
+  requireAdminOrSuperadmin,
+  inventoryController.updateRTOInventory
+);
+
+/**
  * @route   GET /api/admin/inventory/products/new
  * @desc    Check for new products added in the last 24 hours
  * @access  Admin, Superadmin

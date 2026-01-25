@@ -707,6 +707,17 @@ app.listen(PORT, async () => {
     }
   });
 
+  // RTO Inventory Cleanup - Delete zero-quantity records older than 48 hours at 6 AM daily
+  cron.schedule('0 6 * * *', async () => {
+    try {
+      console.log('[RTO Inventory Cleanup] Starting cleanup of zero-quantity records...');
+      const result = await database.cleanupZeroQuantityRTOInventory();
+      console.log(`[RTO Inventory Cleanup] Completed. Deleted: ${result.deletedCount} records`);
+    } catch (err) {
+      console.error('[RTO Inventory Cleanup] Failed:', err.message);
+    }
+  });
+
   // Run one-time migration to update rto_wh from latest activity location
   (async () => {
     try {
