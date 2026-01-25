@@ -247,20 +247,23 @@ class OrderTrackingService {
       const normalizedLatestStatus = this.normalizeShipmentStatus(latestStatus.name);
 
       // Update labels table with current shipment status and handover logic
-      // Check if normalized status is "In Transit" (case-insensitive)
-      const isHandover = normalizedLatestStatus === 'In Transit';
+      // Check if status should set is_handover = 1
+      // Based on Shipway API statuses:
+      // is_handover = 0: AWB_ASSIGNED, Shipment Booked, Pickup Failed, SHPFR3
+      // is_handover = 1: All other statuses (In Transit, Delivered, RTO, Out for Delivery, etc.)
+      const isHandover = this.shouldSetHandover(normalizedLatestStatus);
 
       // Get the timestamp for handover event (if available)
-      // IMPORTANT: We want the FIRST "In Transit" event (normalized), not the latest
+      // IMPORTANT: We want the FIRST handover-qualifying event, not the latest
       let handoverTimestamp = null;
       if (isHandover) {
-        // Find the first occurrence of "In Transit" status (events are already normalized)
-        const firstInTransitEvent = normalizedTrackingEvents.find(event => {
-          return event && event.name === 'In Transit';
+        // Find the first occurrence of a handover-qualifying status
+        const firstHandoverEvent = normalizedTrackingEvents.find(event => {
+          return event && event.name && this.shouldSetHandover(event.name);
         });
-        if (firstInTransitEvent && firstInTransitEvent.time) {
-          handoverTimestamp = firstInTransitEvent.time;
-          console.log(`🚚 [Tracking] Found first "In Transit" event (normalized) for order ${orderId} at timestamp: ${handoverTimestamp}`);
+        if (firstHandoverEvent && firstHandoverEvent.time) {
+          handoverTimestamp = firstHandoverEvent.time;
+          console.log(`🚚 [Tracking] Found first handover-qualifying event for order ${orderId} at timestamp: ${handoverTimestamp} (status: ${firstHandoverEvent.name})`);
         }
       }
 
@@ -346,6 +349,39 @@ class OrderTrackingService {
 
     // Return original status if no normalization needed
     return status;
+  }
+
+  /**
+   * Determine if a status should set is_handover = 1
+   * Based on Shipway API statuses:
+   * - is_handover = 0: AWB_ASSIGNED, Shipment Booked, Pickup Failed, SHPFR3
+   * - is_handover = 1: All other statuses (means package has been picked up and is in logistics flow)
+   * @param {string} status - The normalized status
+   * @returns {boolean} True if is_handover should be set to 1
+   */
+  shouldSetHandover(status) {
+    if (!status || typeof status !== 'string') {
+      return false;
+    }
+
+    const normalizedStatus = status.trim().toLowerCase();
+
+    // Statuses where is_handover should remain 0 (pre-pickup or pickup failed)
+    const noHandoverStatuses = [
+      'awb_assigned',
+      'awb assigned',
+      'shipment booked',
+      'shipment_booked',
+      'pickup failed',
+      'pickup_failed',
+      'shpfr3'
+    ];
+
+    // Check if status is in the no-handover list
+    const isNoHandover = noHandoverStatuses.some(s => normalizedStatus === s || normalizedStatus.includes(s));
+
+    // is_handover = 1 for all other statuses
+    return !isNoHandover;
   }
 
   /**
