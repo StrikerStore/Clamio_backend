@@ -7317,17 +7317,16 @@ class Database {
       console.log(`📦 [RTO Inventory] Batch updating ${updates.length} items...`);
 
       let updatedCount = 0;
+      let errorCount = 0;
 
-      // Use a transaction for batch updates
-      await this.mysqlConnection.beginTransaction();
+      // Process each update individually (each UPDATE is atomic)
+      for (const update of updates) {
+        if (update.id === undefined || update.quantity === undefined) {
+          console.warn(`⚠️ [RTO Inventory] Skipping invalid update:`, update);
+          continue;
+        }
 
-      try {
-        for (const update of updates) {
-          if (update.id === undefined || update.quantity === undefined) {
-            console.warn(`⚠️ [RTO Inventory] Skipping invalid update:`, update);
-            continue;
-          }
-
+        try {
           const quantity = Math.max(0, parseInt(update.quantity) || 0);
 
           const [result] = await this.mysqlConnection.execute(
@@ -7338,20 +7337,20 @@ class Database {
           if (result.affectedRows > 0) {
             updatedCount++;
           }
+        } catch (updateError) {
+          console.error(`⚠️ [RTO Inventory] Failed to update id ${update.id}:`, updateError.message);
+          errorCount++;
         }
-
-        await this.mysqlConnection.commit();
-        console.log(`✅ [RTO Inventory] Batch update completed: ${updatedCount} items updated`);
-
-        return {
-          success: true,
-          updatedCount: updatedCount,
-          message: `Successfully updated ${updatedCount} items`
-        };
-      } catch (txError) {
-        await this.mysqlConnection.rollback();
-        throw txError;
       }
+
+      console.log(`✅ [RTO Inventory] Batch update completed: ${updatedCount} items updated, ${errorCount} errors`);
+
+      return {
+        success: true,
+        updatedCount: updatedCount,
+        errorCount: errorCount,
+        message: `Successfully updated ${updatedCount} items`
+      };
     } catch (error) {
       console.error('❌ [RTO Inventory] Error batch updating inventory:', error);
       throw error;

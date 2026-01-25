@@ -756,6 +756,16 @@ app.listen(PORT, async () => {
       } catch (rtoErr) {
         console.error('[RTO Inventory] Post-sync processing failed:', rtoErr.message);
       }
+
+      // Update RTO days_since_initiated and is_focus on startup
+      // This ensures data is current immediately after deployment
+      try {
+        console.log('[RTO Tracking] Running days_since_initiated and is_focus update on startup...');
+        const rtoResult = await database.updateRTODaysAndFocus();
+        console.log(`[RTO Tracking] Startup update completed. Days updated: ${rtoResult.daysUpdated}, Focus updated: ${rtoResult.focusUpdated}`);
+      } catch (rtoUpdateErr) {
+        console.error('[RTO Tracking] Startup update failed:', rtoUpdateErr.message);
+      }
     } catch (err) {
       console.error('[Order Tracking] Initial active orders sync failed:', err.message);
     }
