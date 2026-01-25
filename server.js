@@ -52,7 +52,7 @@ app.use(cors({
   origin: function (origin, callback) {
     // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) return callback(null, true);
-    
+
     const allowedOrigins = [
       'https://frontend-dev-production-5a8c.up.railway.app',
       'https://clamiofrontend-production.up.railway.app',
@@ -65,12 +65,12 @@ app.use(cors({
       'http://127.0.0.1:3000',
       'http://127.0.0.1:3001'
     ];
-    
+
     // Add environment variable origin if provided
     if (process.env.CORS_ORIGIN) {
       allowedOrigins.push(process.env.CORS_ORIGIN);
     }
-    
+
     if (allowedOrigins.indexOf(origin) !== -1) {
       callback(null, true);
     } else {
@@ -147,7 +147,7 @@ app.use(async (req, res, next) => {
     if (!isHealthy) {
       console.log('🔄 Database connection unhealthy, attempting to reconnect...');
       const reconnected = await database.reconnect();
-      
+
       if (!reconnected) {
         // Reconnection failed, return error
         return res.status(503).json({
@@ -161,18 +161,18 @@ app.use(async (req, res, next) => {
     next();
   } catch (error) {
     console.error('❌ Database connection failed in middleware:', error.message);
-    
+
     // For API routes, return error
-    if (req.path.startsWith('/api/') || req.path.startsWith('/auth') || 
-        req.path.startsWith('/users') || req.path.startsWith('/orders') || 
-        req.path.startsWith('/settlements') || req.path.startsWith('/shipway')) {
+    if (req.path.startsWith('/api/') || req.path.startsWith('/auth') ||
+      req.path.startsWith('/users') || req.path.startsWith('/orders') ||
+      req.path.startsWith('/settlements') || req.path.startsWith('/shipway')) {
       return res.status(503).json({
         success: false,
         message: 'Database temporarily unavailable',
         error: 'Service temporarily unavailable. Please try again in a moment.'
       });
     }
-    
+
     // For other routes, continue
     next();
   }
@@ -230,10 +230,10 @@ app.get('/env-check', (req, res) => {
 app.get('/db-test', async (req, res) => {
   try {
     const database = require('./config/database');
-    
+
     // Test connection health
     const isHealthy = await database.testConnection();
-    
+
     if (isHealthy) {
       // Try a simple query
       const users = await database.getAllUsers();
@@ -251,7 +251,7 @@ app.get('/db-test', async (req, res) => {
       // Try to reconnect
       console.log('🔄 Attempting to reconnect to database...');
       const reconnected = await database.reconnect();
-      
+
       if (reconnected) {
         const users = await database.getAllUsers();
         res.json({
@@ -444,10 +444,10 @@ app.listen(PORT, async () => {
   console.log(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`🔗 Health check: http://localhost:${PORT}/health`);
   console.log(`📚 API docs: http://localhost:${PORT}/api`);
-  
+
   // Log database initialization
   console.log('📁 Database initialized successfully');
-  
+
   // Run carriers table migration (if enabled)
   // This migrates carriers table structure and fetches carriers from all active stores
   // Set RUN_PROD_MIGRATION=false in .env to disable
@@ -467,7 +467,7 @@ app.listen(PORT, async () => {
   } else {
     console.log('⚠️ Carriers migration disabled (RUN_PROD_MIGRATION=false)\n');
   }
-  
+
   // Run database migrations on startup (if enabled)
   // This is idempotent and safe to run on every server start
   // Set RUN_MIGRATIONS=false in .env to disable automatic migrations
@@ -501,7 +501,7 @@ app.listen(PORT, async () => {
       console.error('❌ Database health check failed:', error.message);
     }
   }, 15 * 60 * 1000); // Every 15 minutes
-  
+
   // Initialize user sessions (run once on startup)
   const userSessionService = require('./services/userSessionService');
   try {
@@ -510,7 +510,7 @@ app.listen(PORT, async () => {
   } catch (error) {
     console.error('❌ User session initialization failed:', error.message);
   }
-  
+
   // Log default superadmin credentials
   console.log('👤 Default superadmin: superadmin@example.com / password123');
   console.log(process.env.SHOPIFY_ACCESS_TOKEN);
@@ -522,7 +522,7 @@ app.listen(PORT, async () => {
     try {
       const shopifyUrl = process.env.SHOPIFY_PRODUCTS_API_URL || 'https://seq5t1-mz.myshopify.com/admin/api/2025-07/graphql.json';
       const shopifyToken = process.env.SHOPIFY_ACCESS_TOKEN;
-      
+
       if (shopifyUrl && shopifyToken) {
         const result = await fetchAndSaveShopifyProducts(
           shopifyUrl,
@@ -531,7 +531,7 @@ app.listen(PORT, async () => {
             'Content-Type': 'application/json',
           }
         );
-        
+
         if (result && result.skipped) {
           console.log('ℹ️ [Shopify] Product fetch skipped - no stores configured yet');
         }
@@ -555,7 +555,7 @@ app.listen(PORT, async () => {
       console.error('[Multi-Store Sync] Failed:', err.message);
     }
   });
-  
+
   // Run once immediately on startup
   (async () => {
     try {
@@ -589,7 +589,7 @@ app.listen(PORT, async () => {
 
   // Start Order Tracking cron jobs
   const orderTrackingService = require('./services/orderTrackingService');
-  
+
   // Active Orders Tracking - every 1 hour
   cron.schedule('0 * * * *', async () => {
     try {
@@ -627,31 +627,31 @@ app.listen(PORT, async () => {
   cron.schedule('0 2 * * *', async () => {
     try {
       console.log('[Product Sync] Starting daily product refresh from Shopify...');
-      
+
       // Check if store is active before syncing
       const database = require('./config/database');
       await database.waitForMySQLInitialization();
-      
+
       const shopifyUrl = process.env.SHOPIFY_PRODUCTS_API_URL || 'https://seq5t1-mz.myshopify.com/admin/api/2025-07/graphql.json';
       const shopifyToken = process.env.SHOPIFY_ACCESS_TOKEN;
-      
+
       // Get store from database using Shopify credentials
       const store = await database.getStoreByShopifyCredentials(shopifyUrl, shopifyToken);
-      
+
       if (!store) {
         console.log('[Product Sync] ⚠️ Store not found in database for configured Shopify credentials');
         console.log('[Product Sync] Skipping product refresh until store is configured in admin panel');
         return;
       }
-      
+
       if (store.status !== 'active') {
         console.log(`[Product Sync] ⚠️ Store "${store.store_name}" (${store.account_code}) is inactive`);
         console.log('[Product Sync] Skipping product refresh for inactive store');
         return;
       }
-      
+
       console.log(`[Product Sync] Store "${store.store_name}" (${store.account_code}) is active, proceeding with sync...`);
-      
+
       await fetchAndSaveShopifyProducts(
         shopifyUrl,
         {
@@ -677,6 +677,17 @@ app.listen(PORT, async () => {
       }
     } catch (err) {
       console.error('[Product Monitor] Daily check failed:', err.message);
+    }
+  });
+
+  // RTO Tracking Daily Update - Update days_since_initiated and is_focus at 2 AM (runs with other daily crons)
+  cron.schedule('0 2 * * *', async () => {
+    try {
+      console.log('[RTO Tracking] Starting daily update for RTO records...');
+      const result = await database.updateRTODaysAndFocus();
+      console.log(`[RTO Tracking] Daily update completed. Days updated: ${result.daysUpdated}, Focus updated: ${result.focusUpdated}`);
+    } catch (err) {
+      console.error('[RTO Tracking] Daily update failed:', err.message);
     }
   });
 

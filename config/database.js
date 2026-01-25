@@ -477,6 +477,9 @@ class Database {
       // Create order tracking table for shipment tracking
       await this.createOrderTrackingTable();
 
+      // Create RTO tracking table for RTO order tracking
+      await this.createRTOTrackingTable();
+
       // Create customer info table for storing customer details
       await this.createCustomerInfoTable();
     } catch (error) {
@@ -846,6 +849,49 @@ class Database {
       }
     } catch (error) {
       console.error('❌ Error adding account_code column to order_tracking table:', error.message);
+    }
+  }
+
+  /**
+   * Create RTO tracking table for tracking Return-to-Origin orders
+   * This table stores RTO status history with instance management
+   */
+  async createRTOTrackingTable() {
+    if (!this.mysqlConnection) return;
+
+    try {
+      console.log('🔄 Creating rto_tracking table...');
+
+      const createRTOTrackingTableQuery = `
+        CREATE TABLE IF NOT EXISTS rto_tracking (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          order_id VARCHAR(100) NOT NULL,
+          order_status VARCHAR(100) NOT NULL,
+          instance_number INT NOT NULL DEFAULT 1,
+          days_since_initiated INT DEFAULT 0,
+          is_focus TINYINT(1) DEFAULT 0,
+          is_delivered TINYINT(1) DEFAULT 0,
+          rto_wh VARCHAR(255) NULL,
+          account_code VARCHAR(50) NOT NULL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          
+          -- Indexes for performance
+          INDEX idx_order_id (order_id),
+          INDEX idx_order_status (order_status),
+          INDEX idx_instance_number (instance_number),
+          INDEX idx_is_focus (is_focus),
+          INDEX idx_is_delivered (is_delivered),
+          INDEX idx_account_code (account_code),
+          INDEX idx_created_at (created_at),
+          UNIQUE KEY uk_order_status_instance (order_id, order_status, account_code)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+      `;
+
+      await this.mysqlConnection.execute(createRTOTrackingTableQuery);
+      console.log('✅ RTO tracking table created/verified');
+    } catch (error) {
+      console.error('❌ Error creating RTO tracking table:', error.message);
     }
   }
 
@@ -6308,6 +6354,277 @@ class Database {
     } catch (error) {
       console.error('Error deleting warehouse mapping:', error);
       throw new Error('Failed to delete warehouse mapping from database');
+    }
+  }
+
+  // ==================== RTO TRACKING TABLE METHODS ====================
+
+  /**
+   * Store or update RTO tracking data
+   * - If same order_id + order_status + account_code exists: update updated_at only
+   * - If new status: insert with incremented instance_number
+   * @param {string} orderId - The order ID
+   * @param {string} orderStatus - The RTO status (e.g., "RTO Initiated", "RTO In Transit")
+   * @param {string} accountCode - The account code for the store
+   * @param {string|null} rtoWh - The RTO warehouse from Shipway API (delivered_to field)
+   */
+  async storeRTOTracking(orderId, orderStatus, accountCode, rtoWh = null) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    if (!orderId || !orderStatus || !accountCode) {
+      throw new Error('orderId, orderStatus, and accountCode are required');
+    }
+
+    try {
+      // Check if this exact order_id + order_status + account_code combination exists
+      const [existing] = await this.mysqlConnection.execute(
+        `SELECT id, order_status FROM rto_tracking 
+         WHERE order_id = ? AND order_status = ? AND account_code = ?
+         LIMIT 1`,
+        [orderId, orderStatus, accountCode]
+      );
+
+      if (existing.length > 0) {
+        // Same status exists - just update updated_at timestamp
+        await this.mysqlConnection.execute(
+          `UPDATE rto_tracking SET updated_at = NOW() WHERE id = ?`,
+          [existing[0].id]
+        );
+        console.log(`✅ [RTO] Updated existing RTO record (same status: ${orderStatus}) for order ${orderId}`);
+        return { action: 'updated', id: existing[0].id };
+      }
+
+      // New status - get max instance_number for this order
+      const [maxInstance] = await this.mysqlConnection.execute(
+        `SELECT COALESCE(MAX(instance_number), 0) as max_instance 
+         FROM rto_tracking 
+         WHERE order_id = ? AND account_code = ?`,
+        [orderId, accountCode]
+      );
+
+      const newInstanceNumber = maxInstance[0].max_instance + 1;
+
+      // Check if status indicates delivery
+      const isDelivered = orderStatus.toLowerCase().includes('del') ||
+        orderStatus.toLowerCase().includes('delivered') ? 1 : 0;
+
+      // Insert new RTO tracking record
+      const [result] = await this.mysqlConnection.execute(
+        `INSERT INTO rto_tracking 
+         (order_id, order_status, instance_number, days_since_initiated, is_focus, is_delivered, rto_wh, account_code)
+         VALUES (?, ?, ?, 0, 0, ?, ?, ?)`,
+        [orderId, orderStatus, newInstanceNumber, isDelivered, rtoWh, accountCode]
+      );
+
+      console.log(`✅ [RTO] Stored new RTO tracking record (status: ${orderStatus}, instance: ${newInstanceNumber}) for order ${orderId}`);
+
+      // If this order now has a delivered status, update is_delivered for all records of this order
+      if (isDelivered) {
+        await this.mysqlConnection.execute(
+          `UPDATE rto_tracking SET is_delivered = 1 WHERE order_id = ? AND account_code = ?`,
+          [orderId, accountCode]
+        );
+        console.log(`✅ [RTO] Marked all RTO records as delivered for order ${orderId}`);
+      }
+
+      return { action: 'inserted', id: result.insertId, instanceNumber: newInstanceNumber };
+    } catch (error) {
+      console.error(`❌ [RTO] Error storing RTO tracking for order ${orderId}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get all RTO tracking records for a specific order
+   * @param {string} orderId - The order ID
+   * @param {string} accountCode - The account code for the store
+   * @returns {Promise<Array>} Array of RTO tracking records sorted by instance_number
+   */
+  async getRTOTrackingByOrderId(orderId, accountCode) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    if (!accountCode) {
+      throw new Error('account_code is required for getting RTO tracking data');
+    }
+
+    try {
+      const [rows] = await this.mysqlConnection.execute(
+        `SELECT 
+          id,
+          order_id,
+          order_status,
+          instance_number,
+          days_since_initiated,
+          is_focus,
+          is_delivered,
+          rto_wh,
+          account_code,
+          created_at,
+          updated_at
+        FROM rto_tracking 
+        WHERE order_id = ? AND account_code = ?
+        ORDER BY instance_number ASC`,
+        [orderId, accountCode]
+      );
+
+      return rows;
+    } catch (error) {
+      console.error(`❌ [RTO] Error getting RTO tracking for order ${orderId}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Update days_since_initiated and is_focus for all RTO records
+   * This should be called daily via cron job
+   * Logic:
+   * - days_since_initiated: DATEDIFF(CURRENT_DATE, DATE(created_at))
+   * - is_focus: 1 if (status contains 'RTO Initiated') AND (days > 7) AND (order not delivered)
+   */
+  async updateRTODaysAndFocus() {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      console.log('🔄 [RTO] Starting daily update for days_since_initiated and is_focus...');
+
+      // Step 1: Update days_since_initiated for all records
+      const [daysResult] = await this.mysqlConnection.execute(`
+        UPDATE rto_tracking 
+        SET days_since_initiated = DATEDIFF(CURRENT_DATE, DATE(created_at))
+      `);
+      console.log(`✅ [RTO] Updated days_since_initiated for ${daysResult.affectedRows} records`);
+
+      // Step 2: Mark is_delivered for any order that has a delivered status
+      const [deliveredResult] = await this.mysqlConnection.execute(`
+        UPDATE rto_tracking rt
+        SET is_delivered = 1
+        WHERE rt.order_id IN (
+          SELECT DISTINCT order_id 
+          FROM (SELECT order_id FROM rto_tracking 
+                WHERE order_status LIKE '%DEL%' 
+                   OR order_status LIKE '%Delivered%'
+                   OR order_status LIKE '%delivered%') as delivered_orders
+        )
+      `);
+      console.log(`✅ [RTO] Updated is_delivered for ${deliveredResult.affectedRows} records`);
+
+      // Step 3: Reset is_focus to 0 first
+      await this.mysqlConnection.execute(`UPDATE rto_tracking SET is_focus = 0`);
+
+      // Step 4: Set is_focus = 1 for records meeting criteria:
+      // - Status contains 'RTO Initiated' or 'RTO_Initiated'
+      // - days_since_initiated > 7
+      // - Order not delivered (is_delivered = 0 for all records of that order)
+      const [focusResult] = await this.mysqlConnection.execute(`
+        UPDATE rto_tracking 
+        SET is_focus = 1
+        WHERE (order_status LIKE '%RTO Initiated%' OR order_status LIKE '%RTO_Initiated%')
+          AND days_since_initiated > 7 
+          AND order_id NOT IN (
+            SELECT DISTINCT order_id FROM (
+              SELECT order_id FROM rto_tracking WHERE is_delivered = 1
+            ) as delivered_orders
+          )
+      `);
+      console.log(`✅ [RTO] Updated is_focus for ${focusResult.affectedRows} records`);
+
+      return {
+        success: true,
+        daysUpdated: daysResult.affectedRows,
+        deliveredUpdated: deliveredResult.affectedRows,
+        focusUpdated: focusResult.affectedRows,
+        timestamp: new Date().toISOString()
+      };
+    } catch (error) {
+      console.error('❌ [RTO] Error updating RTO days and focus:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get RTO tracking statistics for dashboard
+   * @param {string} accountCode - Optional account code filter
+   * @returns {Promise<Object>} Statistics object
+   */
+  async getRTOTrackingStats(accountCode = null) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      let query = `
+        SELECT 
+          COUNT(DISTINCT order_id) as total_rto_orders,
+          COUNT(*) as total_status_records,
+          SUM(CASE WHEN is_focus = 1 THEN 1 ELSE 0 END) as focus_orders,
+          SUM(CASE WHEN is_delivered = 1 THEN 1 ELSE 0 END) as delivered_records,
+          COUNT(DISTINCT CASE WHEN is_delivered = 1 THEN order_id END) as delivered_orders,
+          COUNT(DISTINCT CASE WHEN is_delivered = 0 THEN order_id END) as pending_orders
+        FROM rto_tracking
+      `;
+      const params = [];
+
+      if (accountCode) {
+        query += ` WHERE account_code = ?`;
+        params.push(accountCode);
+      }
+
+      const [stats] = await this.mysqlConnection.execute(query, params);
+      return stats[0];
+    } catch (error) {
+      console.error('❌ [RTO] Error getting RTO tracking stats:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get all RTO orders with focus (is_focus = 1)
+   * These are orders that need attention (RTO Initiated > 7 days and not delivered)
+   * @param {string} accountCode - Optional account code filter
+   * @returns {Promise<Array>} Array of focus RTO orders
+   */
+  async getRTOFocusOrders(accountCode = null) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      let query = `
+        SELECT 
+          rt.order_id,
+          rt.order_status,
+          rt.instance_number,
+          rt.days_since_initiated,
+          rt.rto_wh,
+          rt.account_code,
+          rt.created_at,
+          rt.updated_at,
+          l.awb,
+          l.carrier_name
+        FROM rto_tracking rt
+        LEFT JOIN labels l ON rt.order_id = l.order_id AND rt.account_code = l.account_code
+        WHERE rt.is_focus = 1
+      `;
+      const params = [];
+
+      if (accountCode) {
+        query += ` AND rt.account_code = ?`;
+        params.push(accountCode);
+      }
+
+      query += ` ORDER BY rt.days_since_initiated DESC, rt.order_id`;
+
+      const [rows] = await this.mysqlConnection.execute(query, params);
+      return rows;
+    } catch (error) {
+      console.error('❌ [RTO] Error getting RTO focus orders:', error);
+      throw error;
     }
   }
 

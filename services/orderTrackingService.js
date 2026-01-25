@@ -269,6 +269,19 @@ class OrderTrackingService {
 
       await database.updateLabelsShipmentStatus(orderId, accountCode, normalizedLatestStatus, isHandover, handoverTimestamp);
 
+      // Check if status is RTO-related and store in RTO tracking table
+      if (this.isRTOStatus(normalizedLatestStatus)) {
+        try {
+          // Extract RTO warehouse from shipment_details.delivered_to
+          const rtoWh = trackingData.shipment_details?.[0]?.delivered_to || null;
+          await database.storeRTOTracking(orderId, normalizedLatestStatus, accountCode, rtoWh);
+          console.log(`📦 [RTO] Stored RTO tracking for order ${orderId} (status: ${normalizedLatestStatus}, rto_wh: ${rtoWh || 'N/A'})`);
+        } catch (rtoError) {
+          // Log but don't fail the entire tracking process if RTO storage fails
+          console.error(`⚠️ [RTO] Failed to store RTO tracking for order ${orderId}:`, rtoError.message);
+        }
+      }
+
       return {
         success: true,
         message: 'Tracking data processed successfully',
@@ -332,6 +345,12 @@ class OrderTrackingService {
     const commonStatuses = {
       'out for delivery': 'Out for Delivery',
       'rto': 'RTO',
+      'rto initiated': 'RTO Initiated',
+      'rto in transit': 'RTO In Transit',
+      'rto delivered': 'RTO Delivered',
+      'rto out for delivery': 'RTO Out for Delivery',
+      'rto failed': 'RTO Failed',
+      'rtd': 'RTO Delivered',
       'cancelled': 'Cancelled',
       'returned': 'Returned',
       'failed delivery': 'Failed Delivery',
@@ -339,8 +358,7 @@ class OrderTrackingService {
       'shipment booked': 'Shipment Booked',
       'dispatched': 'Dispatched',
       'in warehouse': 'In Warehouse',
-      'out for pickup': 'Out for Pickup',
-      'rto delivered': 'RTO Delivered'
+      'out for pickup': 'Out for Pickup'
     };
 
     if (commonStatuses[normalized]) {
@@ -382,6 +400,19 @@ class OrderTrackingService {
 
     // is_handover = 1 for all other statuses
     return !isNoHandover;
+  }
+
+  /**
+   * Check if a status is RTO-related
+   * @param {string} status - The status to check
+   * @returns {boolean} True if the status is RTO-related
+   */
+  isRTOStatus(status) {
+    if (!status || typeof status !== 'string') {
+      return false;
+    }
+    const normalizedStatus = status.toLowerCase();
+    return normalizedStatus.includes('rto');
   }
 
   /**
@@ -494,6 +525,9 @@ class OrderTrackingService {
       const currentStatus = trackingDetails.shipment_status;
       const currentDateTime = new Date().toISOString().slice(0, 19).replace('T', ' '); // Format: YYYY-MM-DD HH:MM:SS
 
+      // Extract shipment_details for additional info (including delivered_to for RTO warehouse)
+      const shipmentDetails = trackingDetails.shipment_details || [];
+
       // Create shipment_status_history in the format expected by processOrderTracking
       const shipmentStatusHistory = [
         {
@@ -504,10 +538,11 @@ class OrderTrackingService {
 
       console.log(`✅ [API] Received tracking data for AWB ${awb}: status="${currentStatus}"`);
 
-      // Return in the expected format
+      // Return in the expected format with shipment_details for RTO tracking
       return {
         success: "1",
-        shipment_status_history: shipmentStatusHistory
+        shipment_status_history: shipmentStatusHistory,
+        shipment_details: shipmentDetails // Include for RTO warehouse extraction
       };
 
     } catch (error) {
