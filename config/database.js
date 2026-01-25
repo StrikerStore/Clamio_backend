@@ -6828,8 +6828,7 @@ class Database {
         WHERE rt.order_id IN (
           SELECT DISTINCT order_id 
           FROM (SELECT order_id FROM rto_tracking 
-                WHERE order_status LIKE '%DEL%' 
-                   OR order_status LIKE '%Delivered%'
+                WHERE order_status LIKE '%Delivered%'
                    OR order_status LIKE '%delivered%') as delivered_orders
         )
       `);
@@ -6986,7 +6985,7 @@ class Database {
           o.quantity
         FROM rto_tracking rt
         INNER JOIN orders o ON rt.order_id = o.order_id AND rt.account_code = o.account_code
-        WHERE rt.order_status IN ('DEL', 'Delivered', 'RTO Delivered', 'RTO_Delivered')
+        WHERE rt.order_status IN ('Delivered', 'RTO Delivered', 'RTO_Delivered')
           AND rt.is_delivered = 1
           AND rt.is_fetched = 0
           AND rt.rto_wh IS NOT NULL
