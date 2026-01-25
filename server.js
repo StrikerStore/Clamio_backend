@@ -691,6 +691,37 @@ app.listen(PORT, async () => {
     }
   });
 
+  // RTO Inventory Processing - Process delivered RTO orders and update inventory at 4 AM daily
+  const rtoInventoryService = require('./services/rtoInventoryService');
+  cron.schedule('0 4 * * *', async () => {
+    try {
+      console.log('[RTO Inventory] Starting daily RTO inventory processing...');
+      const result = await rtoInventoryService.processDeliveredRTOOrders();
+      if (result.success) {
+        console.log(`[RTO Inventory] Processing completed. Processed: ${result.processedCount}, Errors: ${result.errorCount || 0}`);
+      } else {
+        console.log(`[RTO Inventory] Processing skipped: ${result.message}`);
+      }
+    } catch (err) {
+      console.error('[RTO Inventory] Processing failed:', err.message);
+    }
+  });
+
+  // Run RTO inventory processing once on startup (to catch any pending orders)
+  (async () => {
+    try {
+      console.log('[RTO Inventory] Running initial RTO inventory processing on startup...');
+      const result = await rtoInventoryService.processDeliveredRTOOrders();
+      if (result.success) {
+        console.log(`[RTO Inventory] Initial processing completed. Processed: ${result.processedCount}`);
+      } else {
+        console.log(`[RTO Inventory] Initial processing: ${result.message}`);
+      }
+    } catch (err) {
+      console.error('[RTO Inventory] Initial processing failed:', err.message);
+    }
+  })();
+
   // Run active orders tracking once immediately on startup (optional)
   (async () => {
     try {
