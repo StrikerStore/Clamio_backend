@@ -707,21 +707,6 @@ app.listen(PORT, async () => {
     }
   });
 
-  // Run RTO inventory processing once on startup (to catch any pending orders)
-  (async () => {
-    try {
-      console.log('[RTO Inventory] Running initial RTO inventory processing on startup...');
-      const result = await rtoInventoryService.processDeliveredRTOOrders();
-      if (result.success) {
-        console.log(`[RTO Inventory] Initial processing completed. Processed: ${result.processedCount}`);
-      } else {
-        console.log(`[RTO Inventory] Initial processing: ${result.message}`);
-      }
-    } catch (err) {
-      console.error('[RTO Inventory] Initial processing failed:', err.message);
-    }
-  })();
-
   // Run one-time migration to update rto_wh from latest activity location
   (async () => {
     try {
@@ -740,12 +725,26 @@ app.listen(PORT, async () => {
     }
   })();
 
-  // Run active orders tracking once immediately on startup (optional)
+  // Run active orders tracking once immediately on startup, then process RTO inventory
   (async () => {
     try {
       console.log('[Order Tracking] Running initial active orders sync on startup...');
       await orderTrackingService.syncActiveOrderTracking();
       console.log('[Order Tracking] Initial active orders sync completed.');
+
+      // Process RTO inventory AFTER order tracking sync completes
+      // This ensures we have the latest delivered orders in rto_tracking table
+      try {
+        console.log('[RTO Inventory] Running RTO inventory processing after order sync...');
+        const result = await rtoInventoryService.processDeliveredRTOOrders();
+        if (result.success) {
+          console.log(`[RTO Inventory] Post-sync processing completed. Processed: ${result.processedCount}`);
+        } else {
+          console.log(`[RTO Inventory] Post-sync processing: ${result.message}`);
+        }
+      } catch (rtoErr) {
+        console.error('[RTO Inventory] Post-sync processing failed:', rtoErr.message);
+      }
     } catch (err) {
       console.error('[Order Tracking] Initial active orders sync failed:', err.message);
     }

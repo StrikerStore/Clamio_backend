@@ -988,6 +988,7 @@ class Database {
           is_delivered TINYINT(1) DEFAULT 0,
           is_fetched TINYINT(1) DEFAULT 0,
           rto_wh VARCHAR(255) NULL,
+          activity_date DATETIME NULL,
           account_code VARCHAR(50) NOT NULL,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
           updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -1001,6 +1002,7 @@ class Database {
           INDEX idx_is_fetched (is_fetched),
           INDEX idx_account_code (account_code),
           INDEX idx_created_at (created_at),
+          INDEX idx_activity_date (activity_date),
           UNIQUE KEY uk_order_status_instance (order_id, order_status, account_code)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `;
@@ -1010,6 +1012,9 @@ class Database {
 
       // Add is_fetched column if it doesn't exist (for existing tables)
       await this.addIsFetchedToRTOTrackingIfNotExists();
+
+      // Add activity_date column if it doesn't exist (for existing tables)
+      await this.addActivityDateToRTOTrackingIfNotExists();
 
       // Create RTO inventory table
       await this.createRTOInventoryTable();
@@ -1049,6 +1054,40 @@ class Database {
       }
     } catch (error) {
       console.error('❌ Error adding is_fetched column to rto_tracking table:', error.message);
+    }
+  }
+
+  /**
+   * Add activity_date column to existing rto_tracking table if it doesn't exist (migration)
+   */
+  async addActivityDateToRTOTrackingIfNotExists() {
+    if (!this.mysqlConnection) return;
+
+    try {
+      // Check if activity_date column exists in rto_tracking table
+      const [columns] = await this.mysqlConnection.execute(
+        `SHOW COLUMNS FROM rto_tracking LIKE 'activity_date'`
+      );
+
+      if (columns.length === 0) {
+        console.log('🔄 Adding activity_date column to existing rto_tracking table...');
+
+        // Add activity_date column after rto_wh
+        await this.mysqlConnection.execute(
+          `ALTER TABLE rto_tracking ADD COLUMN activity_date DATETIME NULL AFTER rto_wh`
+        );
+
+        // Add index for activity_date
+        await this.mysqlConnection.execute(
+          `ALTER TABLE rto_tracking ADD INDEX idx_activity_date (activity_date)`
+        );
+
+        console.log('✅ activity_date column added to rto_tracking table');
+      } else {
+        console.log('✅ activity_date column already exists in rto_tracking table');
+      }
+    } catch (error) {
+      console.error('❌ Error adding activity_date column to rto_tracking table:', error.message);
     }
   }
 
@@ -6687,9 +6726,10 @@ class Database {
    * @param {string} orderId - The order ID
    * @param {string} orderStatus - The RTO status (e.g., "RTO Initiated", "RTO In Transit")
    * @param {string} accountCode - The account code for the store
-   * @param {string|null} rtoWh - The RTO warehouse from Shipway API (delivered_to field)
+   * @param {string|null} rtoWh - The RTO warehouse from latest tracking activity location
+   * @param {string|null} activityDate - The date of the latest tracking activity (YYYY-MM-DD HH:MM:SS format)
    */
-  async storeRTOTracking(orderId, orderStatus, accountCode, rtoWh = null) {
+  async storeRTOTracking(orderId, orderStatus, accountCode, rtoWh = null, activityDate = null) {
     if (!this.mysqlConnection) {
       throw new Error('MySQL connection not available');
     }
@@ -6708,11 +6748,18 @@ class Database {
       );
 
       if (existing.length > 0) {
-        // Same status exists - just update updated_at timestamp
-        await this.mysqlConnection.execute(
-          `UPDATE rto_tracking SET updated_at = NOW() WHERE id = ?`,
-          [existing[0].id]
-        );
+        // Same status exists - update updated_at timestamp and activity_date if provided
+        if (activityDate) {
+          await this.mysqlConnection.execute(
+            `UPDATE rto_tracking SET updated_at = NOW(), activity_date = ?, rto_wh = ? WHERE id = ?`,
+            [activityDate, rtoWh, existing[0].id]
+          );
+        } else {
+          await this.mysqlConnection.execute(
+            `UPDATE rto_tracking SET updated_at = NOW() WHERE id = ?`,
+            [existing[0].id]
+          );
+        }
         console.log(`✅ [RTO] Updated existing RTO record (same status: ${orderStatus}) for order ${orderId}`);
         return { action: 'updated', id: existing[0].id };
       }
@@ -6728,15 +6775,14 @@ class Database {
       const newInstanceNumber = maxInstance[0].max_instance + 1;
 
       // Check if status indicates delivery
-      const isDelivered = orderStatus.toLowerCase().includes('del') ||
-        orderStatus.toLowerCase().includes('delivered') ? 1 : 0;
+      const isDelivered = orderStatus.toLowerCase().includes('delivered') ? 1 : 0;
 
-      // Insert new RTO tracking record
+      // Insert new RTO tracking record with activity_date
       const [result] = await this.mysqlConnection.execute(
         `INSERT INTO rto_tracking 
-         (order_id, order_status, instance_number, days_since_initiated, is_focus, is_delivered, rto_wh, account_code)
-         VALUES (?, ?, ?, 0, 0, ?, ?, ?)`,
-        [orderId, orderStatus, newInstanceNumber, isDelivered, rtoWh, accountCode]
+         (order_id, order_status, instance_number, days_since_initiated, is_focus, is_delivered, rto_wh, activity_date, account_code)
+         VALUES (?, ?, ?, 0, 0, ?, ?, ?, ?)`,
+        [orderId, orderStatus, newInstanceNumber, isDelivered, rtoWh, activityDate, accountCode]
       );
 
       console.log(`✅ [RTO] Stored new RTO tracking record (status: ${orderStatus}, instance: ${newInstanceNumber}) for order ${orderId}`);

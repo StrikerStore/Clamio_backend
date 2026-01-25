@@ -1,6 +1,6 @@
 /**
- * One-time migration script to update rto_wh in rto_tracking table
- * Uses the new logic: extracts location from the latest activity in shipment_track_activities
+ * One-time migration script to update rto_wh and activity_date in rto_tracking table
+ * Uses the new logic: extracts location and date from the latest activity in shipment_track_activities
  * 
  * This script runs once on deployment and marks itself as completed in the database.
  */
@@ -9,7 +9,7 @@ const database = require('../config/database');
 const axios = require('axios');
 
 // Migration identifier
-const MIGRATION_NAME = 'update_rto_wh_from_latest_activity_v1';
+const MIGRATION_NAME = 'update_rto_wh_and_activity_date_v1';
 
 class RTOWarehouseMigration {
     constructor() {
@@ -114,11 +114,11 @@ class RTOWarehouseMigration {
     }
 
     /**
-     * Extract RTO warehouse from shipment_track_activities (latest activity location)
+     * Extract RTO warehouse and activity date from shipment_track_activities (latest activity)
      */
-    extractRTOWarehouse(activities) {
+    extractRTOData(activities) {
         if (!activities || activities.length === 0) {
-            return null;
+            return { rtoWh: null, activityDate: null };
         }
 
         // Filter out activities with invalid/empty dates
@@ -127,7 +127,7 @@ class RTOWarehouseMigration {
         );
 
         if (validActivities.length === 0) {
-            return null;
+            return { rtoWh: null, activityDate: null };
         }
 
         // Sort by date descending to get the latest activity
@@ -137,13 +137,16 @@ class RTOWarehouseMigration {
             return dateB - dateA; // Latest first
         });
 
-        return sortedActivities[0].location || null;
+        return {
+            rtoWh: sortedActivities[0].location || null,
+            activityDate: sortedActivities[0].date || null
+        };
     }
 
     /**
-     * Update rto_wh for a single record
+     * Update rto_wh and activity_date for a single record
      */
-    async updateRTOWarehouse(record) {
+    async updateRTOData(record) {
         try {
             // Skip if no AWB (can't fetch tracking without it)
             if (!record.awb) {
@@ -159,27 +162,27 @@ class RTOWarehouseMigration {
                 return false;
             }
 
-            // Extract new rto_wh from latest activity
-            const newRtoWh = this.extractRTOWarehouse(activities);
+            // Extract rto_wh and activity_date from latest activity
+            const { rtoWh, activityDate } = this.extractRTOData(activities);
 
-            if (!newRtoWh) {
-                console.log(`⏭️ [Migration] No valid location found for order ${record.order_id}`);
+            if (!rtoWh && !activityDate) {
+                console.log(`⏭️ [Migration] No valid data found for order ${record.order_id}`);
                 return false;
             }
 
-            // Skip if rto_wh is the same
-            if (record.rto_wh === newRtoWh) {
-                console.log(`⏭️ [Migration] No change needed for order ${record.order_id} (rto_wh already correct)`);
+            // Skip if both rto_wh and activity_date are the same
+            if (record.rto_wh === rtoWh && record.activity_date === activityDate) {
+                console.log(`⏭️ [Migration] No change needed for order ${record.order_id}`);
                 return false;
             }
 
-            // Update the record
+            // Update the record with both rto_wh and activity_date
             await database.mysqlConnection.execute(
-                'UPDATE rto_tracking SET rto_wh = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-                [newRtoWh, record.id]
+                'UPDATE rto_tracking SET rto_wh = ?, activity_date = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+                [rtoWh, activityDate, record.id]
             );
 
-            console.log(`✅ [Migration] Updated order ${record.order_id}: "${record.rto_wh}" → "${newRtoWh}"`);
+            console.log(`✅ [Migration] Updated order ${record.order_id}: rto_wh="${rtoWh}", activity_date="${activityDate}"`);
             return true;
         } catch (error) {
             console.error(`❌ [Migration] Error updating order ${record.order_id}:`, error.message);
@@ -211,7 +214,7 @@ class RTOWarehouseMigration {
 
             // Get all RTO tracking records that have AWB numbers
             const [records] = await database.mysqlConnection.execute(`
-        SELECT rt.id, rt.order_id, rt.account_code, rt.rto_wh, l.awb
+        SELECT rt.id, rt.order_id, rt.account_code, rt.rto_wh, rt.activity_date, l.awb
         FROM rto_tracking rt
         LEFT JOIN labels l ON rt.order_id = l.order_id AND rt.account_code = l.account_code
         WHERE l.awb IS NOT NULL
@@ -230,7 +233,7 @@ class RTOWarehouseMigration {
                 this.processedCount++;
 
                 try {
-                    const updated = await this.updateRTOWarehouse(record);
+                    const updated = await this.updateRTOData(record);
                     if (updated) {
                         this.updatedCount++;
                     }
