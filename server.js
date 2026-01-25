@@ -722,6 +722,24 @@ app.listen(PORT, async () => {
     }
   })();
 
+  // Run one-time migration to update rto_wh from latest activity location
+  (async () => {
+    try {
+      const rtoWarehouseMigration = require('./migrations/updateRtoWarehouse');
+      console.log('[Migration] Running RTO warehouse migration...');
+      const result = await rtoWarehouseMigration.run();
+      if (result.skipped) {
+        console.log('[Migration] RTO warehouse migration already completed, skipped.');
+      } else if (result.success) {
+        console.log(`[Migration] RTO warehouse migration completed. Updated: ${result.updatedCount}/${result.processedCount}`);
+      } else {
+        console.log(`[Migration] RTO warehouse migration failed: ${result.message}`);
+      }
+    } catch (err) {
+      console.error('[Migration] RTO warehouse migration error:', err.message);
+    }
+  })();
+
   // Run active orders tracking once immediately on startup (optional)
   (async () => {
     try {

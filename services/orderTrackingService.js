@@ -275,8 +275,35 @@ class OrderTrackingService {
       // Check if status is RTO-related and store in RTO tracking table
       if (this.isRTOStatus(normalizedLatestStatus)) {
         try {
-          // Extract RTO warehouse from shipment_details.delivered_to
-          const rtoWh = trackingData.shipment_details?.[0]?.delivered_to || null;
+          // Extract RTO warehouse from shipment_track_activities - get location from the latest dated activity
+          let rtoWh = null;
+
+          if (trackingData.shipment_track_activities && trackingData.shipment_track_activities.length > 0) {
+            // Filter out activities with invalid/empty dates
+            const validActivities = trackingData.shipment_track_activities.filter(activity =>
+              activity.date && activity.date.trim() && activity.date !== '1970-01-01 05:30:00'
+            );
+
+            if (validActivities.length > 0) {
+              // Sort by date descending to get the latest activity
+              const sortedActivities = validActivities.sort((a, b) => {
+                const dateA = new Date(a.date);
+                const dateB = new Date(b.date);
+                return dateB - dateA; // Latest first
+              });
+
+              // Get location from the latest activity
+              rtoWh = sortedActivities[0].location || null;
+              console.log(`📍 [RTO] Latest activity location for order ${orderId}: "${rtoWh}" (date: ${sortedActivities[0].date})`);
+            }
+          }
+
+          // Fallback to delivered_to from shipment_details if no activity location found
+          if (!rtoWh && trackingData.shipment_details?.[0]?.delivered_to) {
+            rtoWh = trackingData.shipment_details[0].delivered_to;
+            console.log(`📍 [RTO] Using delivered_to fallback for order ${orderId}: "${rtoWh}"`);
+          }
+
           await database.storeRTOTracking(orderId, normalizedLatestStatus, accountCode, rtoWh);
           console.log(`📦 [RTO] Stored RTO tracking for order ${orderId} (status: ${normalizedLatestStatus}, rto_wh: ${rtoWh || 'N/A'})`);
         } catch (rtoError) {
@@ -492,8 +519,8 @@ class OrderTrackingService {
       // Get store-specific credentials
       const basicAuthHeader = await this.getStoreCredentials(accountCode);
 
-      // Build the API URL with query parameters
-      const apiUrl = `${this.shipwayApiUrl}?awb_numbers=${awb}&tracking_history=0`;
+      // Build the API URL with query parameters (tracking_history=1 to get shipment_track_activities)
+      const apiUrl = `${this.shipwayApiUrl}?awb_numbers=${awb}&tracking_history=1`;
 
       console.log(`📡 [API] Calling Shipway Tracking API for AWB ${awb} (store: ${accountCode})`);
 
@@ -512,14 +539,18 @@ class OrderTrackingService {
       const data = response.data;
 
       // The new API returns an array of tracking results
-      // Example response:
+      // Example response with tracking_history=1:
       // [
       //   {
       //     "awb": 22679038356322,
       //     "tracking_details": {
-      //       "shipment_status": "IN_TRANSIT",
+      //       "shipment_status": "RTD",
       //       "shipment_details": [...],
-      //       "track_url": "..."
+      //       "track_url": "...",
+      //       "shipment_track_activities": [
+      //         { "date": "2026-01-14 15:11:34", "activity": "RETURN Accepted", "location": "Location (State)" },
+      //         ...
+      //       ]
       //     }
       //   }
       // ]
@@ -547,8 +578,11 @@ class OrderTrackingService {
       const currentStatus = trackingDetails.shipment_status;
       const currentDateTime = new Date().toISOString().slice(0, 19).replace('T', ' '); // Format: YYYY-MM-DD HH:MM:SS
 
-      // Extract shipment_details for additional info (including delivered_to for RTO warehouse)
+      // Extract shipment_details for additional info
       const shipmentDetails = trackingDetails.shipment_details || [];
+
+      // Extract shipment_track_activities for RTO warehouse extraction (latest activity location)
+      const shipmentTrackActivities = trackingDetails.shipment_track_activities || [];
 
       // Create shipment_status_history in the format expected by processOrderTracking
       const shipmentStatusHistory = [
@@ -558,13 +592,14 @@ class OrderTrackingService {
         }
       ];
 
-      console.log(`✅ [API] Received tracking data for AWB ${awb}: status="${currentStatus}"`);
+      console.log(`✅ [API] Received tracking data for AWB ${awb}: status="${currentStatus}", activities=${shipmentTrackActivities.length}`);
 
-      // Return in the expected format with shipment_details for RTO tracking
+      // Return in the expected format with shipment_track_activities for RTO warehouse extraction
       return {
         success: "1",
         shipment_status_history: shipmentStatusHistory,
-        shipment_details: shipmentDetails // Include for RTO warehouse extraction
+        shipment_details: shipmentDetails,
+        shipment_track_activities: shipmentTrackActivities // Include for RTO warehouse extraction from latest activity
       };
 
     } catch (error) {
