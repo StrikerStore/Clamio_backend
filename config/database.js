@@ -94,18 +94,20 @@ class Database {
       const createTableQuery = `
         CREATE TABLE IF NOT EXISTS utility (
           id INT AUTO_INCREMENT PRIMARY KEY,
-          parameter VARCHAR(255) NOT NULL,
-          value VARCHAR(500) NOT NULL,
+          parameter VARCHAR(255) NOT NULL UNIQUE,
+          value TEXT NOT NULL,
           created_by VARCHAR(255) DEFAULT 'system',
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
           modified_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-          INDEX idx_parameter (parameter),
-          UNIQUE KEY unique_parameter_value (parameter, value)
+          INDEX idx_parameter (parameter)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `;
 
       await this.mysqlConnection.execute(createTableQuery);
       console.log('✅ Utility table created/verified');
+
+      // Migrate existing utility table to support TEXT values if needed
+      await this.migrateUtilityTableToText();
 
       // Initialize with default parameters
       const initQueries = [
@@ -120,9 +122,122 @@ class Database {
       for (const query of initQueries) {
         await this.mysqlConnection.execute(query);
       }
+
+      // Initialize ShipmentStatusMapping
+      await this.initializeShipmentStatusMapping();
+
       console.log('✅ Utility table initialized with default parameters');
     } catch (error) {
       console.error('❌ Error creating utility table:', error.message);
+    }
+  }
+
+  /**
+   * Migrate utility table to support TEXT values (for existing databases)
+   */
+  async migrateUtilityTableToText() {
+    if (!this.mysqlConnection) return;
+
+    try {
+      // Check current column type
+      const [columns] = await this.mysqlConnection.execute(
+        `SHOW COLUMNS FROM utility WHERE Field = 'value'`
+      );
+
+      if (columns.length > 0) {
+        const valueColumn = columns[0];
+        const currentType = valueColumn.Type.toUpperCase();
+
+        // If it's VARCHAR, alter to TEXT
+        if (currentType.includes('VARCHAR')) {
+          console.log('🔄 Migrating utility.value column from VARCHAR to TEXT...');
+
+          // First, drop the unique constraint if it exists (on parameter, value)
+          try {
+            await this.mysqlConnection.execute(
+              `ALTER TABLE utility DROP INDEX unique_parameter_value`
+            );
+            console.log('✅ Dropped old unique_parameter_value constraint');
+          } catch (err) {
+            // Constraint might not exist, that's OK
+          }
+
+          // Alter the column to TEXT
+          await this.mysqlConnection.execute(
+            `ALTER TABLE utility MODIFY COLUMN value TEXT NOT NULL`
+          );
+
+          // Add unique constraint on just parameter if it doesn't exist
+          try {
+            await this.mysqlConnection.execute(
+              `ALTER TABLE utility ADD UNIQUE KEY unique_parameter (parameter)`
+            );
+          } catch (err) {
+            // Constraint might already exist
+          }
+
+          console.log('✅ Migrated utility.value column to TEXT');
+        }
+      }
+    } catch (error) {
+      console.error('❌ Error migrating utility table to TEXT:', error.message);
+    }
+  }
+
+  /**
+   * Initialize ShipmentStatusMapping in utility table
+   * This mapping is used for status renaming, color coding, and handover logic
+   */
+  async initializeShipmentStatusMapping() {
+    if (!this.mysqlConnection) return;
+
+    try {
+      // Check if ShipmentStatusMapping already exists
+      const [existing] = await this.mysqlConnection.execute(
+        `SELECT id FROM utility WHERE parameter = 'ShipmentStatusMapping'`
+      );
+
+      if (existing.length === 0) {
+        console.log('🔄 Initializing ShipmentStatusMapping...');
+
+        // Mapping based on user-provided table
+        const shipmentStatusMapping = [
+          { raw: "AWB_ASSIGNED", renamed: "Shipment Booked", color: "blue", is_handover: 0 },
+          { raw: "Pickup Failed", renamed: "Pickup Failed", color: "red", is_handover: 0 },
+          { raw: "Shipment Booked", renamed: "Shipment Booked", color: "blue", is_handover: 0 },
+          { raw: "SHPFR3", renamed: "Pickup Failed", color: "red", is_handover: 0 },
+          { raw: "CROV", renamed: "Delivery Attempted", color: "yellow", is_handover: 1 },
+          { raw: "DEL", renamed: "Delivered", color: "green", is_handover: 1 },
+          { raw: "Delivered", renamed: "Delivered", color: "green", is_handover: 1 },
+          { raw: "In Transit", renamed: "In Transit", color: "orange", is_handover: 1 },
+          { raw: "INT", renamed: "In Transit", color: "orange", is_handover: 1 },
+          { raw: "Out for Delivery", renamed: "Out for Delivery", color: "yellow", is_handover: 1 },
+          { raw: "REACHED_AT_DESTINATION_HUB", renamed: "In Transit", color: "orange", is_handover: 1 },
+          { raw: "RTD", renamed: "RTO Delivered", color: "green", is_handover: 1 },
+          { raw: "RTO", renamed: "RTO", color: "red", is_handover: 1 },
+          { raw: "RTO Delivered", renamed: "RTO Delivered", color: "green", is_handover: 1 },
+          { raw: "RTO Undelivered", renamed: "RTO Undelivered", color: "maroon", is_handover: 1 },
+          { raw: "RTO_IN_TRANSIT", renamed: "RTO In Transit", color: "orange", is_handover: 1 },
+          { raw: "RTO_INITIATED", renamed: "RTO Initiated", color: "red", is_handover: 1 },
+          { raw: "RTONDR5", renamed: "RTO Undelivered", color: "maroon", is_handover: 1 },
+          { raw: "RTOUND", renamed: "RTO Lost", color: "maroon", is_handover: 1 },
+          { raw: "SHNDR16", renamed: "Consignee Unavailable", color: "red", is_handover: 1 },
+          { raw: "SHNDR4", renamed: "Delivery Reattempt", color: "yellow", is_handover: 1 },
+          { raw: "SHNDR6", renamed: "Consignee Refused", color: "red", is_handover: 1 },
+          { raw: "UNDELIVERED", renamed: "Undelivered", color: "red", is_handover: 1 }
+        ];
+
+        await this.mysqlConnection.execute(
+          `INSERT INTO utility (parameter, value, created_by) VALUES (?, ?, 'system')`,
+          ['ShipmentStatusMapping', JSON.stringify(shipmentStatusMapping)]
+        );
+
+        console.log('✅ ShipmentStatusMapping initialized with', shipmentStatusMapping.length, 'status mappings');
+      } else {
+        console.log('✅ ShipmentStatusMapping already exists');
+      }
+    } catch (error) {
+      console.error('❌ Error initializing ShipmentStatusMapping:', error.message);
     }
   }
 
@@ -1528,6 +1643,134 @@ class Database {
       console.error('Error getting all utility parameters:', error);
       throw new Error('Failed to get all utility parameters from database');
     }
+  }
+
+  // =====================================================
+  // SHIPMENT STATUS MAPPING HELPERS
+  // =====================================================
+
+  /**
+   * In-memory cache for shipment status mapping
+   * Refreshed every hour or on server restart
+   */
+  shipmentStatusMappingCache = null;
+  shipmentStatusMappingCacheTime = null;
+  CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+  /**
+   * Get the shipment status mapping from database (with caching)
+   * @returns {Promise<Array>} Array of status mapping objects
+   */
+  async getShipmentStatusMapping() {
+    // Check cache validity
+    if (
+      this.shipmentStatusMappingCache &&
+      this.shipmentStatusMappingCacheTime &&
+      Date.now() - this.shipmentStatusMappingCacheTime < this.CACHE_TTL_MS
+    ) {
+      return this.shipmentStatusMappingCache;
+    }
+
+    try {
+      const mappingJson = await this.getUtilityParameter('ShipmentStatusMapping');
+      if (mappingJson) {
+        this.shipmentStatusMappingCache = JSON.parse(mappingJson);
+        this.shipmentStatusMappingCacheTime = Date.now();
+        return this.shipmentStatusMappingCache;
+      }
+      return [];
+    } catch (error) {
+      console.error('Error getting shipment status mapping:', error);
+      return this.shipmentStatusMappingCache || [];
+    }
+  }
+
+  /**
+   * Clear the shipment status mapping cache (call this after updating the mapping)
+   */
+  clearShipmentStatusMappingCache() {
+    this.shipmentStatusMappingCache = null;
+    this.shipmentStatusMappingCacheTime = null;
+    console.log('✅ Shipment status mapping cache cleared');
+  }
+
+  /**
+   * Get shipment status info for a given raw status
+   * @param {string} rawStatus - The raw status from Shipway API
+   * @returns {Promise<Object|null>} Status info object { raw, renamed, color, is_handover } or null
+   */
+  async getShipmentStatusInfo(rawStatus) {
+    if (!rawStatus || typeof rawStatus !== 'string') {
+      return null;
+    }
+
+    const mapping = await this.getShipmentStatusMapping();
+    const normalizedInput = rawStatus.trim().toLowerCase().replace(/_/g, ' ');
+
+    // Case-insensitive lookup
+    const matchedStatus = mapping.find(item => {
+      const normalizedRaw = item.raw.toLowerCase().replace(/_/g, ' ');
+      return normalizedRaw === normalizedInput;
+    });
+
+    return matchedStatus || null;
+  }
+
+  /**
+   * Normalize shipment status using database mapping
+   * Falls back to original status if not found in mapping
+   * @param {string} rawStatus - The raw status from Shipway API
+   * @returns {Promise<string>} Normalized/renamed status
+   */
+  async normalizeShipmentStatusFromDB(rawStatus) {
+    if (!rawStatus || typeof rawStatus !== 'string') {
+      return rawStatus || 'Unknown';
+    }
+
+    const statusInfo = await this.getShipmentStatusInfo(rawStatus);
+    if (statusInfo) {
+      return statusInfo.renamed;
+    }
+
+    // Fallback: return original status with basic cleanup
+    return rawStatus.trim();
+  }
+
+  /**
+   * Check if a status should set is_handover = 1 using database mapping
+   * @param {string} rawStatus - The raw status to check
+   * @returns {Promise<boolean>} True if is_handover should be 1
+   */
+  async shouldSetHandoverFromDB(rawStatus) {
+    if (!rawStatus || typeof rawStatus !== 'string') {
+      return false;
+    }
+
+    const statusInfo = await this.getShipmentStatusInfo(rawStatus);
+    if (statusInfo) {
+      return statusInfo.is_handover === 1;
+    }
+
+    // Fallback: if status not in mapping, default to false (not handed over)
+    return false;
+  }
+
+  /**
+   * Get color code for a status using database mapping
+   * @param {string} rawStatus - The raw status to get color for
+   * @returns {Promise<string|null>} Color code or null if not found
+   */
+  async getStatusColorCode(rawStatus) {
+    if (!rawStatus || typeof rawStatus !== 'string') {
+      return null;
+    }
+
+    const statusInfo = await this.getShipmentStatusInfo(rawStatus);
+    if (statusInfo) {
+      return statusInfo.color;
+    }
+
+    return null;
   }
 
   /**
@@ -6518,19 +6761,32 @@ class Database {
       await this.mysqlConnection.execute(`UPDATE rto_tracking SET is_focus = 0`);
 
       // Step 4: Set is_focus = 1 for records meeting criteria:
-      // - Status contains 'RTO Initiated' or 'RTO_Initiated'
-      // - days_since_initiated > 7
-      // - Order not delivered (is_delivered = 0 for all records of that order)
+      // Criteria 1: Status contains 'RTO Initiated' or 'RTO_Initiated' AND days > 7 AND order not delivered
+      // Criteria 2: Status is undelivered (RTONDR5, RTOUND, RTO Undelivered, UND, Undelivered) AND order not delivered
       const [focusResult] = await this.mysqlConnection.execute(`
         UPDATE rto_tracking 
         SET is_focus = 1
-        WHERE (order_status LIKE '%RTO Initiated%' OR order_status LIKE '%RTO_Initiated%')
-          AND days_since_initiated > 7 
-          AND order_id NOT IN (
-            SELECT DISTINCT order_id FROM (
-              SELECT order_id FROM rto_tracking WHERE is_delivered = 1
-            ) as delivered_orders
+        WHERE (
+          -- Criteria 1: RTO Initiated > 7 days
+          (
+            (order_status LIKE '%RTO Initiated%' OR order_status LIKE '%RTO_Initiated%')
+            AND days_since_initiated > 7
           )
+          OR
+          -- Criteria 2: Undelivered statuses (immediate focus regardless of days)
+          (
+            order_status IN ('RTONDR5', 'RTOUND', 'RTO Undelivered', 'UND', 'Undelivered')
+            OR order_status LIKE '%RTONDR%'
+            OR order_status LIKE '%RTOUND%'
+            OR order_status LIKE '%RTO Undelivered%'
+            OR order_status LIKE '%Undelivered%'
+          )
+        )
+        AND order_id NOT IN (
+          SELECT DISTINCT order_id FROM (
+            SELECT order_id FROM rto_tracking WHERE is_delivered = 1
+          ) as delivered_orders
+        )
       `);
       console.log(`✅ [RTO] Updated is_focus for ${focusResult.affectedRows} records`);
 
