@@ -6850,7 +6850,10 @@ class Database {
    * This should be called daily via cron job
    * Logic:
    * - days_since_initiated: DATEDIFF(CURRENT_DATE, DATE(activity_date))
-   * - is_focus: 1 if days_since_initiated > 7 AND status NOT contains 'delivered' AND is_delivered = 0
+   * - is_focus: 1 for ALL instances of an order if:
+   *   - The FIRST instance (instance_number = 1) has days_since_initiated > 7
+   *   - AND the order is NOT delivered (is_delivered = 0)
+   * - When RTO is delivered, ALL instances get is_focus = 0 and is_delivered = 1
    */
   async updateRTODaysAndFocus() {
     if (!this.mysqlConnection) {
@@ -6868,7 +6871,7 @@ class Database {
       `);
       console.log(`✅ [RTO] Updated days_since_initiated for ${daysResult.affectedRows} records`);
 
-      // Step 2: Mark is_delivered for any order that has a delivered status
+      // Step 2: Mark is_delivered = 1 for ALL instances of orders that have a delivered status
       const [deliveredResult] = await this.mysqlConnection.execute(`
         UPDATE rto_tracking rt
         SET is_delivered = 1
@@ -6881,18 +6884,25 @@ class Database {
       `);
       console.log(`✅ [RTO] Updated is_delivered for ${deliveredResult.affectedRows} records`);
 
-      // Step 3: Reset is_focus to 0 first
+      // Step 3: Reset is_focus to 0 for all records first
       await this.mysqlConnection.execute(`UPDATE rto_tracking SET is_focus = 0`);
 
-      // Step 4: Set is_focus = 1 for records meeting criteria:
-      // days_since_initiated > 7 AND status NOT contains 'delivered' AND is_delivered = 0
+      // Step 4: Set is_focus = 1 for ALL instances of orders where:
+      // - The FIRST instance (instance_number = 1) has days_since_initiated > 7
+      // - AND the order is NOT delivered (is_delivered = 0)
       const [focusResult] = await this.mysqlConnection.execute(`
-        UPDATE rto_tracking 
+        UPDATE rto_tracking rt
         SET is_focus = 1
-        WHERE days_since_initiated > 7
-          AND order_status NOT LIKE '%delivered%'
-          AND order_status NOT LIKE '%Delivered%'
-          AND is_delivered = 0
+        WHERE rt.is_delivered = 0
+          AND rt.order_id IN (
+            SELECT order_id FROM (
+              SELECT order_id 
+              FROM rto_tracking 
+              WHERE instance_number = 1 
+                AND days_since_initiated > 7
+                AND is_delivered = 0
+            ) as focus_orders
+          )
       `);
       console.log(`✅ [RTO] Updated is_focus for ${focusResult.affectedRows} records`);
 
@@ -6965,13 +6975,14 @@ class Database {
           rt.days_since_initiated,
           rt.rto_wh,
           rt.account_code,
+          rt.activity_date,
           rt.created_at,
           rt.updated_at,
           l.awb,
           l.carrier_name
         FROM rto_tracking rt
         LEFT JOIN labels l ON rt.order_id = l.order_id AND rt.account_code = l.account_code
-        WHERE rt.is_focus = 1
+        WHERE rt.is_focus = 1 AND rt.instance_number = 1
       `;
       const params = [];
 
@@ -6986,6 +6997,46 @@ class Database {
       return rows;
     } catch (error) {
       console.error('❌ [RTO] Error getting RTO focus orders:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Update RTO focus orders status
+   * Updates order_status and sets is_focus = 0 for the given order_ids
+   * @param {string[]} orderIds - Array of order IDs to update
+   * @param {string} newStatus - New status to set
+   * @param {string} accountCode - Optional account code filter
+   * @returns {Promise<{affectedRows: number}>} Number of affected rows
+   */
+  async updateRTOFocusStatus(orderIds, newStatus, accountCode = null) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    if (!orderIds || orderIds.length === 0) {
+      throw new Error('No order IDs provided');
+    }
+
+    try {
+      const placeholders = orderIds.map(() => '?').join(',');
+      let query = `
+        UPDATE rto_tracking 
+        SET order_status = ?, is_focus = 0, updated_at = NOW()
+        WHERE order_id IN (${placeholders}) AND instance_number = 1
+      `;
+      const params = [newStatus, ...orderIds];
+
+      if (accountCode) {
+        query += ` AND account_code = ?`;
+        params.push(accountCode);
+      }
+
+      const [result] = await this.mysqlConnection.execute(query, params);
+      console.log(`✅ [RTO] Updated ${result.affectedRows} RTO focus orders to status: ${newStatus}`);
+      return { affectedRows: result.affectedRows };
+    } catch (error) {
+      console.error('❌ [RTO] Error updating RTO focus status:', error);
       throw error;
     }
   }

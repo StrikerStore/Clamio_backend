@@ -80,6 +80,30 @@ router.put(
 );
 
 /**
+ * @route   GET /api/admin/inventory/rto-focus
+ * @desc    Get RTO focus orders (is_focus = 1, instance_number = 1)
+ * @access  Admin, Superadmin
+ */
+router.get(
+  '/rto-focus',
+  authenticateBasicAuth,
+  requireAdminOrSuperadmin,
+  inventoryController.getRTOFocusOrders
+);
+
+/**
+ * @route   PUT /api/admin/inventory/rto-focus/status
+ * @desc    Update RTO focus orders status (batch update)
+ * @access  Admin, Superadmin
+ */
+router.put(
+  '/rto-focus/status',
+  authenticateBasicAuth,
+  requireAdminOrSuperadmin,
+  inventoryController.updateRTOFocusStatus
+);
+
+/**
  * @route   GET /api/admin/inventory/products/new
  * @desc    Check for new products added in the last 24 hours
  * @access  Admin, Superadmin

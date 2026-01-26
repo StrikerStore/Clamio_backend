@@ -349,9 +349,89 @@ async function updateRTOInventory(req, res) {
   }
 }
 
+/**
+ * Get RTO focus orders (is_focus = 1, instance_number = 1)
+ * These are orders that need attention (RTO Initiated > 7 days and not delivered)
+ * @param {Object} req - Express request
+ * @param {Object} res - Express response
+ */
+async function getRTOFocusOrders(req, res) {
+  try {
+    console.log('📊 Fetching RTO focus orders...');
+
+    const { account_code } = req.query;
+    const orders = await database.getRTOFocusOrders(account_code || null);
+
+    console.log(`✅ Fetched ${orders.length} RTO focus orders`);
+
+    res.json({
+      success: true,
+      data: {
+        totalOrders: orders.length,
+        orders: orders
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error fetching RTO focus orders:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch RTO focus orders',
+      message: error.message
+    });
+  }
+}
+
+/**
+ * Update RTO focus orders status (batch update)
+ * Updates order_status and sets is_focus = 0
+ * @param {Object} req - Express request with orderIds and newStatus
+ * @param {Object} res - Express response
+ */
+async function updateRTOFocusStatus(req, res) {
+  try {
+    console.log('📝 Processing RTO focus status update...');
+
+    const { orderIds, newStatus, accountCode } = req.body;
+
+    if (!orderIds || !Array.isArray(orderIds) || orderIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid request. Expected orderIds array in body.'
+      });
+    }
+
+    if (!newStatus || typeof newStatus !== 'string') {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid request. Expected newStatus string in body.'
+      });
+    }
+
+    const result = await database.updateRTOFocusStatus(orderIds, newStatus, accountCode || null);
+
+    console.log(`✅ Updated ${result.affectedRows} RTO focus orders to status: ${newStatus}`);
+
+    res.json({
+      success: true,
+      data: result
+    });
+
+  } catch (error) {
+    console.error('❌ Error updating RTO focus status:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to update RTO focus status',
+      message: error.message
+    });
+  }
+}
+
 module.exports = {
   getAggregatedInventory,
   uploadRTODetails,
   getRTOInventory,
-  updateRTOInventory
+  updateRTOInventory,
+  getRTOFocusOrders,
+  updateRTOFocusStatus
 };
