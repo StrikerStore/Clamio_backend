@@ -4248,6 +4248,52 @@ class Database {
   }
 
   /**
+   * Get all distinct statuses currently present in the system
+   * This combines statuses from claims table and labels table
+   */
+  async getDistinctOrderStatuses() {
+    // Use pool if available
+    const db = this.mysqlPool || this.mysqlConnection;
+    if (!db) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      // Query 1: Get distinct statuses from claims table
+      const claimsQuery = `SELECT DISTINCT status FROM claims WHERE status IS NOT NULL AND status != ''`;
+
+      // Query 2: Get distinct shipment statuses from labels table
+      const labelsQuery = `SELECT DISTINCT current_shipment_status as status FROM labels WHERE current_shipment_status IS NOT NULL AND current_shipment_status != ''`;
+
+      const [claimsResult, labelsResult] = await Promise.all([
+        db.execute(claimsQuery),
+        db.execute(labelsQuery)
+      ]);
+
+      const statusSet = new Set();
+
+      // Add statuses from claims
+      claimsResult[0].forEach(row => {
+        if (row.status) statusSet.add(row.status);
+      });
+
+      // Add statuses from labels
+      labelsResult[0].forEach(row => {
+        if (row.status) statusSet.add(row.status);
+      });
+
+      // Sort and return as array
+      const distinctStatuses = Array.from(statusSet).sort();
+
+      console.log(`📊 Found ${distinctStatuses.length} distinct statuses in the system`);
+      return distinctStatuses;
+    } catch (error) {
+      console.error('Error getting distinct statuses:', error);
+      throw new Error('Failed to get distinct statuses from database');
+    }
+  }
+
+  /**
    * Get admin dashboard statistics (total counts for cards)
    * @param {Object} options - Filter options
    * @param {string} options.search - Search term

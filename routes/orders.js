@@ -302,6 +302,38 @@ router.get('/last-updated', async (req, res) => {
 });
 
 /**
+ * @route   GET /api/orders/distinct-statuses
+ * @desc    Get all distinct order statuses present in the system
+ * @access  Admin, Superadmin
+ */
+router.get('/distinct-statuses', authenticateBasicAuth, requireAdminOrSuperadmin, async (req, res) => {
+  try {
+    const database = require('../config/database');
+
+    // Wait for MySQL initialization
+    await database.waitForMySQLInitialization();
+
+    if (!database.isMySQLAvailable()) {
+      return res.status(500).json({ success: false, message: 'Database connection not available' });
+    }
+
+    const statuses = await database.getDistinctOrderStatuses();
+
+    return res.json({
+      success: true,
+      data: statuses
+    });
+  } catch (err) {
+    console.error('Error getting distinct statuses:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to get distinct statuses',
+      error: err.message
+    });
+  }
+});
+
+/**
  * @route   POST /api/orders/verify-status
  * @desc    Verify order statuses in database (for bulk operations verification)
  * @access  Vendor (token required)
