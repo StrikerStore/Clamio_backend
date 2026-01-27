@@ -427,11 +427,192 @@ async function updateRTOFocusStatus(req, res) {
   }
 }
 
+/**
+ * Get distinct RTO warehouse locations for dropdown
+ * @param {Object} req - Express request
+ * @param {Object} res - Express response
+ */
+async function getRTOLocations(req, res) {
+  try {
+    console.log('📍 Fetching distinct RTO locations...');
+
+    const locations = await database.getDistinctRTOLocations();
+
+    console.log(`✅ Fetched ${locations.length} distinct locations`);
+
+    res.json({
+      success: true,
+      data: {
+        locations: locations
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error fetching RTO locations:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch RTO locations',
+      message: error.message
+    });
+  }
+}
+
+/**
+ * Get products for RTO dropdown with name and sku_id
+ * @param {Object} req - Express request
+ * @param {Object} res - Express response
+ */
+async function getRTOProducts(req, res) {
+  try {
+    console.log('📦 Fetching products for RTO dropdown...');
+
+    const products = await database.getProductsForRTODropdown();
+
+    console.log(`✅ Fetched ${products.length} products for dropdown`);
+
+    res.json({
+      success: true,
+      data: {
+        products: products
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error fetching products for RTO:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch products',
+      message: error.message
+    });
+  }
+}
+
+/**
+ * Get sizes for a specific product
+ * @param {Object} req - Express request with product sku_id in params
+ * @param {Object} res - Express response
+ */
+async function getSizesForProduct(req, res) {
+  try {
+    const { skuId } = req.params;
+
+    if (!skuId) {
+      return res.status(400).json({
+        success: false,
+        error: 'skuId parameter is required'
+      });
+    }
+
+    console.log(`📏 Fetching sizes for product: ${skuId}`);
+
+    const sizes = await database.getSizesForProduct(skuId);
+
+    console.log(`✅ Fetched ${sizes.length} sizes for ${skuId}`);
+
+    res.json({
+      success: true,
+      data: {
+        sizes: sizes
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error fetching sizes for product:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch sizes',
+      message: error.message
+    });
+  }
+}
+
+/**
+ * Add manual RTO inventory entry
+ * Uses upsert logic - adds to existing quantity if row exists
+ * @param {Object} req - Express request with location, product_code, size, quantity
+ * @param {Object} res - Express response
+ */
+async function addManualRTOEntry(req, res) {
+  try {
+    console.log('📝 Processing manual RTO entry...');
+
+    const { location, sku_id, size, quantity } = req.body;
+
+    // Validate required fields
+    if (!location || typeof location !== 'string' || location.trim() === '') {
+      return res.status(400).json({
+        success: false,
+        error: 'Location is required'
+      });
+    }
+
+    if (!sku_id || typeof sku_id !== 'string' || sku_id.trim() === '') {
+      return res.status(400).json({
+        success: false,
+        error: 'Product SKU is required'
+      });
+    }
+
+    if (!size || typeof size !== 'string' || size.trim() === '') {
+      return res.status(400).json({
+        success: false,
+        error: 'Size is required'
+      });
+    }
+
+    const qty = parseInt(quantity);
+    if (isNaN(qty) || qty <= 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Quantity must be a positive number'
+      });
+    }
+
+    // Build the product_code by combining sku_id and size
+    const product_code = `${sku_id.trim()}-${size.trim()}`;
+
+    console.log(`📦 Adding RTO entry: location=${location}, product_code=${product_code}, size=${size}, qty=${qty}`);
+
+    // Use upsertRTOInventory - adds to existing if row exists
+    await database.upsertRTOInventory(
+      location.trim(),
+      product_code,
+      size.trim(),
+      qty
+    );
+
+    console.log(`✅ Manual RTO entry added successfully`);
+
+    res.json({
+      success: true,
+      message: 'RTO entry added successfully',
+      data: {
+        location: location.trim(),
+        product_code: product_code,
+        size: size.trim(),
+        quantity: qty
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error adding manual RTO entry:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to add RTO entry',
+      message: error.message
+    });
+  }
+}
+
 module.exports = {
   getAggregatedInventory,
   uploadRTODetails,
   getRTOInventory,
   updateRTOInventory,
   getRTOFocusOrders,
-  updateRTOFocusStatus
+  updateRTOFocusStatus,
+  getRTOLocations,
+  getRTOProducts,
+  getSizesForProduct,
+  addManualRTOEntry
 };

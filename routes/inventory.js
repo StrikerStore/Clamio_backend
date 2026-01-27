@@ -104,6 +104,54 @@ router.put(
 );
 
 /**
+ * @route   GET /api/admin/inventory/rto-locations
+ * @desc    Get distinct RTO warehouse locations for dropdown
+ * @access  Admin, Superadmin
+ */
+router.get(
+  '/rto-locations',
+  authenticateBasicAuth,
+  requireAdminOrSuperadmin,
+  inventoryController.getRTOLocations
+);
+
+/**
+ * @route   GET /api/admin/inventory/rto-products
+ * @desc    Get products for RTO dropdown
+ * @access  Admin, Superadmin
+ */
+router.get(
+  '/rto-products',
+  authenticateBasicAuth,
+  requireAdminOrSuperadmin,
+  inventoryController.getRTOProducts
+);
+
+/**
+ * @route   GET /api/admin/inventory/rto-sizes/:skuId
+ * @desc    Get sizes for a specific product
+ * @access  Admin, Superadmin
+ */
+router.get(
+  '/rto-sizes/:skuId',
+  authenticateBasicAuth,
+  requireAdminOrSuperadmin,
+  inventoryController.getSizesForProduct
+);
+
+/**
+ * @route   POST /api/admin/inventory/rto-manual
+ * @desc    Add manual RTO inventory entry
+ * @access  Admin, Superadmin
+ */
+router.post(
+  '/rto-manual',
+  authenticateBasicAuth,
+  requireAdminOrSuperadmin,
+  inventoryController.addManualRTOEntry
+);
+
+/**
  * @route   GET /api/admin/inventory/products/new
  * @desc    Check for new products added in the last 24 hours
  * @access  Admin, Superadmin

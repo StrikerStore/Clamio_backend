@@ -7489,6 +7489,128 @@ class Database {
     }
   }
 
+  /**
+   * Get distinct RTO warehouse locations for dropdown
+   * @returns {Promise<Array>} Array of unique rto_wh values
+   */
+  async getDistinctRTOLocations() {
+    await this.waitForMySQLInitialization();
+
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      const query = `
+        SELECT DISTINCT rto_wh as location
+        FROM rto_inventory
+        WHERE rto_wh IS NOT NULL AND rto_wh != ''
+        ORDER BY rto_wh
+      `;
+
+      const [rows] = await this.mysqlConnection.execute(query);
+      console.log(`📍 [RTO Manual] Found ${rows.length} distinct locations`);
+      return rows.map(row => row.location);
+    } catch (error) {
+      console.error('❌ [RTO Manual] Error getting distinct RTO locations:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get products for RTO dropdown with name and sku_id
+   * @returns {Promise<Array>} Array of products with name and sku_id
+   */
+  async getProductsForRTODropdown() {
+    await this.waitForMySQLInitialization();
+
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      // Get distinct product names with their sku_id
+      // Using priority: STRI > DRIB > JERS when same product appears with different account_codes
+      const query = `
+        WITH ranked_products AS (
+          SELECT 
+            name,
+            sku_id,
+            account_code,
+            ROW_NUMBER() OVER (
+              PARTITION BY sku_id 
+              ORDER BY 
+                CASE account_code
+                  WHEN 'STRI' THEN 1
+                  WHEN 'DRIB' THEN 2
+                  WHEN 'JERS' THEN 3
+                  ELSE 4
+                END
+            ) as rn
+          FROM products
+          WHERE name IS NOT NULL AND name != ''
+            AND sku_id IS NOT NULL AND sku_id != ''
+        )
+        SELECT name, sku_id
+        FROM ranked_products
+        WHERE rn = 1
+        ORDER BY name
+      `;
+
+      const [rows] = await this.mysqlConnection.execute(query);
+      console.log(`📦 [RTO Manual] Found ${rows.length} products for dropdown`);
+      return rows;
+    } catch (error) {
+      console.error('❌ [RTO Manual] Error getting products for dropdown:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get distinct sizes for a product based on product_code pattern
+   * Looks up sizes from orders table where product_code matches the sku_id pattern
+   * @param {string} skuId - The base SKU ID from products table
+   * @returns {Promise<Array>} Array of unique sizes
+   */
+  async getSizesForProduct(skuId) {
+    await this.waitForMySQLInitialization();
+
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      // Get sizes from orders where product_code starts with the sku_id
+      const query = `
+        SELECT DISTINCT size
+        FROM orders
+        WHERE product_code LIKE CONCAT(?, '%')
+          AND size IS NOT NULL 
+          AND size != ''
+        ORDER BY 
+          CASE size
+            WHEN 'S' THEN 1
+            WHEN 'M' THEN 2
+            WHEN 'L' THEN 3
+            WHEN 'XL' THEN 4
+            WHEN '2XL' THEN 5
+            WHEN '3XL' THEN 6
+            WHEN '4XL' THEN 7
+            WHEN '5XL' THEN 8
+            ELSE 9
+          END,
+          size
+      `;
+
+      const [rows] = await this.mysqlConnection.execute(query, [skuId]);
+      console.log(`📏 [RTO Manual] Found ${rows.length} sizes for sku_id: ${skuId}`);
+      return rows.map(row => row.size);
+    } catch (error) {
+      console.error('❌ [RTO Manual] Error getting sizes for product:', error);
+      throw error;
+    }
+  }
+
 }
 
 module.exports = new Database(); 
