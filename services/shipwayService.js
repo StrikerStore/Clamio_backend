@@ -46,15 +46,15 @@ class ShipwayService {
       if (this.accountCode) {
         // Multi-store mode: fetch credentials from database
         const store = await database.getStoreByAccountCode(this.accountCode);
-        
+
         if (!store) {
           throw new Error(`Store not found for account code: ${this.accountCode}`);
         }
-        
+
         if (store.status !== 'active') {
           throw new Error(`Store is not active: ${this.accountCode}`);
         }
-        
+
         this.basicAuthHeader = store.auth_token;
         console.log(`✅ ShipwayService initialized for store: ${this.accountCode}`);
       } else {
@@ -82,7 +82,7 @@ class ShipwayService {
   async getWarehouseById(warehouseId) {
     // Initialize service if not already initialized
     await this.initialize();
-    
+
     try {
       if (!warehouseId) {
         throw new Error('Warehouse ID is required');
@@ -147,9 +147,9 @@ class ShipwayService {
 
     } catch (error) {
       // Check if this is an expected validation failure (warehouse not found)
-      const isValidationFailure = error.message.includes('Warehouse not found') || 
-                                  error.message.includes('not found') ||
-                                  error.message.includes('Invalid warehouse ID');
+      const isValidationFailure = error.message.includes('Warehouse not found') ||
+        error.message.includes('not found') ||
+        error.message.includes('Invalid warehouse ID');
 
       this.logApiActivity({
         type: isValidationFailure ? 'shipway-validation-failure' : 'shipway-error',
@@ -166,12 +166,12 @@ class ShipwayService {
       } else {
         console.error('Error fetching for warehouseId:', warehouseId, 'from Shipway API:', error.message);
       }
-      
+
       // Handle specific error cases
       if (error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND') {
         throw new Error('Unable to connect to Shipway API. Please check your internet connection.');
       }
-      
+
       if (error.code === 'ETIMEDOUT') {
         throw new Error('Request to Shipway API timed out. Please try again.');
       }
@@ -191,8 +191,8 @@ class ShipwayService {
       }
 
       // Re-throw the original error if it's already formatted
-      if (error.message.includes('Warehouse not found') || 
-          error.message.includes('Shipway API')) {
+      if (error.message.includes('Warehouse not found') ||
+        error.message.includes('Shipway API')) {
         throw error;
       }
 
@@ -212,7 +212,7 @@ class ShipwayService {
 
     // Remove any whitespace
     const cleanId = warehouseId.trim();
-    
+
     // Check if it's a valid number (positive integer)
     const numId = parseInt(cleanId, 10);
     return !isNaN(numId) && numId > 0 && numId.toString() === cleanId;
@@ -272,7 +272,7 @@ class ShipwayService {
 
       // Try to fetch a test warehouse (you might want to use a known test ID)
       const testResult = await this.getWarehouseById('1');
-      
+
       return {
         success: true,
         message: 'Successfully connected to Shipway API'
@@ -670,37 +670,37 @@ class ShipwayService {
   async syncOrdersToMySQL() {
     // Initialize service if not already initialized
     await this.initialize();
-    
+
     const database = require('../config/database');
     const rawDataJsonPath = path.join(__dirname, '../data/raw_shipway_orders.json');
     const url = `${this.baseURL}/getorders`;
     let shipwayOrders = [];
     let rawApiResponse = null;
-    
+
     try {
       // Fetch all orders using Shipway's page-based pagination
       let allOrders = [];
       let page = 1;
       let hasMorePages = true;
-      
+
       console.log(`🔄 Starting paginated fetch from Shipway API${this.accountCode ? ` (${this.accountCode})` : ''}...`);
-      
+
       while (hasMorePages) {
-        const currentParams = { 
+        const currentParams = {
           status: 'O',
           page: page
         };
-        
-        this.logApiActivity({ 
-          type: 'shipway-request', 
-          url, 
-          params: currentParams, 
+
+        this.logApiActivity({
+          type: 'shipway-request',
+          url,
+          params: currentParams,
           headers: { Authorization: '***' },
           page: page
         });
-        
+
         console.log(`📄 Fetching page ${page}...`);
-        
+
         const response = await axios.get(url, {
           params: currentParams,
           headers: {
@@ -709,11 +709,11 @@ class ShipwayService {
           },
           timeout: 20000,
         });
-        
+
         if (response.status !== 200 || !response.data) {
           throw new Error('Invalid response from Shipway API');
         }
-        
+
         let currentPageOrders = [];
         if (Array.isArray(response.data)) {
           currentPageOrders = response.data;
@@ -736,12 +736,12 @@ class ShipwayService {
           this.logApiActivity({ type: 'shipway-unexpected-format', data: response.data });
           throw new Error('Unexpected Shipway API response format');
         }
-        
+
         console.log(`  ✅ Page ${page}: ${currentPageOrders.length} orders`);
-        
+
         // Add orders from this page to our collection
         allOrders = allOrders.concat(currentPageOrders);
-        
+
         // If we got 0 orders or fewer than 100 orders, we've reached the last page
         if (currentPageOrders.length === 0) {
           hasMorePages = false;
@@ -752,16 +752,16 @@ class ShipwayService {
         } else {
           console.log(`  ➡️ More pages available (${currentPageOrders.length} = 100 orders)`);
         }
-        
-        this.logApiActivity({ 
-          type: 'shipway-page-fetched', 
-          page: page, 
-          ordersInPage: currentPageOrders.length, 
-          totalOrdersSoFar: allOrders.length 
+
+        this.logApiActivity({
+          type: 'shipway-page-fetched',
+          page: page,
+          ordersInPage: currentPageOrders.length,
+          totalOrdersSoFar: allOrders.length
         });
-        
+
         page++;
-        
+
         // Safety check to prevent infinite loops
         if (page > 20) {
           console.log('⚠️ Safety limit reached (20 pages), stopping pagination');
@@ -769,9 +769,9 @@ class ShipwayService {
           break;
         }
       }
-      
+
       console.log(`🎉 Pagination complete! Total orders fetched: ${allOrders.length}`);
-      
+
       // Filter orders to only include last N days (configurable from utility table)
       let numberOfDays = 60; // default
       try {
@@ -785,28 +785,28 @@ class ShipwayService {
       } catch (dbError) {
         console.log(`⚠️ Could not fetch utility parameter, using default: ${numberOfDays} days`, dbError.message);
       }
-      
+
       const cutoffDate = new Date();
       cutoffDate.setDate(cutoffDate.getDate() - numberOfDays);
-      
+
       const filteredOrders = allOrders.filter(order => {
         if (!order.order_date) return false;
-        
+
         const orderDate = new Date(order.order_date);
         const isWithinDateRange = orderDate >= cutoffDate;
-        
+
         if (!isWithinDateRange) {
           console.log(`  ⏰ Filtering out old order: ${order.order_id} (${order.order_date})`);
         }
-        
+
         return isWithinDateRange;
       });
-      
+
       console.log(`📅 Date filter applied: ${filteredOrders.length} orders within last ${numberOfDays} days (filtered out ${allOrders.length - filteredOrders.length} old orders)`);
-      
+
       shipwayOrders = filteredOrders;
       rawApiResponse = { success: 1, message: allOrders }; // Keep all orders in raw JSON
-      
+
       // Store raw API response in JSON file (all orders)
       try {
         fs.writeFileSync(rawDataJsonPath, JSON.stringify(rawApiResponse, null, 2));
@@ -814,16 +814,16 @@ class ShipwayService {
       } catch (fileError) {
         this.logApiActivity({ type: 'raw-data-store-error', error: fileError.message });
       }
-      
-      this.logApiActivity({ 
-        type: 'shipway-response', 
-        status: 200, 
-        dataType: typeof rawApiResponse, 
+
+      this.logApiActivity({
+        type: 'shipway-response',
+        status: 200,
+        dataType: typeof rawApiResponse,
         dataKeys: Object.keys(rawApiResponse),
         totalOrders: allOrders.length,
         filteredOrders: filteredOrders.length
       });
-      
+
     } catch (error) {
       this.logApiActivity({ type: 'shipway-error', error: error.message, stack: error.stack });
       throw new Error('Failed to fetch orders from Shipway API: ' + error.message);
@@ -840,12 +840,12 @@ class ShipwayService {
     let existingOrders = [];
     let existingClaimData = new Map(); // Map to store claim data by account_code|order_id|product_code
     let maxUniqueId = 0;
-    
+
     try {
       const allOrders = await database.getAllOrders();
       // Filter orders to only include current store's orders
       existingOrders = allOrders.filter(row => row.account_code === this.accountCode);
-      
+
       // Build map of existing claim data with account_code in key
       existingOrders.forEach(row => {
         const key = `${row.account_code}|${row.order_id}|${row.product_code}`;
@@ -865,7 +865,7 @@ class ShipwayService {
           priority_carrier: row.priority_carrier || '',
           pincode: row.pincode || ''
         });
-        
+
         // Track max unique_id for new rows
         if (row.unique_id && parseInt(row.unique_id) > maxUniqueId) {
           maxUniqueId = parseInt(row.unique_id);
@@ -878,7 +878,7 @@ class ShipwayService {
     // Flatten Shipway orders to one row per product, preserving existing claim data
     const flatOrders = [];
     let uniqueIdCounter = maxUniqueId + 1;
-    
+
     // Function to generate stable unique_id (store-aware)
     const generateStableUniqueIdWithStore = (orderId, productCode, itemIndex = 0, accountCode = '') => {
       const crypto = require('crypto');
@@ -886,21 +886,21 @@ class ShipwayService {
       const id = `${storePart}_${orderId}_${productCode}_${itemIndex}`;
       return crypto.createHash('md5').update(id).digest('hex').substring(0, 12).toUpperCase();
     };
-    
+
     for (const order of shipwayOrders) {
       if (!Array.isArray(order.products)) continue;
-      
+
       // Extract order-level financial information and convert to number
       const orderTotal = parseFloat(order.order_total) || 0;
-      
+
       // NEW LOGIC: Determine payment type and is_partial_paid based on payment_id and order_tags
       const paymentId = order.payment_id ? parseInt(order.payment_id) : null;
       const orderTags = Array.isArray(order.order_tags) ? order.order_tags : [];
       const hasPPCODTag = orderTags.includes('PPCOD');
-      
+
       let paymentType = 'P'; // Default to prepaid
       let isPartialPaid = false;
-      
+
       if (paymentId === 6) {
         // COD payment
         paymentType = 'C';
@@ -916,7 +916,7 @@ class ShipwayService {
         paymentType = 'P';
         isPartialPaid = false;
       }
-      
+
       // Calculate total prepaid amount for the entire order based on payment type and is_partial_paid
       let totalPrepaidAmount = 0;
       if (paymentType === 'P') {
@@ -929,59 +929,66 @@ class ShipwayService {
         // Pure COD: 0% prepaid
         totalPrepaidAmount = 0;
       }
-      
-      // Calculate total selling price for all products in this order for ratio calculation
-      const totalSellingPriceInOrder = order.products.reduce((sum, prod) => {
-        return sum + (parseFloat(prod.price) || 0);
+
+      // Calculate total value (price × quantity) for all products in this order for ratio calculation
+      const totalValueInOrder = order.products.reduce((sum, prod) => {
+        const price = parseFloat(prod.price) || 0;
+        const qty = parseInt(prod.amount) || 1;
+        return sum + (price * qty);
       }, 0);
-      
-      // Calculate ratio parts for each product
+
+      // Calculate ratio parts for each product based on (price × quantity)
       let productRatios = [];
-      if (totalSellingPriceInOrder > 0) {
-        const prices = order.products.map(prod => parseFloat(prod.price) || 0);
-        
-        // Convert prices to integers to handle decimals (multiply by 100 for 2 decimal places)
-        const intPrices = prices.map(price => Math.round(price * 100));
-        
-        // Find GCD of all prices to get simplest integer ratio
+      if (totalValueInOrder > 0) {
+        // Calculate value (price × quantity) for each product
+        const values = order.products.map(prod => {
+          const price = parseFloat(prod.price) || 0;
+          const qty = parseInt(prod.amount) || 1;
+          return price * qty;
+        });
+
+        // Convert values to integers to handle decimals (multiply by 100 for 2 decimal places)
+        const intValues = values.map(val => Math.round(val * 100));
+
+        // Find GCD of all values to get simplest integer ratio
         const gcd = (a, b) => b === 0 ? a : gcd(b, a % b);
         const findGCD = (arr) => arr.reduce((acc, val) => gcd(acc, val));
-        
-        const pricesGCD = findGCD(intPrices.filter(p => p > 0));
-        
-        if (pricesGCD > 0) {
-          productRatios = intPrices.map(price => Math.round(price / pricesGCD));
+
+        const valuesGCD = findGCD(intValues.filter(v => v > 0));
+
+        if (valuesGCD > 0) {
+          productRatios = intValues.map(val => Math.round(val / valuesGCD));
         } else {
-          productRatios = prices.map(() => 1);
+          productRatios = values.map(() => 1);
         }
       } else {
-        productRatios = order.products.map(() => 1); // Equal ratio if no selling prices
+        productRatios = order.products.map(() => 1); // Equal ratio if no values
       }
-      
+
       // Calculate total of all ratios for this order
       const totalRatios = productRatios.reduce((sum, ratio) => sum + ratio, 0);
-      
+
       for (let i = 0; i < order.products.length; i++) {
         const product = order.products[i];
         const key = `${order.order_id}|${product.product_code}`;
         const existingClaim = existingClaimData.get(key);
-        
+
         // Get selling price from product data and convert to number
         const sellingPrice = parseFloat(product.price) || 0;
-        
+
         // Get the ratio for this product
         const orderTotalRatio = productRatios[i] || 1;
-        
+
         // Calculate the actual split amount for this product
-        const orderTotalSplit = totalRatios > 0 
+        const orderTotalSplit = totalRatios > 0
           ? parseFloat(((orderTotalRatio / totalRatios) * orderTotal).toFixed(2))
           : parseFloat((orderTotal / order.products.length).toFixed(2)); // Equal split if no ratios
-        
+
         // Calculate the prepaid amount split for this product based on ratio
-        const prepaidAmount = totalRatios > 0 
+        const prepaidAmount = totalRatios > 0
           ? parseFloat(((orderTotalRatio / totalRatios) * totalPrepaidAmount).toFixed(2))
           : parseFloat((totalPrepaidAmount / order.products.length).toFixed(2)); // Equal split if no ratios
-        
+
         // NEW LOGIC: Calculate collectable amount based on payment type and is_partial_paid
         let collectableAmount = 0;
         if (paymentType === 'P') {
@@ -994,10 +1001,10 @@ class ShipwayService {
           // Pure COD: collect 100%
           collectableAmount = parseFloat(orderTotalSplit.toFixed(2));
         }
-        
+
         // Generate stable unique_id first
         const stableUniqueId = existingClaim ? existingClaim.unique_id : generateStableUniqueIdWithStore(order.order_id, product.product_code, i, this.accountCode);
-        
+
         const orderRow = {
           id: stableUniqueId, // Use unique_id as id (stable, not timestamp-based)
           unique_id: stableUniqueId,
@@ -1036,7 +1043,7 @@ class ShipwayService {
           // Add priority_carrier column (empty for new orders, preserve existing)
           priority_carrier: existingClaim ? existingClaim.priority_carrier : ''
         };
-        
+
         flatOrders.push(orderRow);
       }
     }
@@ -1048,7 +1055,7 @@ class ShipwayService {
     let changed = false;
     let newOrdersCount = 0;
     let updatedOrdersCount = 0;
-    
+
     // Check for new rows
     for (const row of flatOrders) {
       if (!existingKeySet.has(`${row.account_code}|${row.order_id}|${row.product_code}`)) {
@@ -1056,12 +1063,12 @@ class ShipwayService {
         newOrdersCount++;
       }
     }
-    
+
     console.log(`📊 Sync Summary: ${newOrdersCount} new orders, ${existingOrders.length} existing orders`);
-    
+
     // Note: We no longer check for removed rows to preserve historical data
     // Orders that are no longer in Shipway API will remain in our database
-    
+
     // ALWAYS update is_in_new_order flags (regardless of other changes)
     try {
       // Step 1: Mark all existing orders for THIS STORE as NOT in new order (is_in_new_order = 0)
@@ -1071,35 +1078,31 @@ class ShipwayService {
           is_in_new_order: false
         });
       }
-      
+
       // Step 2: Insert or update orders from current Shipway API (is_in_new_order = 1)
       for (const orderRow of flatOrders) {
         const key = `${orderRow.account_code}|${orderRow.order_id}|${orderRow.product_code}`;
         // Set is_in_new_order = 1 for all orders from current Shipway API
         orderRow.is_in_new_order = true;
-        
+
         if (existingKeySet.has(key)) {
           // Check if existing order needs update by comparing key fields
           // IMPORTANT: Include account_code in matching to prevent cross-store data interaction
           const existingOrder = existingOrders.find(o => `${o.account_code}|${o.order_id}|${o.product_code}` === key);
           if (existingOrder) {
-            // Only update if there are actual changes to order data
-            const hasDataChanges = (
+            // Check if payment_type has changed (trigger for financial recalculation)
+            const paymentTypeChanged = existingOrder.payment_type !== orderRow.payment_type;
+            const isPartialPaidChanged = Boolean(existingOrder.is_partial_paid) !== Boolean(orderRow.is_partial_paid);
+
+            // Check for non-financial data changes
+            const hasNonFinancialChanges = (
               existingOrder.order_date !== orderRow.order_date ||
               existingOrder.product_name !== orderRow.product_name ||
-              parseFloat(existingOrder.selling_price || 0) !== parseFloat(orderRow.selling_price || 0) ||
-              parseFloat(existingOrder.order_total || 0) !== parseFloat(orderRow.order_total || 0) ||
-              existingOrder.payment_type !== orderRow.payment_type ||
-              Boolean(existingOrder.is_partial_paid) !== Boolean(orderRow.is_partial_paid) ||
-              parseFloat(existingOrder.prepaid_amount || 0) !== parseFloat(orderRow.prepaid_amount || 0) ||
-              parseFloat(existingOrder.order_total_ratio || 0) !== parseFloat(orderRow.order_total_ratio || 0) ||
-              parseFloat(existingOrder.order_total_split || 0) !== parseFloat(orderRow.order_total_split || 0) ||
-              parseFloat(existingOrder.collectable_amount || 0) !== parseFloat(orderRow.collectable_amount || 0) ||
               existingOrder.pincode !== orderRow.pincode
             );
-            
-            if (hasDataChanges) {
-              // Only update if there are actual data changes
+
+            if (paymentTypeChanged || isPartialPaidChanged) {
+              // RECALCULATE: Payment type changed - update all financial values
               await database.updateOrder(existingOrder.unique_id, {
                 order_date: orderRow.order_date,
                 product_name: orderRow.product_name,
@@ -1116,13 +1119,24 @@ class ShipwayService {
               });
               updatedOrdersCount++;
               changed = true;
-              console.log(`🔄 Updated existing order: ${orderRow.order_id}|${orderRow.product_code}`);
+              console.log(`🔄 Payment type changed - Recalculated financial values: ${orderRow.order_id}|${orderRow.product_code}`);
+            } else if (hasNonFinancialChanges) {
+              // FREEZE: Payment type unchanged - preserve financial values, only update non-financial fields
+              await database.updateOrder(existingOrder.unique_id, {
+                order_date: orderRow.order_date,
+                product_name: orderRow.product_name,
+                pincode: orderRow.pincode,
+                is_in_new_order: true
+              });
+              updatedOrdersCount++;
+              changed = true;
+              console.log(`✅ Non-financial update (frozen financial values): ${orderRow.order_id}|${orderRow.product_code}`);
             } else {
-              // Just update the is_in_new_order flag without changing other data
+              // No changes at all - just update the is_in_new_order flag
               await database.updateOrder(existingOrder.unique_id, {
                 is_in_new_order: true
               });
-              console.log(`✅ Preserved existing order: ${orderRow.order_id}|${orderRow.product_code}`);
+              console.log(`✅ No changes - Preserved all values: ${orderRow.order_id}|${orderRow.product_code}`);
             }
           }
         } else {
@@ -1160,11 +1174,11 @@ class ShipwayService {
           }
         }
       }
-    
-      
+
+
       // Log the sync results
-      this.logApiActivity({ 
-        type: 'mysql-sync-completed', 
+      this.logApiActivity({
+        type: 'mysql-sync-completed',
         totalOrders: flatOrders.length,
         newOrders: newOrdersCount,
         updatedOrders: updatedOrdersCount,
@@ -1172,14 +1186,14 @@ class ShipwayService {
         preservedClaims: existingClaimData.size,
         flagsUpdated: true
       });
-      
+
       console.log(`📊 Sync Results: ${newOrdersCount} new, ${updatedOrdersCount} updated, ${flatOrders.length - newOrdersCount - updatedOrdersCount} preserved`);
 
       // Only update other data if there were actual changes to orders
       if (changed || existingOrders.length === 0) {
-        this.logApiActivity({ 
-          type: 'mysql-write-with-new-columns', 
-          rows: flatOrders.length, 
+        this.logApiActivity({
+          type: 'mysql-write-with-new-columns',
+          rows: flatOrders.length,
           preservedClaims: existingClaimData.size,
           newColumns: ['quantity', 'selling_price', 'order_total', 'payment_type', 'is_partial_paid', 'prepaid_amount', 'order_total_ratio', 'order_total_split', 'collectable_amount', 'customer_name', 'priority_carrier', 'pincode', 'is_in_new_order']
         });
@@ -1188,17 +1202,17 @@ class ShipwayService {
         try {
           const orderEnhancementService = require('./orderEnhancementService');
           const enhancementResult = await orderEnhancementService.enhanceOrdersMySQL();
-          this.logApiActivity({ 
-            type: 'orders-enhancement', 
+          this.logApiActivity({
+            type: 'orders-enhancement',
             success: enhancementResult.success,
             customerNamesAdded: enhancementResult.customerNamesAdded,
             productImagesAdded: enhancementResult.productImagesAdded,
             message: enhancementResult.message
           });
         } catch (enhancementError) {
-          this.logApiActivity({ 
-            type: 'orders-enhancement-error', 
-            error: enhancementError.message 
+          this.logApiActivity({
+            type: 'orders-enhancement-error',
+            error: enhancementError.message
           });
         }
 
@@ -1206,16 +1220,16 @@ class ShipwayService {
         try {
           const shipwayCarrierService = require('./shipwayCarrierService');
           const carrierResult = await shipwayCarrierService.syncCarriersToDatabase();
-          this.logApiActivity({ 
-            type: 'carrier-sync', 
+          this.logApiActivity({
+            type: 'carrier-sync',
             success: carrierResult.success,
             carrierCount: carrierResult.carrierCount,
             message: carrierResult.message
           });
         } catch (carrierError) {
-          this.logApiActivity({ 
-            type: 'carrier-sync-error', 
-            error: carrierError.message 
+          this.logApiActivity({
+            type: 'carrier-sync-error',
+            error: carrierError.message
           });
         }
 
@@ -1223,10 +1237,10 @@ class ShipwayService {
         try {
           console.log('📋 Populating customer_info table...');
           let customerInfoCount = 0;
-          
+
           // Get unique order_ids from shipway orders
           const uniqueOrderIds = [...new Set(shipwayOrders.map(order => order.order_id))];
-          
+
           for (const order of shipwayOrders) {
             // Upsert customer info (create or update)
             const customerData = {
@@ -1257,23 +1271,23 @@ class ShipwayService {
               shipping_latitude: order.s_latitude || null,
               shipping_longitude: order.s_longitude || null
             };
-            
+
             await database.upsertCustomerInfo(customerData);
             customerInfoCount++;
           }
-          
+
           console.log(`✅ Customer info populated: ${customerInfoCount} new records`);
-          this.logApiActivity({ 
-            type: 'customer-info-sync', 
+          this.logApiActivity({
+            type: 'customer-info-sync',
             success: true,
             customerInfoCount: customerInfoCount,
             message: `Successfully populated ${customerInfoCount} customer info records`
           });
         } catch (customerInfoError) {
           console.error('⚠️ Failed to populate customer_info:', customerInfoError.message);
-          this.logApiActivity({ 
-            type: 'customer-info-sync-error', 
-            error: customerInfoError.message 
+          this.logApiActivity({
+            type: 'customer-info-sync-error',
+            error: customerInfoError.message
           });
         }
       } else {
@@ -1283,7 +1297,7 @@ class ShipwayService {
       this.logApiActivity({ type: 'mysql-write-error', error: mysqlError.message });
       throw new Error('Failed to update MySQL database: ' + mysqlError.message);
     }
-    
+
     return { success: true, count: flatOrders.length, preservedClaims: existingClaimData.size, rawDataStored: rawDataJsonPath };
   }
 
@@ -1303,30 +1317,30 @@ class ShipwayService {
    */
   async fetchOrdersFromShipway() {
     const url = `${this.baseURL}/getorders`;
-    
+
     try {
       // Fetch all orders using Shipway's page-based pagination
       let allOrders = [];
       let page = 1;
       let hasMorePages = true;
-      
+
       console.log('🔄 Starting paginated fetch from Shipway API (for clone verification)...');
-      
+
       while (hasMorePages) {
-        const currentParams = { 
+        const currentParams = {
           status: 'O',
           page: page
         };
-        
-        this.logApiActivity({ 
-          type: 'shipway-fetch-orders', 
-          url, 
+
+        this.logApiActivity({
+          type: 'shipway-fetch-orders',
+          url,
           params: currentParams,
           page: page
         });
-        
+
         console.log(`📄 Fetching page ${page} for clone verification...`);
-        
+
         const response = await axios.get(url, {
           params: currentParams,
           headers: {
@@ -1335,11 +1349,11 @@ class ShipwayService {
           },
           timeout: 10000, // Shorter timeout for clone verification
         });
-        
+
         if (response.status !== 200 || !response.data) {
           throw new Error('Invalid response from Shipway API');
         }
-        
+
         let currentPageOrders = [];
         if (Array.isArray(response.data)) {
           currentPageOrders = response.data;
@@ -1361,12 +1375,12 @@ class ShipwayService {
         } else {
           throw new Error('Unexpected Shipway API response format');
         }
-        
+
         console.log(`  ✅ Page ${page}: ${currentPageOrders.length} orders`);
-        
+
         // Add orders from this page to our collection
         allOrders = allOrders.concat(currentPageOrders);
-        
+
         // If we got 0 orders or fewer than 100 orders, we've reached the last page
         if (currentPageOrders.length === 0) {
           hasMorePages = false;
@@ -1377,18 +1391,18 @@ class ShipwayService {
         } else {
           console.log(`  ➡️ More pages available (${currentPageOrders.length} = 100 orders)`);
         }
-        
+
         page++;
-        
+
         // Safety check to prevent infinite loops (lower limit for clone verification)
         if (page > 10) {
           console.log('⚠️ Safety limit reached (10 pages), stopping pagination for clone verification');
           break;
         }
       }
-      
+
       console.log(`🎉 Clone verification pagination complete! Total orders fetched: ${allOrders.length}`);
-      
+
       return allOrders;
     } catch (error) {
       this.logApiActivity({ type: 'shipway-fetch-orders-error', error: error.message });
@@ -1403,14 +1417,14 @@ class ShipwayService {
    */
   async fetchOrderById(orderId) {
     await this.initialize();
-    
+
     if (!orderId) {
       throw new Error('Order ID is required');
     }
 
     const url = `${this.baseURL}/getorders`;
     const params = { orderid: orderId };
-    
+
     try {
       this.logApiActivity({
         type: 'shipway-get-order',
@@ -1420,9 +1434,9 @@ class ShipwayService {
         params,
         headers: { Authorization: '***' }
       });
-      
+
       console.log(`🔍 Fetching single order from Shipway: ${orderId}`);
-      
+
       const response = await axios.get(url, {
         params,
         headers: {
@@ -1431,11 +1445,11 @@ class ShipwayService {
         },
         timeout: 10000, // 10 second timeout
       });
-      
+
       if (response.status !== 200 || !response.data) {
         throw new Error('Invalid response from Shipway API');
       }
-      
+
       // Handle different response formats
       let order = null;
       if (Array.isArray(response.data)) {
@@ -1452,7 +1466,7 @@ class ShipwayService {
         // Order not found
         order = null;
       }
-      
+
       if (order && order.order_id === orderId) {
         console.log(`✅ Order found in Shipway: ${orderId}`);
         return order;
@@ -1460,7 +1474,7 @@ class ShipwayService {
         console.log(`ℹ️ Order not found in Shipway: ${orderId}`);
         return null;
       }
-      
+
     } catch (error) {
       this.logApiActivity({
         type: 'shipway-get-order-error',
@@ -1468,18 +1482,18 @@ class ShipwayService {
         accountCode: this.accountCode,
         error: error.message
       });
-      
+
       // If 404 or "not found" error, return null instead of throwing
       if (error.response && error.response.status === 404) {
         console.log(`ℹ️ Order not found (404): ${orderId}`);
         return null;
       }
-      
+
       if (error.message && error.message.toLowerCase().includes('not found')) {
         console.log(`ℹ️ Order not found: ${orderId}`);
         return null;
       }
-      
+
       console.error(`❌ Error fetching order ${orderId} from Shipway:`, error.message);
       throw new Error(`Failed to fetch order from Shipway API: ${error.message}`);
     }
@@ -1493,7 +1507,7 @@ class ShipwayService {
   async cancelShipment(awbNumbers) {
     // Initialize service if not already initialized
     await this.initialize();
-    
+
     try {
       if (!awbNumbers || !Array.isArray(awbNumbers) || awbNumbers.length === 0) {
         throw new Error('AWB numbers array is required and cannot be empty');
@@ -1555,12 +1569,12 @@ class ShipwayService {
         stack: error.stack,
       });
       console.error('Error cancelling shipment for AWB numbers:', awbNumbers, 'from Shipway API:', error.message);
-      
+
       // Handle specific error cases
       if (error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND') {
         throw new Error('Unable to connect to Shipway API. Please check your internet connection.');
       }
-      
+
       if (error.code === 'ETIMEDOUT') {
         throw new Error('Request to Shipway API timed out. Please try again.');
       }
@@ -1580,9 +1594,9 @@ class ShipwayService {
       }
 
       // Re-throw the original error if it's already formatted
-      if (error.message.includes('Shipway API') || 
-          error.message.includes('Unable to connect') ||
-          error.message.includes('timed out')) {
+      if (error.message.includes('Shipway API') ||
+        error.message.includes('Unable to connect') ||
+        error.message.includes('timed out')) {
         throw error;
       }
 

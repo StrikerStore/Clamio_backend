@@ -4880,6 +4880,10 @@ class Database {
       const labelValues = [];
 
       // Orders table fields
+      // Note: Financial fields (selling_price, order_total, payment_type, is_partial_paid, prepaid_amount,
+      // order_total_ratio, order_total_split, collectable_amount) are FROZEN at the shipwayService level.
+      // They are only updated when payment_type or is_partial_paid changes during sync.
+      // They are still allowed here so the sync can update them when needed.
       const allowedOrderFields = [
         'order_id', 'customer_name', 'order_date',
         'product_name', 'product_code', 'selling_price', 'order_total',
