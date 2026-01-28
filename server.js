@@ -47,29 +47,50 @@ app.use(helmet({
 
 /**
  * CORS Configuration
+ * Note: Added explicit OPTIONS handling and preflight caching for better mobile network support
  */
+
+// Define allowed origins
+const allowedOrigins = [
+  'https://frontend-dev-production-5a8c.up.railway.app',
+  'https://clamiofrontend-production.up.railway.app',
+  'https://clamio-frontend-nu.vercel.app',
+  "https://claimio.in",
+  "https://www.claimio.in",
+  "https://dev.claimio.in",
+  'http://localhost:3000',
+  'http://localhost:3001',
+  'http://127.0.0.1:3000',
+  'http://127.0.0.1:3001'
+];
+
+// Add environment variable origin if provided
+if (process.env.CORS_ORIGIN) {
+  allowedOrigins.push(process.env.CORS_ORIGIN);
+}
+
+// Handle OPTIONS preflight requests quickly (before other middleware)
+// This helps with slow mobile networks where preflight can timeout
+app.options('*', (req, res) => {
+  const origin = req.headers.origin;
+
+  // Allow if origin matches or is a PWA (no origin)
+  if (!origin || allowedOrigins.indexOf(origin) !== -1) {
+    res.header('Access-Control-Allow-Origin', origin || '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+    res.header('Access-Control-Allow-Credentials', 'true');
+    res.header('Access-Control-Max-Age', '86400'); // Cache preflight for 24 hours
+    return res.status(204).send();
+  }
+
+  res.status(403).send('CORS not allowed');
+});
+
 app.use(cors({
   origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps or curl requests)
+    // Allow requests with no origin (like mobile apps, PWAs, or curl requests)
     if (!origin) return callback(null, true);
-
-    const allowedOrigins = [
-      'https://frontend-dev-production-5a8c.up.railway.app',
-      'https://clamiofrontend-production.up.railway.app',
-      'https://clamio-frontend-nu.vercel.app',
-      "https://claimio.in",
-      "https://www.claimio.in",
-      "https://dev.claimio.in",
-      'http://localhost:3000',
-      'http://localhost:3001',
-      'http://127.0.0.1:3000',
-      'http://127.0.0.1:3001'
-    ];
-
-    // Add environment variable origin if provided
-    if (process.env.CORS_ORIGIN) {
-      allowedOrigins.push(process.env.CORS_ORIGIN);
-    }
 
     if (allowedOrigins.indexOf(origin) !== -1) {
       callback(null, true);
@@ -81,7 +102,8 @@ app.use(cors({
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
-  optionsSuccessStatus: 200
+  optionsSuccessStatus: 204, // Some legacy browsers choke on 200
+  maxAge: 86400 // Cache preflight requests for 24 hours
 }));
 
 /**
@@ -130,8 +152,8 @@ if (process.env.NODE_ENV === 'development') {
  * Automatically reconnects if connection is lost after idle periods
  */
 app.use(async (req, res, next) => {
-  // Skip database check for health and test endpoints
-  if (req.path === '/health' || req.path === '/test' || req.path === '/env-check') {
+  // Skip database check for health, test endpoints, and OPTIONS preflight requests
+  if (req.path === '/health' || req.path === '/test' || req.path === '/env-check' || req.method === 'OPTIONS') {
     return next();
   }
 
