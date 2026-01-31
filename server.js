@@ -54,10 +54,10 @@ app.use(helmet({
 const allowedOrigins = [
   'https://frontend-dev-production-5a8c.up.railway.app',
   'https://clamiofrontend-production.up.railway.app',
-  'https://clamio-frontend-nu.vercel.app',
   "https://claimio.in",
   "https://www.claimio.in",
   "https://dev.claimio.in",
+  "https://backend.claimio.in",
   'http://localhost:3000',
   'http://localhost:3001',
   'http://127.0.0.1:3000',
