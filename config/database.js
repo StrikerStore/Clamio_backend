@@ -7903,7 +7903,7 @@ class Database {
         ORDER BY date_series.dt ASC
       `;
 
-      const [rows] = await db.execute(trendQuery, params);
+      const [rows] = await db.execute(trendQuery, [...params, ...params, ...params, ...params]);
       return rows;
     } catch (error) {
       console.error('Error in getVendorHandoverTrend:', error);
