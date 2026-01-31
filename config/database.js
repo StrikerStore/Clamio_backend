@@ -7672,8 +7672,16 @@ class Database {
       const params = [];
 
       if (vendorId) {
-        whereConditions += ' AND c.claimed_by = ?';
-        params.push(vendorId);
+        if (Array.isArray(vendorId) && vendorId.length > 0) {
+          const placeholders = vendorId.map(() => '?').join(',');
+          whereConditions += ` AND c.claimed_by IN (${placeholders})`;
+          params.push(...vendorId);
+        } else if (typeof vendorId === 'string' && vendorId !== 'all') {
+          whereConditions += ' AND c.claimed_by = ?';
+          params.push(vendorId);
+        } else {
+          whereConditions += " AND c.claimed_by IS NOT NULL AND c.claimed_by != ''";
+        }
       } else {
         whereConditions += " AND c.claimed_by IS NOT NULL AND c.claimed_by != ''";
       }
@@ -7687,8 +7695,14 @@ class Database {
         params.push(dateTo + ' 23:59:59');
       }
       if (store) {
-        whereConditions += ' AND o.account_code = ?';
-        params.push(store);
+        if (Array.isArray(store) && store.length > 0) {
+          const placeholders = store.map(() => '?').join(',');
+          whereConditions += ` AND o.account_code IN (${placeholders})`;
+          params.push(...store);
+        } else if (typeof store === 'string' && store !== 'all') {
+          whereConditions += ' AND o.account_code = ?';
+          params.push(store);
+        }
       }
 
       const statsQuery = `
@@ -7735,8 +7749,16 @@ class Database {
       const params = [];
 
       if (vendorId) {
-        whereConditions += ' AND c.claimed_by = ?';
-        params.push(vendorId);
+        if (Array.isArray(vendorId) && vendorId.length > 0) {
+          const placeholders = vendorId.map(() => '?').join(',');
+          whereConditions += ` AND c.claimed_by IN (${placeholders})`;
+          params.push(...vendorId);
+        } else if (typeof vendorId === 'string' && vendorId !== 'all') {
+          whereConditions += ' AND c.claimed_by = ?';
+          params.push(vendorId);
+        } else {
+          whereConditions += " AND c.claimed_by IS NOT NULL AND c.claimed_by != ''";
+        }
       } else {
         whereConditions += " AND c.claimed_by IS NOT NULL AND c.claimed_by != ''";
       }
@@ -7750,32 +7772,46 @@ class Database {
         params.push(dateTo + ' 23:59:59');
       }
       if (store) {
-        whereConditions += ' AND o.account_code = ?';
-        params.push(store);
+        if (Array.isArray(store) && store.length > 0) {
+          const placeholders = store.map(() => '?').join(',');
+          whereConditions += ` AND o.account_code IN (${placeholders})`;
+          params.push(...store);
+        } else if (typeof store === 'string' && store !== 'all') {
+          whereConditions += ' AND o.account_code = ?';
+          params.push(store);
+        }
       }
 
+      // Grouping statuses as requested: Claimed, In Transit, Delivered, RTO Delivered, Pickup Failed, Others
       const distQuery = `
         SELECT 
           CASE 
-            WHEN l.current_shipment_status IS NOT NULL AND l.current_shipment_status != '' 
-            THEN l.current_shipment_status 
-            ELSE c.status 
-          END as status,
+            WHEN (l.current_shipment_status IS NULL OR l.current_shipment_status = '') AND c.status = 'claimed' THEN 'Claimed'
+            WHEN LOWER(l.current_shipment_status) IN ('in_transit', 'in transit', 'int') THEN 'In Transit'
+            WHEN LOWER(l.current_shipment_status) IN ('delivered', 'del') THEN 'Delivered'
+            WHEN LOWER(l.current_shipment_status) IN ('rto_delivered', 'rtd') THEN 'RTO Delivered'
+            WHEN LOWER(l.current_shipment_status) IN ('pickup_failed', 'shpfr3') THEN 'Pickup Failed'
+            ELSE 'Others'
+          END as status_group,
           COUNT(DISTINCT o.unique_id) as count
         FROM orders o
         JOIN claims c ON o.unique_id = c.order_unique_id
         LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
         WHERE ${whereConditions}
-        GROUP BY 
-          CASE 
-            WHEN l.current_shipment_status IS NOT NULL AND l.current_shipment_status != '' 
-            THEN l.current_shipment_status 
-            ELSE c.status 
-          END
+        GROUP BY status_group
+        ORDER BY 
+          CASE status_group
+            WHEN 'Claimed' THEN 1
+            WHEN 'In Transit' THEN 2
+            WHEN 'Delivered' THEN 3
+            WHEN 'RTO Delivered' THEN 4
+            WHEN 'Pickup Failed' THEN 5
+            ELSE 6
+          END ASC
       `;
 
       const [rows] = await db.execute(distQuery, params);
-      return rows;
+      return rows.map(r => ({ status: r.status_group, count: r.count }));
     } catch (error) {
       console.error('Error in getVendorStatusDistribution:', error);
       throw error;
@@ -7791,39 +7827,80 @@ class Database {
     const db = this.mysqlPool || this.mysqlConnection;
 
     try {
-      let whereConditions = 'l.is_handover = 1 AND l.handover_at IS NOT NULL';
+      let whereConditions = '1=1';
       const params = [];
 
       if (vendorId) {
-        whereConditions += ' AND c.claimed_by = ?';
-        params.push(vendorId);
+        if (Array.isArray(vendorId) && vendorId.length > 0) {
+          const placeholders = vendorId.map(() => '?').join(',');
+          whereConditions += ` AND c.claimed_by IN (${placeholders})`;
+          params.push(...vendorId);
+        } else if (typeof vendorId === 'string' && vendorId !== 'all') {
+          whereConditions += ' AND c.claimed_by = ?';
+          params.push(vendorId);
+        } else {
+          whereConditions += " AND c.claimed_by IS NOT NULL AND c.claimed_by != ''";
+        }
       } else {
         whereConditions += " AND c.claimed_by IS NOT NULL AND c.claimed_by != ''";
       }
 
       if (dateFrom) {
-        whereConditions += ' AND l.handover_at >= ?';
+        whereConditions += ' AND o.order_date >= ?';
         params.push(dateFrom);
       }
       if (dateTo) {
-        whereConditions += ' AND l.handover_at <= ?';
+        whereConditions += ' AND o.order_date <= ?';
         params.push(dateTo + ' 23:59:59');
       }
       if (store) {
-        whereConditions += ' AND o.account_code = ?';
-        params.push(store);
+        if (Array.isArray(store) && store.length > 0) {
+          const placeholders = store.map(() => '?').join(',');
+          whereConditions += ` AND o.account_code IN (${placeholders})`;
+          params.push(...store);
+        } else if (typeof store === 'string' && store !== 'all') {
+          whereConditions += ' AND o.account_code = ?';
+          params.push(store);
+        }
       }
 
+      // Query for both Claimed and Handover trends
+      // Claimed trend based on c.claimed_at
+      // Handover trend based on l.handover_at
       const trendQuery = `
         SELECT 
-          DATE(l.handover_at) as date,
-          COUNT(DISTINCT o.unique_id) as count
-        FROM orders o
-        JOIN claims c ON o.unique_id = c.order_unique_id
-        JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
-        WHERE ${whereConditions}
-        GROUP BY DATE(l.handover_at)
-        ORDER BY date ASC
+          date_series.dt as date,
+          COALESCE(claimed.count, 0) as claimed_count,
+          COALESCE(handover.count, 0) as handover_count
+        FROM (
+          SELECT DISTINCT DATE(o.order_date) as dt
+          FROM orders o
+          JOIN claims c ON o.unique_id = c.order_unique_id
+          WHERE ${whereConditions}
+          UNION
+          SELECT DISTINCT DATE(l.handover_at) as dt
+          FROM orders o
+          JOIN claims c ON o.unique_id = c.order_unique_id
+          JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
+          WHERE ${whereConditions} AND l.is_handover = 1 AND l.handover_at IS NOT NULL
+        ) date_series
+        LEFT JOIN (
+          SELECT DATE(c.claimed_at) as dt, COUNT(DISTINCT o.unique_id) as count
+          FROM orders o
+          JOIN claims c ON o.unique_id = c.order_unique_id
+          WHERE ${whereConditions} AND c.claimed_at IS NOT NULL
+          GROUP BY dt
+        ) claimed ON date_series.dt = claimed.dt
+        LEFT JOIN (
+          SELECT DATE(l.handover_at) as dt, COUNT(DISTINCT o.unique_id) as count
+          FROM orders o
+          JOIN claims c ON o.unique_id = c.order_unique_id
+          JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
+          WHERE ${whereConditions} AND l.is_handover = 1 AND l.handover_at IS NOT NULL
+          GROUP BY dt
+        ) handover ON date_series.dt = handover.dt
+        WHERE date_series.dt IS NOT NULL
+        ORDER BY date_series.dt ASC
       `;
 
       const [rows] = await db.execute(trendQuery, params);

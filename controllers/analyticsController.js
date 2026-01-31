@@ -54,7 +54,11 @@ class AnalyticsController {
                         avg_handover_hours: parseFloat(stats.avgHandoverHours)
                     },
                     distribution: distribution,
-                    trend: trend.map(t => ({ date: t.date, count: t.count }))
+                    trend: trend.map(t => ({
+                        date: t.date,
+                        count: t.handover_count,
+                        claimed_count: t.claimed_count
+                    }))
                 }
             });
         } catch (error) {
@@ -83,9 +87,6 @@ class AnalyticsController {
             };
 
             // Fetch all analytics data in parallel
-            // If vendorId is null/undefined, getVendorFulfillmentStats etc. need to handle it
-            // For now, let's assume we want to support filtering by vendor even in admin view
-
             const [stats, distribution, trend] = await Promise.all([
                 database.getVendorFulfillmentStats(options),
                 database.getVendorStatusDistribution(options),
@@ -102,7 +103,11 @@ class AnalyticsController {
                         avg_handover_hours: parseFloat(stats.avgHandoverHours)
                     },
                     distribution: distribution,
-                    trend: trend.map(t => ({ date: t.date, count: t.count }))
+                    trend: trend.map(t => ({
+                        date: t.date,
+                        count: t.handover_count,
+                        claimed_count: t.claimed_count
+                    }))
                 }
             });
         } catch (error) {

@@ -6,7 +6,9 @@ const fetch = require('node-fetch');
 const { authenticateBasicAuth, requireAdminOrSuperadmin } = require('../middleware/auth');
 const carrierServiceabilityService = require('../services/carrierServiceabilityService');
 
-/**
+// Apply authentication to all order routes
+router.use(authenticateBasicAuth);
+
 /**
  * Helper function to create notification when label generation fails
  * @param {string} errorMessage - The error message from Shipway API
@@ -195,9 +197,9 @@ async function createLabelGenerationNotification(errorMessage, orderId, vendor, 
 /**
  * @route   GET /api/orders
  * @desc    Get all orders from MySQL database
- * @access  Public (add auth as needed)
+ * @access  Admin, Superadmin
  */
-router.get('/', async (req, res) => {
+router.get('/', requireAdminOrSuperadmin, async (req, res) => {
   try {
     const database = require('../config/database');
 
@@ -270,7 +272,7 @@ router.get('/', async (req, res) => {
 /**
  * @route   GET /api/orders/last-updated
  * @desc    Get the last modification time from MySQL (returns current time for now)
- * @access  Public
+ * @access  Authenticated
  */
 router.get('/last-updated', async (req, res) => {
   try {
@@ -306,7 +308,7 @@ router.get('/last-updated', async (req, res) => {
  * @desc    Get all distinct order statuses present in the system
  * @access  Admin, Superadmin
  */
-router.get('/distinct-statuses', authenticateBasicAuth, requireAdminOrSuperadmin, async (req, res) => {
+router.get('/distinct-statuses', requireAdminOrSuperadmin, async (req, res) => {
   try {
     const database = require('../config/database');
 
@@ -336,27 +338,20 @@ router.get('/distinct-statuses', authenticateBasicAuth, requireAdminOrSuperadmin
 /**
  * @route   POST /api/orders/verify-status
  * @desc    Verify order statuses in database (for bulk operations verification)
- * @access  Vendor (token required)
+ * @access  Vendor
  */
 router.post('/verify-status', async (req, res) => {
   const { unique_ids } = req.body;
-  const token = req.headers['authorization'];
+  const vendor = req.user;
 
   console.log('🔵 VERIFY STATUS REQUEST START');
   console.log('  - unique_ids:', unique_ids);
-  console.log('  - token received:', token ? 'YES' : 'NO');
+  console.log('  - user:', vendor.name);
 
   if (!unique_ids || !Array.isArray(unique_ids) || unique_ids.length === 0) {
     return res.status(400).json({
       success: false,
       message: 'unique_ids array is required'
-    });
-  }
-
-  if (!token) {
-    return res.status(400).json({
-      success: false,
-      message: 'Authorization token required'
     });
   }
 
@@ -369,10 +364,9 @@ router.post('/verify-status', async (req, res) => {
       return res.status(500).json({ success: false, message: 'Database connection not available' });
     }
 
-    // Verify vendor token
-    const vendor = await database.getUserByToken(token);
-    if (!vendor || vendor.active_session !== 'TRUE') {
-      return res.status(401).json({ success: false, message: 'Invalid or inactive vendor token' });
+    // Additional check for vendor session if needed
+    if (vendor.role === 'vendor' && vendor.active_session !== 'TRUE') {
+      return res.status(401).json({ success: false, message: 'Inactive vendor session' });
     }
 
     // Fetch orders from database to verify their status
@@ -427,44 +421,31 @@ router.post('/verify-status', async (req, res) => {
 /**
  * @route   POST /api/orders/claim
  * @desc    Vendor claims an order row by unique_id
- * @access  Vendor (token required)
+ * @access  Vendor
  */
 router.post('/claim', async (req, res) => {
   const { unique_id } = req.body;
-  let token = req.headers['authorization'];
-
-  // Handle case where token might be an object
-  if (typeof token === 'object' && token !== null) {
-    console.log('⚠️  Token received as object, attempting to extract string value');
-    console.log('  - Object keys:', Object.keys(token));
-    console.log('  - Object values:', Object.values(token));
-
-    // Try to extract the actual token string
-    if (token.token) {
-      token = token.token;
-    } else if (token.authorization) {
-      token = token.authorization;
-    } else if (Object.values(token).length === 1) {
-      token = Object.values(token)[0];
-    } else {
-      console.log('❌ Cannot extract token from object');
-      token = null;
-    }
-  }
+  const vendor = req.user;
 
   console.log('🔵 CLAIM REQUEST START');
   console.log('  - unique_id:', unique_id);
-  console.log('  - token received:', token ? 'YES' : 'NO');
-  console.log('  - token value:', token ? token.substring(0, 8) + '...' : 'null');
+  console.log('  - user:', vendor.name);
 
-  if (!unique_id || !token) {
-    console.log('❌ CLAIM FAILED: Missing required fields');
-    return res.status(400).json({ success: false, message: 'unique_id and Authorization token required' });
+  if (!unique_id) {
+    console.log('❌ CLAIM FAILED: Missing unique_id');
+    return res.status(400).json({ success: false, message: 'unique_id required' });
   }
 
-  // Load users from MySQL
+  if (vendor.role !== 'vendor') {
+    return res.status(403).json({ success: false, message: 'Only vendors can claim orders' });
+  }
+
+  if (vendor.active_session !== 'TRUE') {
+    return res.status(401).json({ success: false, message: 'Inactive vendor session' });
+  }
+
+  const warehouseId = vendor.warehouseId;
   const database = require('../config/database');
-  console.log('📂 Loading users from MySQL...');
 
   try {
     // Wait for MySQL initialization
@@ -474,44 +455,6 @@ router.post('/claim', async (req, res) => {
       console.log('❌ MySQL connection not available');
       return res.status(500).json({ success: false, message: 'Database connection not available' });
     }
-
-    console.log('👥 Users loaded from MySQL');
-    console.log('🔍 Looking for token match...');
-    console.log('  - Full token received:', token ? `"${token}"` : 'null');
-    console.log('  - Token length:', token ? token.length : 0);
-    console.log('  - Token type:', typeof token);
-    console.log('  - Token JSON:', JSON.stringify(token));
-    console.log('  - Token toString():', token ? token.toString() : 'null');
-
-    const vendor = await database.getUserByToken(token);
-
-    if (!vendor || vendor.active_session !== 'TRUE') {
-      console.log('\n❌ VENDOR NOT FOUND OR INACTIVE:');
-      console.log('  - Vendor object:', vendor);
-      console.log('  - Full token provided:', token ? `"${token}"` : 'null');
-      console.log('  - Token length:', token ? token.length : 0);
-      console.log('  - Token type:', typeof token);
-      console.log('  - Vendor found:', vendor ? 'YES' : 'NO');
-      if (vendor) {
-        console.log('  - Vendor active_session:', vendor.active_session);
-        console.log('  - Vendor name:', vendor.name);
-        console.log('  - Vendor warehouseId:', vendor.warehouseId);
-      }
-
-      const errorResponse = { success: false, message: 'Invalid or inactive vendor token' };
-      console.log('\n📤 401 ERROR RESPONSE:');
-      console.log('  - Status: 401');
-      console.log('  - Response JSON:', JSON.stringify(errorResponse, null, 2));
-
-      return res.status(401).json(errorResponse);
-    }
-
-    console.log('✅ VENDOR FOUND');
-    console.log('  - warehouseId:', vendor.warehouseId);
-    console.log('  - name:', vendor.name);
-    console.log('  - active_session:', vendor.active_session);
-
-    const warehouseId = vendor.warehouseId;
 
     // Get order from MySQL
     console.log('📂 Loading order from MySQL...');
@@ -630,18 +573,19 @@ router.post('/bulk-claim', async (req, res) => {
       console.log('❌ MySQL connection not available');
       return res.status(500).json({ success: false, message: 'Database connection not available' });
     }
+    const vendor = req.user;
 
-    const vendor = await database.getUserByToken(token);
-
-    if (!vendor || vendor.active_session !== 'TRUE') {
-      console.log('❌ VENDOR NOT FOUND OR INACTIVE ', vendor);
-      return res.status(401).json({ success: false, message: 'Invalid or inactive vendor token' });
+    if (vendor.role !== 'vendor') {
+      return res.status(403).json({ success: false, message: 'Only vendors can claim orders' });
     }
 
-    console.log('✅ VENDOR FOUND');
-    console.log('  - warehouseId:', vendor.warehouseId);
+    if (vendor.active_session !== 'TRUE') {
+      return res.status(401).json({ success: false, message: 'Inactive vendor session' });
+    }
 
     const warehouseId = vendor.warehouseId;
+    console.log('✅ VENDOR FOUND');
+    console.log('  - warehouseId:', warehouseId);
 
     console.log('🔍 Processing bulk claim for', unique_ids.length, 'orders');
 
@@ -798,50 +742,8 @@ router.get('/my-orders', async (req, res) => {
   const limit = parseInt(req.query.limit) || 50;
   console.log('📄 Pagination params:', { page, limit });
 
-  let token = req.headers['authorization'];
-  console.log('\n🔑 TOKEN ANALYSIS:');
-  console.log('  - Raw token:', token);
-  console.log('  - Token type:', typeof token);
-  console.log('  - Token length:', token ? token.length : 0);
-  console.log('  - Token JSON:', JSON.stringify(token));
-
-  // Handle case where token might be an object
-  if (typeof token === 'object' && token !== null) {
-    console.log('\n⚠️  TOKEN RECEIVED AS OBJECT:');
-    console.log('  - Object keys:', Object.keys(token));
-    console.log('  - Object values:', Object.values(token));
-    console.log('  - Object stringify:', JSON.stringify(token));
-
-    // Try to extract the actual token string
-    if (token.token) {
-      token = token.token;
-      console.log('  - Extracted from token.token:', token);
-    } else if (token.authorization) {
-      token = token.authorization;
-      console.log('  - Extracted from token.authorization:', token);
-    } else if (Object.values(token).length === 1) {
-      token = Object.values(token)[0];
-      console.log('  - Extracted from single value:', token);
-    } else {
-      console.log('❌ Cannot extract token from object');
-      token = null;
-    }
-  }
-
-  console.log('🔵 MY ORDERS REQUEST START');
-  console.log('  - token received:', token ? 'YES' : 'NO');
-  console.log('  - Full token:', token ? `"${token}"` : 'null');
-  console.log('  - Token length:', token ? token.length : 0);
-
-  if (!token) {
-    console.log('❌ MY ORDERS FAILED: Missing token');
-    return res.status(400).json({ success: false, message: 'Authorization token required' });
-  }
-
-  // Load users from MySQL
+  const vendor = req.user;
   const database = require('../config/database');
-  console.log('📂 Loading users from MySQL...');
-
   try {
     // Wait for MySQL initialization
     await database.waitForMySQLInitialization();
@@ -851,15 +753,9 @@ router.get('/my-orders', async (req, res) => {
       return res.status(500).json({ success: false, message: 'Database connection not available' });
     }
 
-    const vendor = await database.getUserByToken(token);
-
-    if (!vendor || vendor.active_session !== 'TRUE') {
-      console.log('❌ VENDOR NOT FOUND OR INACTIVE ', vendor);
-      return res.status(401).json({ success: false, message: 'Invalid or inactive vendor token' });
+    if (vendor.active_session !== 'TRUE') {
+      return res.status(401).json({ success: false, message: 'Inactive vendor session' });
     }
-
-    console.log('✅ VENDOR FOUND');
-    console.log('  - warehouseId:', vendor.warehouseId);
 
     const warehouseId = vendor.warehouseId;
 
@@ -1000,50 +896,8 @@ router.get('/handover', async (req, res) => {
   const limit = parseInt(req.query.limit) || 50;
   console.log('📄 Pagination params:', { page, limit });
 
-  let token = req.headers['authorization'];
-  console.log('\n🔑 TOKEN ANALYSIS:');
-  console.log('  - Raw token:', token);
-  console.log('  - Token type:', typeof token);
-  console.log('  - Token length:', token ? token.length : 0);
-  console.log('  - Token JSON:', JSON.stringify(token));
-
-  // Handle case where token might be an object
-  if (typeof token === 'object' && token !== null) {
-    console.log('\n⚠️  TOKEN RECEIVED AS OBJECT:');
-    console.log('  - Object keys:', Object.keys(token));
-    console.log('  - Object values:', Object.values(token));
-    console.log('  - Object stringify:', JSON.stringify(token));
-
-    // Try to extract the actual token string
-    if (token.token) {
-      token = token.token;
-      console.log('  - Extracted from token.token:', token);
-    } else if (token.authorization) {
-      token = token.authorization;
-      console.log('  - Extracted from token.authorization:', token);
-    } else if (Object.values(token).length === 1) {
-      token = Object.values(token)[0];
-      console.log('  - Extracted from single value:', token);
-    } else {
-      console.log('❌ Cannot extract token from object');
-      token = null;
-    }
-  }
-
-  console.log('🔵 HANDOVER ORDERS REQUEST START');
-  console.log('  - token received:', token ? 'YES' : 'NO');
-  console.log('  - Full token:', token ? `"${token}"` : 'null');
-  console.log('  - Token length:', token ? token.length : 0);
-
-  if (!token) {
-    console.log('❌ HANDOVER ORDERS FAILED: Missing token');
-    return res.status(400).json({ success: false, message: 'Authorization token required' });
-  }
-
-  // Load users from MySQL
+  const vendor = req.user;
   const database = require('../config/database');
-  console.log('📂 Loading users from MySQL...');
-
   try {
     // Wait for MySQL initialization
     await database.waitForMySQLInitialization();
@@ -1053,15 +907,9 @@ router.get('/handover', async (req, res) => {
       return res.status(500).json({ success: false, message: 'Database connection not available' });
     }
 
-    const vendor = await database.getUserByToken(token);
-
-    if (!vendor || vendor.active_session !== 'TRUE') {
-      console.log('❌ VENDOR NOT FOUND OR INACTIVE ', vendor);
-      return res.status(401).json({ success: false, message: 'Invalid or inactive vendor token' });
+    if (vendor.active_session !== 'TRUE') {
+      return res.status(401).json({ success: false, message: 'Inactive vendor session' });
     }
-
-    console.log('✅ VENDOR FOUND');
-    console.log('  - warehouseId:', vendor.warehouseId);
 
     const warehouseId = vendor.warehouseId;
 
@@ -1198,50 +1046,8 @@ router.get('/order-tracking', async (req, res) => {
   console.log('📥 Request URL:', req.url);
   console.log('📥 Request IP:', req.ip);
 
-  let token = req.headers['authorization'];
-  console.log('\n🔑 TOKEN ANALYSIS:');
-  console.log('  - Raw token:', token);
-  console.log('  - Token type:', typeof token);
-  console.log('  - Token length:', token ? token.length : 0);
-  console.log('  - Token JSON:', JSON.stringify(token));
-
-  // Handle case where token might be an object
-  if (typeof token === 'object' && token !== null) {
-    console.log('\n⚠️  TOKEN RECEIVED AS OBJECT:');
-    console.log('  - Object keys:', Object.keys(token));
-    console.log('  - Object values:', Object.values(token));
-    console.log('  - Object stringify:', JSON.stringify(token));
-
-    // Try to extract the actual token string
-    if (token.token) {
-      token = token.token;
-      console.log('  - Extracted from token.token:', token);
-    } else if (token.authorization) {
-      token = token.authorization;
-      console.log('  - Extracted from token.authorization:', token);
-    } else if (Object.values(token).length === 1) {
-      token = Object.values(token)[0];
-      console.log('  - Extracted from single value:', token);
-    } else {
-      console.log('❌ Cannot extract token from object');
-      token = null;
-    }
-  }
-
-  console.log('🔵 ORDER TRACKING ORDERS REQUEST START');
-  console.log('  - token received:', token ? 'YES' : 'NO');
-  console.log('  - Full token:', token ? `"${token}"` : 'null');
-  console.log('  - Token length:', token ? token.length : 0);
-
-  if (!token) {
-    console.log('❌ ORDER TRACKING ORDERS FAILED: Missing token');
-    return res.status(400).json({ success: false, message: 'Authorization token required' });
-  }
-
-  // Load users from MySQL
+  const vendor = req.user;
   const database = require('../config/database');
-  console.log('📂 Loading users from MySQL...');
-
   try {
     // Wait for MySQL initialization
     await database.waitForMySQLInitialization();
@@ -1251,15 +1057,9 @@ router.get('/order-tracking', async (req, res) => {
       return res.status(500).json({ success: false, message: 'Database connection not available' });
     }
 
-    const vendor = await database.getUserByToken(token);
-
-    if (!vendor || vendor.active_session !== 'TRUE') {
-      console.log('❌ VENDOR NOT FOUND OR INACTIVE ', vendor);
-      return res.status(401).json({ success: false, message: 'Invalid or inactive vendor token' });
+    if (vendor.active_session !== 'TRUE') {
+      return res.status(401).json({ success: false, message: 'Inactive vendor session' });
     }
-
-    console.log('✅ VENDOR FOUND');
-    console.log('  - warehouseId:', vendor.warehouseId);
 
     const warehouseId = vendor.warehouseId;
 
@@ -1404,28 +1204,7 @@ router.get('/dashboard-stats', async (req, res) => {
   console.log('\n📊 DASHBOARD STATS REQUEST START');
   console.log('================================');
 
-  let token = req.headers['authorization'];
-
-  // Handle case where token might be an object
-  if (typeof token === 'object' && token !== null) {
-    if (token.token) {
-      token = token.token;
-    } else if (token.authorization) {
-      token = token.authorization;
-    } else if (Object.values(token).length === 1) {
-      token = Object.values(token)[0];
-    } else {
-      token = null;
-    }
-  }
-
-  if (!token) {
-    console.log('❌ DASHBOARD STATS FAILED: Missing token');
-    return res.status(400).json({ success: false, message: 'Authorization token required' });
-  }
-
   const database = require('../config/database');
-
   try {
     // Wait for MySQL initialization
     await database.waitForMySQLInitialization();
@@ -1435,15 +1214,9 @@ router.get('/dashboard-stats', async (req, res) => {
       return res.status(500).json({ success: false, message: 'Database connection not available' });
     }
 
-    const vendor = await database.getUserByToken(token);
-
-    if (!vendor || vendor.active_session !== 'TRUE') {
-      console.log('❌ VENDOR NOT FOUND OR INACTIVE');
-      return res.status(401).json({ success: false, message: 'Invalid or inactive vendor token' });
+    if (vendor.active_session !== 'TRUE') {
+      return res.status(401).json({ success: false, message: 'Inactive vendor session' });
     }
-
-    console.log('✅ VENDOR FOUND');
-    console.log('  - warehouseId:', vendor.warehouseId);
 
     const warehouseId = vendor.warehouseId;
 
@@ -1601,53 +1374,7 @@ router.get('/grouped', async (req, res) => {
   const limit = parseInt(req.query.limit) || 50;
   console.log('📄 Pagination params:', { page, limit });
 
-  let token = req.headers['authorization'];
-  console.log('\n🔑 TOKEN ANALYSIS:');
-  console.log('  - Raw token:', token);
-  console.log('  - Token type:', typeof token);
-  console.log('  - Token length:', token ? token.length : 0);
-  console.log('  - Token JSON:', JSON.stringify(token));
-
-  // Handle case where token might be an object
-  if (typeof token === 'object' && token !== null) {
-    console.log('\n⚠️  TOKEN RECEIVED AS OBJECT:');
-    console.log('  - Object keys:', Object.keys(token));
-    console.log('  - Object values:', Object.values(token));
-    console.log('  - Object stringify:', JSON.stringify(token));
-
-    // Try to extract the actual token string
-    if (token.token) {
-      token = token.token;
-      console.log('  - Extracted from token.token:', token);
-    } else if (token.authorization) {
-      token = token.authorization;
-      console.log('  - Extracted from token.authorization:', token);
-    } else if (Object.values(token).length === 1) {
-      token = Object.values(token)[0];
-      console.log('  - Extracted from single value:', token);
-    } else {
-      console.log('❌ Cannot extract token from object');
-      token = null;
-    }
-  }
-
-  console.log('🔵 GROUPED ORDERS REQUEST START');
-  console.log('  - token received:', token ? 'YES' : 'NO');
-  console.log('  - Full token:', token ? `"${token}"` : 'null');
-  console.log('  - Token length:', token ? token.length : 0);
-
-
-  console.log('  - Full token:', token ? `"${token}"` : 'null');
-
-  if (!token) {
-    console.log('❌ GROUPED ORDERS FAILED: Missing token');
-    return res.status(400).json({ success: false, message: 'Authorization token required' });
-  }
-
-  // Load users from MySQL
   const database = require('../config/database');
-  console.log('📂 Loading users from MySQL...');
-
   try {
     // Wait for MySQL initialization
     await database.waitForMySQLInitialization();
@@ -1657,15 +1384,9 @@ router.get('/grouped', async (req, res) => {
       return res.status(500).json({ success: false, message: 'Database connection not available' });
     }
 
-    const vendor = await database.getUserByToken(token);
-
-    if (!vendor || vendor.active_session !== 'TRUE') {
-      console.log('❌ VENDOR NOT FOUND OR INACTIVE ', vendor);
-      return res.status(401).json({ success: false, message: 'Invalid or inactive vendor token' });
+    if (vendor.active_session !== 'TRUE') {
+      return res.status(401).json({ success: false, message: 'Inactive vendor session' });
     }
-
-    console.log('✅ VENDOR FOUND');
-    console.log('  - warehouseId:', vendor.warehouseId);
 
     const warehouseId = vendor.warehouseId;
 
@@ -1809,7 +1530,7 @@ router.get('/grouped', async (req, res) => {
  * @desc    Get dashboard statistics for admin panel (with optional filters)
  * @access  Admin/Superadmin only
  */
-router.get('/admin/dashboard-stats', authenticateBasicAuth, requireAdminOrSuperadmin, async (req, res) => {
+router.get('/admin/dashboard-stats', requireAdminOrSuperadmin, async (req, res) => {
   console.log('🔵 ADMIN DASHBOARD STATS REQUEST START');
 
   try {
@@ -1906,7 +1627,7 @@ router.get('/admin/dashboard-stats', authenticateBasicAuth, requireAdminOrSupera
  * @desc    Get paginated orders with vendor information for admin panel
  * @access  Admin/Superadmin only
  */
-router.get('/admin/all', authenticateBasicAuth, requireAdminOrSuperadmin, async (req, res) => {
+router.get('/admin/all', requireAdminOrSuperadmin, async (req, res) => {
   console.log('🔵 ADMIN ORDERS REQUEST START');
 
   try {
@@ -7049,7 +6770,7 @@ router.post('/download-manifest-summary', async (req, res) => {
  * @desc    Manually trigger RTO inventory processing (process delivered RTO orders)
  * @access  Admin/Superadmin only
  */
-router.post('/rto-inventory/process', authenticateBasicAuth, requireAdminOrSuperadmin, async (req, res) => {
+router.post('/rto-inventory/process', requireAdminOrSuperadmin, async (req, res) => {
   console.log('🔵 RTO INVENTORY PROCESS REQUEST START');
 
   try {
@@ -7080,7 +6801,7 @@ router.post('/rto-inventory/process', authenticateBasicAuth, requireAdminOrSuper
  * @desc    Get RTO inventory summary
  * @access  Admin/Superadmin only
  */
-router.get('/rto-inventory', authenticateBasicAuth, requireAdminOrSuperadmin, async (req, res) => {
+router.get('/rto-inventory', requireAdminOrSuperadmin, async (req, res) => {
   console.log('🔵 GET RTO INVENTORY REQUEST');
 
   try {
@@ -7112,7 +6833,7 @@ router.get('/rto-inventory', authenticateBasicAuth, requireAdminOrSuperadmin, as
  * @desc    Get unprocessed RTO delivered orders (for monitoring/debugging)
  * @access  Admin/Superadmin only
  */
-router.get('/rto-inventory/unprocessed', authenticateBasicAuth, requireAdminOrSuperadmin, async (req, res) => {
+router.get('/rto-inventory/unprocessed', requireAdminOrSuperadmin, async (req, res) => {
   console.log('🔵 GET UNPROCESSED RTO ORDERS REQUEST');
 
   try {
@@ -7144,7 +6865,7 @@ router.get('/rto-inventory/unprocessed', authenticateBasicAuth, requireAdminOrSu
  * @desc    Get RTO inventory service status
  * @access  Admin/Superadmin only
  */
-router.get('/rto-inventory/status', authenticateBasicAuth, requireAdminOrSuperadmin, async (req, res) => {
+router.get('/rto-inventory/status', requireAdminOrSuperadmin, async (req, res) => {
   try {
     const rtoInventoryService = require('../services/rtoInventoryService');
     const status = rtoInventoryService.getStatus();
