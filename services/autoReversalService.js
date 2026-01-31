@@ -32,7 +32,7 @@ class AutoReversalService {
     try {
       // Wait for database initialization
       await database.waitForMySQLInitialization();
-      
+
       if (!database.isMySQLAvailable()) {
         throw new Error('Database connection not available');
       }
@@ -47,14 +47,14 @@ class AutoReversalService {
       `;
 
       const [expiredOrders] = await database.mysqlConnection.execute(expiredOrdersQuery);
-      
+
       console.log(`🔍 Found ${expiredOrders.length} orders eligible for auto-reversal`);
 
       if (expiredOrders.length === 0) {
         this.isRunning = false;
         this.lastRun = new Date();
         this.totalRuns++;
-        
+
         return {
           success: true,
           message: 'No orders found for auto-reversal',
@@ -127,10 +127,69 @@ class AutoReversalService {
       this.isRunning = false;
       this.lastRun = new Date();
       this.totalRuns++;
-      
+
       return {
         success: false,
         message: 'Failed to auto-reverse expired orders',
+        error: error.message,
+        execution_time_ms: Date.now() - startTime.getTime()
+      };
+    }
+  }
+
+  /**
+   * Update criticality flag for claims
+   * Condition: status = 'unclaimed' and current_datetime - orders.order_date > 15 days
+   * @returns {Promise<Object>} Result of the criticality update
+   */
+  async updateClaimsCriticality() {
+    if (this.isRunning) {
+      console.log('🔄 Auto-reversal service already running, skipping criticality update...');
+      return { success: false, message: 'Service already in progress' };
+    }
+
+    const startTime = new Date();
+    console.log(`[${startTime.toISOString()}] 🔄 Updating claims criticality flag (15-day rule)...`);
+
+    try {
+      await database.waitForMySQLInitialization();
+
+      if (!database.isMySQLAvailable()) {
+        throw new Error('Database connection not available');
+      }
+
+      // Logic:
+      // 1. Set is_critical = 1 for unclaimed orders older than 15 days
+      // 2. Set is_critical = 0 for everyone else (claimed orders or orders < 15 days old)
+
+      const updateCriticalityQuery = `
+        UPDATE claims c
+        JOIN orders o ON c.order_unique_id = o.unique_id
+        SET c.is_critical = CASE 
+          WHEN c.status = 'unclaimed' AND o.order_date < DATE_SUB(NOW(), INTERVAL 15 DAY) THEN 1
+          ELSE 0
+        END
+      `;
+
+      const [result] = await database.mysqlConnection.execute(updateCriticalityQuery);
+
+      console.log(`✅ CRITICALITY UPDATE COMPLETE`);
+      console.log(`  - Affected rows: ${result.affectedRows}`);
+
+      return {
+        success: true,
+        message: `Successfully updated criticality for ${result.affectedRows} records`,
+        data: {
+          affected_rows: result.affectedRows,
+          execution_time_ms: Date.now() - startTime.getTime()
+        }
+      };
+
+    } catch (error) {
+      console.error('❌ CRITICALITY UPDATE ERROR:', error);
+      return {
+        success: false,
+        message: 'Failed to update claims criticality',
         error: error.message,
         execution_time_ms: Date.now() - startTime.getTime()
       };

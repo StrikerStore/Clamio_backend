@@ -1314,11 +1314,13 @@ class Database {
           label_downloaded BOOLEAN DEFAULT FALSE,
           priority_carrier TEXT,
           account_code VARCHAR(50) NOT NULL,
+          is_critical TINYINT(1) DEFAULT 0,
           INDEX idx_order_unique_id (order_unique_id),
           INDEX idx_order_id (order_id),
           INDEX idx_claimed_by (claimed_by),
           INDEX idx_status (status),
-          INDEX idx_account_code (account_code)
+          INDEX idx_account_code (account_code),
+          INDEX idx_is_critical (is_critical)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `;
 
@@ -1330,6 +1332,9 @@ class Database {
 
       // Add account_code column if it doesn't exist (for existing tables)
       await this.addAccountCodeToClaimsIfNotExists();
+
+      // Add is_critical column if it doesn't exist (migration for existing tables)
+      await this.addIsCriticalToClaims();
 
       // Migrate existing claims data from orders table if claims table is empty
       await this.migrateClaimsData();
@@ -1423,6 +1428,40 @@ class Database {
       }
     } catch (error) {
       console.error('❌ Error adding priority_carrier column to claims:', error.message);
+    }
+  }
+
+  /**
+   * Add is_critical column to existing claims table if it doesn't exist (migration)
+   */
+  async addIsCriticalToClaims() {
+    if (!this.mysqlConnection) return;
+
+    try {
+      // Check if is_critical column exists
+      const [columns] = await this.mysqlConnection.execute(
+        `SHOW COLUMNS FROM claims LIKE 'is_critical'`
+      );
+
+      if (columns.length === 0) {
+        console.log('🔄 Adding is_critical column to existing claims table...');
+
+        // Add is_critical column
+        await this.mysqlConnection.execute(
+          `ALTER TABLE claims ADD COLUMN is_critical TINYINT(1) DEFAULT 0`
+        );
+
+        // Add index for is_critical
+        await this.mysqlConnection.execute(
+          `ALTER TABLE claims ADD INDEX idx_is_critical (is_critical)`
+        );
+
+        console.log('✅ is_critical column added to claims table');
+      } else {
+        console.log('✅ is_critical column already exists in claims table');
+      }
+    } catch (error) {
+      console.error('❌ Error adding is_critical column to claims:', error.message);
     }
   }
 
@@ -7611,6 +7650,287 @@ class Database {
       return rows.map(row => row.size);
     } catch (error) {
       console.error('❌ [RTO Manual] Error getting sizes for product:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get vendor fulfillment statistics
+   * @param {Object} options - Filter options
+   * @param {string} options.vendorId - Vendor warehouse ID
+   * @param {string} options.dateFrom - Start date
+   * @param {string} options.dateTo - End date
+   * @param {string} options.store - Account code
+   * @returns {Promise<Object>} Statistics object
+   */
+  async getVendorFulfillmentStats(options = {}) {
+    const { vendorId, dateFrom, dateTo, store } = options;
+    const db = this.mysqlPool || this.mysqlConnection;
+
+    try {
+      let whereConditions = '1=1';
+      const params = [];
+
+      if (vendorId) {
+        whereConditions += ' AND c.claimed_by = ?';
+        params.push(vendorId);
+      } else {
+        whereConditions += " AND c.claimed_by IS NOT NULL AND c.claimed_by != ''";
+      }
+
+      if (dateFrom) {
+        whereConditions += ' AND o.order_date >= ?';
+        params.push(dateFrom);
+      }
+      if (dateTo) {
+        whereConditions += ' AND o.order_date <= ?';
+        params.push(dateTo + ' 23:59:59');
+      }
+      if (store) {
+        whereConditions += ' AND o.account_code = ?';
+        params.push(store);
+      }
+
+      const statsQuery = `
+        SELECT 
+          COUNT(DISTINCT o.unique_id) as total_claimed,
+          COALESCE(SUM(CASE WHEN l.is_handover = 1 THEN 1 ELSE 0 END), 0) as total_handed_over,
+          AVG(CASE WHEN l.is_handover = 1 AND l.handover_at IS NOT NULL AND c.claimed_at IS NOT NULL 
+              THEN TIMESTAMPDIFF(HOUR, c.claimed_at, l.handover_at) 
+              ELSE NULL END) as avg_handover_hours
+        FROM orders o
+        JOIN claims c ON o.unique_id = c.order_unique_id
+        LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
+        WHERE ${whereConditions}
+      `;
+
+      const [rows] = await db.execute(statsQuery, params);
+      const stats = rows[0];
+
+      return {
+        totalClaimed: parseInt(stats.total_claimed || 0),
+        totalHandedOver: parseInt(stats.total_handed_over || 0),
+        pendingHandover: parseInt(stats.total_claimed || 0) - parseInt(stats.total_handed_over || 0),
+        avgHandoverHours: parseFloat(stats.avg_handover_hours || 0).toFixed(1),
+        fulfillmentRate: stats.total_claimed > 0
+          ? ((stats.total_handed_over / stats.total_claimed) * 100).toFixed(1)
+          : 0
+      };
+    } catch (error) {
+      console.error('Error in getVendorFulfillmentStats:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get vendor shipment status distribution
+   * @param {Object} options - Filter options
+   */
+  async getVendorStatusDistribution(options = {}) {
+    const { vendorId, dateFrom, dateTo, store } = options;
+    const db = this.mysqlPool || this.mysqlConnection;
+
+    try {
+      let whereConditions = '1=1';
+      const params = [];
+
+      if (vendorId) {
+        whereConditions += ' AND c.claimed_by = ?';
+        params.push(vendorId);
+      } else {
+        whereConditions += " AND c.claimed_by IS NOT NULL AND c.claimed_by != ''";
+      }
+
+      if (dateFrom) {
+        whereConditions += ' AND o.order_date >= ?';
+        params.push(dateFrom);
+      }
+      if (dateTo) {
+        whereConditions += ' AND o.order_date <= ?';
+        params.push(dateTo + ' 23:59:59');
+      }
+      if (store) {
+        whereConditions += ' AND o.account_code = ?';
+        params.push(store);
+      }
+
+      const distQuery = `
+        SELECT 
+          CASE 
+            WHEN l.current_shipment_status IS NOT NULL AND l.current_shipment_status != '' 
+            THEN l.current_shipment_status 
+            ELSE c.status 
+          END as status,
+          COUNT(DISTINCT o.unique_id) as count
+        FROM orders o
+        JOIN claims c ON o.unique_id = c.order_unique_id
+        LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
+        WHERE ${whereConditions}
+        GROUP BY 
+          CASE 
+            WHEN l.current_shipment_status IS NOT NULL AND l.current_shipment_status != '' 
+            THEN l.current_shipment_status 
+            ELSE c.status 
+          END
+      `;
+
+      const [rows] = await db.execute(distQuery, params);
+      return rows;
+    } catch (error) {
+      console.error('Error in getVendorStatusDistribution:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get vendor daily handover trend
+   * @param {Object} options - Filter options
+   */
+  async getVendorHandoverTrend(options = {}) {
+    const { vendorId, dateFrom, dateTo, store } = options;
+    const db = this.mysqlPool || this.mysqlConnection;
+
+    try {
+      let whereConditions = 'l.is_handover = 1 AND l.handover_at IS NOT NULL';
+      const params = [];
+
+      if (vendorId) {
+        whereConditions += ' AND c.claimed_by = ?';
+        params.push(vendorId);
+      } else {
+        whereConditions += " AND c.claimed_by IS NOT NULL AND c.claimed_by != ''";
+      }
+
+      if (dateFrom) {
+        whereConditions += ' AND l.handover_at >= ?';
+        params.push(dateFrom);
+      }
+      if (dateTo) {
+        whereConditions += ' AND l.handover_at <= ?';
+        params.push(dateTo + ' 23:59:59');
+      }
+      if (store) {
+        whereConditions += ' AND o.account_code = ?';
+        params.push(store);
+      }
+
+      const trendQuery = `
+        SELECT 
+          DATE(l.handover_at) as date,
+          COUNT(DISTINCT o.unique_id) as count
+        FROM orders o
+        JOIN claims c ON o.unique_id = c.order_unique_id
+        JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
+        WHERE ${whereConditions}
+        GROUP BY DATE(l.handover_at)
+        ORDER BY date ASC
+      `;
+
+      const [rows] = await db.execute(trendQuery, params);
+      return rows;
+    } catch (error) {
+      console.error('Error in getVendorHandoverTrend:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get admin dashboard fulfillment statistics (aggregated)
+   * @param {Object} options - Filter options
+   */
+  async getAdminDashboardStats(options = {}) {
+    const { dateFrom, dateTo, store } = options;
+    const db = this.mysqlPool || this.mysqlConnection;
+
+    try {
+      let whereConditions = '1=1';
+      const params = [];
+
+      if (dateFrom) {
+        whereConditions += ' AND o.order_date >= ?';
+        params.push(dateFrom);
+      }
+      if (dateTo) {
+        whereConditions += ' AND o.order_date <= ?';
+        params.push(dateTo + ' 23:59:59');
+      }
+      if (store) {
+        whereConditions += ' AND o.account_code = ?';
+        params.push(store);
+      }
+
+      // 1. Base stats
+      const statsQuery = `
+        SELECT 
+          COUNT(DISTINCT o.unique_id) as total_claimed,
+          COALESCE(SUM(CASE WHEN l.is_handover = 1 THEN 1 ELSE 0 END), 0) as total_handed_over,
+          AVG(CASE WHEN l.is_handover = 1 AND l.handover_at IS NOT NULL AND c.claimed_at IS NOT NULL 
+              THEN TIMESTAMPDIFF(HOUR, c.claimed_at, l.handover_at) 
+              ELSE NULL END) as avg_handover_hours
+        FROM orders o
+        JOIN claims c ON o.unique_id = c.order_unique_id
+        LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
+        WHERE ${whereConditions}
+      `;
+
+      // 2. Status Distribution
+      const distQuery = `
+        SELECT 
+          CASE 
+            WHEN l.current_shipment_status IS NOT NULL AND l.current_shipment_status != '' 
+            THEN l.current_shipment_status 
+            ELSE c.status 
+            END as status,
+          COUNT(DISTINCT o.unique_id) as count
+        FROM orders o
+        JOIN claims c ON o.unique_id = c.order_unique_id
+        LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
+        WHERE ${whereConditions}
+        GROUP BY 
+          CASE 
+            WHEN l.current_shipment_status IS NOT NULL AND l.current_shipment_status != '' 
+            THEN l.current_shipment_status 
+            ELSE c.status 
+          END
+      `;
+
+      // 3. Trend
+      const trendQuery = `
+        SELECT 
+          DATE(l.handover_at) as date,
+          COUNT(DISTINCT o.unique_id) as count
+        FROM orders o
+        JOIN claims c ON o.unique_id = c.order_unique_id
+        JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
+        WHERE ${whereConditions} AND l.is_handover = 1 AND l.handover_at IS NOT NULL
+        GROUP BY DATE(l.handover_at)
+        ORDER BY date ASC
+      `;
+
+      const [statsResult, distResult, trendResult] = await Promise.all([
+        db.execute(statsQuery, params),
+        db.execute(distQuery, params),
+        db.execute(trendQuery, params)
+      ]);
+
+      const mainStats = statsResult[0][0];
+      const totalClaimed = parseInt(mainStats.total_claimed || 0);
+      const totalHandedOver = parseInt(mainStats.total_handed_over || 0);
+
+      const stats = {
+        total_claimed: totalClaimed,
+        total_handed_over: totalHandedOver,
+        fulfillment_rate: totalClaimed > 0 ? ((totalHandedOver / totalClaimed) * 100).toFixed(1) : 0,
+        avg_handover_hours: parseFloat(mainStats.avg_handover_hours || 0)
+      };
+
+      return {
+        stats,
+        distribution: distResult[0],
+        trend: trendResult[0]
+      };
+    } catch (error) {
+      console.error('Error in getAdminDashboardStats:', error);
       throw error;
     }
   }
