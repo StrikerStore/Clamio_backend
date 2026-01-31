@@ -432,19 +432,22 @@ class OrderTrackingService {
       // Normalize latest status for labels table
       const normalizedLatestStatus = await this.normalizeShipmentStatus(latestStatus.name);
 
-      // Check if status should set is_handover = 1
-      const isHandover = await this.shouldSetHandover(latestStatus.name);
-
-      // Get the timestamp for handover event
+      // Check if ANY status in the history qualifies as handover
+      // This ensures if an order was "In Transit" but is now "Pickup Failed", is_handover remains 1
+      let isHandover = false;
       let handoverTimestamp = null;
-      if (isHandover) {
-        for (const event of normalizedTrackingEvents) {
-          if (event && event.name) {
-            const eventIsHandover = await this.shouldSetHandover(event.name);
-            if (eventIsHandover && event.time) {
+
+      // Scan history for first handover event
+      for (const event of normalizedTrackingEvents) {
+        if (event && event.name) {
+          const eventIsHandover = await this.shouldSetHandover(event.name);
+          if (eventIsHandover) {
+            isHandover = true;
+            if (!handoverTimestamp && event.time) {
               handoverTimestamp = event.time;
-              break;
             }
+            // We don't break yet because we want to see if the LATEST status changes our view,
+            // though for isHandover once true it stays true.
           }
         }
       }
@@ -567,21 +570,18 @@ class OrderTrackingService {
       const normalizedLatestStatus = await this.normalizeShipmentStatus(latestStatus.name);
 
       // Update labels table with current shipment status and handover logic
-      // Check if status should set is_handover = 1 using database mapping
-      const isHandover = await this.shouldSetHandover(latestStatus.name);
-
-      // Get the timestamp for handover event (if available)
-      // IMPORTANT: We want the FIRST handover-qualifying event, not the latest
+      // Check if ANY status in history qualifies as handover
+      let isHandover = false;
       let handoverTimestamp = null;
-      if (isHandover) {
-        // Find the first occurrence of a handover-qualifying status (async search)
-        for (const event of normalizedTrackingEvents) {
-          if (event && event.name) {
-            const eventIsHandover = await this.shouldSetHandover(event.name);
-            if (eventIsHandover && event.time) {
+
+      for (const event of normalizedTrackingEvents) {
+        if (event && event.name) {
+          const eventIsHandover = await this.shouldSetHandover(event.name);
+          if (eventIsHandover) {
+            isHandover = true;
+            if (!handoverTimestamp && event.time) {
               handoverTimestamp = event.time;
-              console.log(`🚚 [Tracking] Found first handover-qualifying event for order ${orderId} at timestamp: ${handoverTimestamp} (status: ${event.name})`);
-              break;
+              console.log(`🚚 [Tracking] Found handover-qualifying event for order ${orderId} at timestamp: ${handoverTimestamp} (status: ${event.name})`);
             }
           }
         }
@@ -648,7 +648,7 @@ class OrderTrackingService {
 
   /**
    * Normalize shipment status using database mapping
-   * Falls back to basic normalization if status not found in mapping
+   * Returns status as-is (trimmed) if not found in database mapping
    * @param {string} status - The raw status from Shipway API
    * @returns {Promise<string>} Normalized status
    */
@@ -659,65 +659,20 @@ class OrderTrackingService {
 
     const database = require('../config/database');
 
-    // Try to get from database mapping first
+    // Try to get from database mapping first (primary source)
     const statusInfo = await database.getShipmentStatusInfo(status);
     if (statusInfo) {
       return statusInfo.renamed;
     }
 
-    // Fallback: Handle common patterns for unmapped statuses
-    const normalized = status.trim().toLowerCase().replace(/_/g, ' ');
-
-    // Handle failure statuses
-    if (normalized.includes('pickup failed') || normalized.includes('failed pickup')) {
-      return 'Pickup Failed';
-    }
-
-    // Map pickup variations to "In Transit"
-    if (
-      normalized.includes('picked') ||
-      (normalized.includes('pickup') && !normalized.includes('failed')) ||
-      normalized === 'in transit'
-    ) {
-      return 'In Transit';
-    }
-
-    // Normalize "Delivered" variations
-    if (normalized === 'delivered') {
-      return 'Delivered';
-    }
-
-    // Fallback common statuses for unmapped ones
-    const fallbackStatuses = {
-      'out for delivery': 'Out for Delivery',
-      'rto': 'RTO',
-      'rto initiated': 'RTO Initiated',
-      'rto in transit': 'RTO In Transit',
-      'rto delivered': 'RTO Delivered',
-      'rto out for delivery': 'RTO Out for Delivery',
-      'rto failed': 'RTO Failed',
-      'rtd': 'RTO Delivered',
-      'cancelled': 'Cancelled',
-      'returned': 'Returned',
-      'failed delivery': 'Failed Delivery',
-      'attempted delivery': 'Attempted Delivery',
-      'shipment booked': 'Shipment Booked',
-      'dispatched': 'Dispatched',
-      'in warehouse': 'In Warehouse',
-      'out for pickup': 'Out for Pickup'
-    };
-
-    if (fallbackStatuses[normalized]) {
-      return fallbackStatuses[normalized];
-    }
-
-    // Return original status if no normalization needed
-    return status;
+    // Fallback: Return status as-is (trimmed) for unmapped statuses
+    // All mappings are controlled via ShipmentStatusMapping in utility table
+    return status.trim();
   }
 
   /**
    * Determine if a status should set is_handover = 1 using database mapping
-   * Falls back to pattern-based detection for unmapped statuses
+   * Defaults to false for unmapped statuses
    * @param {string} status - The status to check
    * @returns {Promise<boolean>} True if is_handover should be set to 1
    */
@@ -728,45 +683,14 @@ class OrderTrackingService {
 
     const database = require('../config/database');
 
-    // Try to get from database mapping first
+    // Try to get from database mapping first (primary source)
     const statusInfo = await database.getShipmentStatusInfo(status);
     if (statusInfo) {
       return statusInfo.is_handover === 1;
     }
 
-    // Fallback: Pattern-based detection for unmapped statuses
-    const normalizedStatus = status.trim().toLowerCase().replace(/_/g, ' ');
-
-    // Statuses where is_handover = 0 (not yet picked up)
-    const nonHandoverPatterns = [
-      'awb assigned',
-      'shipment booked',
-      'pickup failed',
-      'out for pickup',
-      'shpfr3'
-    ];
-
-    // Check if it's a non-handover status
-    for (const pattern of nonHandoverPatterns) {
-      if (normalizedStatus.includes(pattern) || normalizedStatus === pattern) {
-        return false;
-      }
-    }
-
-    // Handover patterns (package is in transit)
-    const handoverPatterns = [
-      'in transit', 'picked', 'dispatched', 'warehouse',
-      'out for delivery', 'delivered', 'rto', 'undelivered',
-      'failed delivery', 'attempted', 'cancelled', 'returned'
-    ];
-
-    for (const pattern of handoverPatterns) {
-      if (normalizedStatus.includes(pattern)) {
-        return true;
-      }
-    }
-
-    // Default to false for unknown statuses
+    // Fallback: Default to false for unmapped statuses
+    // All handover logic is controlled via ShipmentStatusMapping in utility table
     return false;
   }
 
