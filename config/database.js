@@ -7788,9 +7788,9 @@ class Database {
           CASE 
             WHEN (l.current_shipment_status IS NULL OR l.current_shipment_status = '') AND c.status = 'claimed' THEN 'Claimed'
             WHEN LOWER(l.current_shipment_status) IN ('in_transit', 'in transit', 'int') THEN 'In Transit'
-            WHEN LOWER(l.current_shipment_status) IN ('delivered', 'del') THEN 'Delivered'
-            WHEN LOWER(l.current_shipment_status) IN ('rto_delivered', 'rtd') THEN 'RTO Delivered'
-            WHEN LOWER(l.current_shipment_status) IN ('pickup_failed', 'shpfr3') THEN 'Pickup Failed'
+            WHEN LOWER(l.current_shipment_status) IN ('delivered', 'del', 'dlv') THEN 'Delivered'
+            WHEN LOWER(l.current_shipment_status) IN ('rto_delivered', 'rtd', 'rto delivered', 'returned', 'rto_dlv') THEN 'RTO Delivered'
+            WHEN LOWER(l.current_shipment_status) IN ('pickup_failed', 'shpfr3', 'pickup failed', 'failed', 'puf') THEN 'Pickup Failed'
             ELSE 'Others'
           END as status_group,
           COUNT(DISTINCT o.unique_id) as count
