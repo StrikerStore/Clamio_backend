@@ -6622,66 +6622,140 @@ router.post('/download-manifest-summary', async (req, res) => {
       // Calculate store total
       let storeTotal = 0;
 
-      // Process each manifest (COD and/or Prepaid) for this store
-      for (let i = 0; i < storeData.manifests.length; i++) {
-        const { manifest_id, payment_type, summary } = storeData.manifests[i];
+      if (isThermal) {
+        console.log(`📄 [THERMAL] Processing store: ${storeName} with ${storeData.manifests.length} manifest(s)`);
+        
+        // Add new page for each store (except first store)
+        if (storeIndex > 0) {
+          doc.addPage({ size: [288, 432], margin: { top: 20, left: 20, right: 20, bottom: 5 } });
+        }
 
-        if (isThermal) {
-          // Add new page for each manifest in thermal format (except first store's first manifest)
-          if (storeIndex > 0 || i > 0) {
+        const leftMarginRef = 20;
+        let currentY = doc.y;
+
+        // Header: Logo and Store Name
+        let logoWidth = 0;
+        if (logoBuffer) {
+          try {
+            logoWidth = 40;
+            const logoHeight = 40;
+            doc.image(logoBuffer, leftMarginRef, currentY, { width: logoWidth, height: logoHeight, fit: [logoWidth, logoHeight] });
+          } catch (error) {
+            console.log(`⚠️ Logo embed fail (Thermal):`, error.message);
+            logoWidth = 0;
+          }
+        }
+
+        const headerTextX = logoWidth > 0 ? leftMarginRef + logoWidth + 8 : leftMarginRef;
+        doc.fontSize(11).font('Helvetica-Bold').fillColor('#000000');
+        doc.text(storeName, headerTextX, currentY + 5, { width: 248 - (headerTextX - leftMarginRef), height: 15, ellipsis: true });
+
+        doc.fontSize(8).font('Helvetica').fillColor('#666666');
+        doc.text('Manifest Summary Report', headerTextX, doc.y);
+
+        currentY = Math.max(currentY + 45, doc.y + 10);
+        doc.y = currentY;
+
+        // Date and WH ID (above address) - formatted as requested
+        const currentDate = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+        doc.fontSize(7).font('Helvetica').fillColor('#333333');
+        doc.text(`Generated On: ${currentDate} |`, leftMarginRef, currentY, { width: 248 });
+        currentY += 10; // Move to next line
+        doc.text(`WH ID: ${vendorWarehouseId}`, leftMarginRef, currentY, { width: 248 });
+        currentY += 10; // Move to next line
+
+        // Warehouse Address (below date/WH ID)
+        if (vendorAddress) {
+          doc.fontSize(7).font('Helvetica').fillColor('#333333');
+          doc.text(`Address: ${vendorAddress}`, leftMarginRef, currentY, { width: 248 });
+          currentY += 10; // Move to next line
+        }
+        
+        // Add spacing after address before first manifest
+        currentY += 15; // Increased spacing for better readability
+        doc.y = currentY;
+
+        // Sort manifests: Prepaid first, then COD
+        const sortedManifests = [...storeData.manifests].sort((a, b) => {
+          if (a.payment_type === 'P' && b.payment_type === 'C') return -1;
+          if (a.payment_type === 'C' && b.payment_type === 'P') return 1;
+          return 0;
+        });
+
+        // Process each manifest (Prepaid first, then COD)
+        for (let i = 0; i < sortedManifests.length; i++) {
+          const { manifest_id, payment_type, summary } = sortedManifests[i];
+          const paymentTypeLabel = payment_type === 'C' ? 'COD' : 'Pre-Paid';
+
+          // Calculate space needed for this table
+          const manifestHeaderHeight = 12; // Header text + spacing
+          const tableHeaderHeight = 15;
+          let tableRowsHeight = 0;
+          
+          summary.forEach((row) => {
+            const orderIdsText = row.order_ids || '';
+            const rowHeight = calculateRowHeight(orderIdsText, 105 - 6, 7);
+            tableRowsHeight += rowHeight;
+          });
+
+          const footerHeight = 20; // Space for "Total Orders" footer
+          const tableTotalHeight = manifestHeaderHeight + tableHeaderHeight + tableRowsHeight + footerHeight;
+          const pageHeight = 432;
+          const bottomMargin = 5;
+          const maxY = pageHeight - bottomMargin;
+
+          // If this is the 2nd manifest and it won't fit, move to next page
+          // Check if current position + table height would exceed page limits
+          if (i > 0 && (currentY + tableTotalHeight > maxY - 10)) {
             doc.addPage({ size: [288, 432], margin: { top: 20, left: 20, right: 20, bottom: 5 } });
+            currentY = 20;
           }
 
-          const leftMarginRef = 20;
-          let currentY = doc.y;
-
-          // Header: Logo and Store Name
-          let logoWidth = 0;
-          if (logoBuffer) {
-            try {
-              logoWidth = 40;
-              const logoHeight = 40;
-              doc.image(logoBuffer, leftMarginRef, currentY, { width: logoWidth, height: logoHeight, fit: [logoWidth, logoHeight] });
-            } catch (error) {
-              console.log(`⚠️ Logo embed fail (Thermal):`, error.message);
-              logoWidth = 0;
-            }
+          // Add spacing before each manifest (except first one)
+          if (i > 0) {
+            currentY += 10;
           }
 
-          const headerTextX = logoWidth > 0 ? leftMarginRef + logoWidth + 8 : leftMarginRef;
-          doc.fontSize(11).font('Helvetica-Bold').fillColor('#000000');
-          doc.text(storeName, headerTextX, currentY + 5, { width: 248 - (headerTextX - leftMarginRef), height: 15, ellipsis: true });
-
-          doc.fontSize(8).font('Helvetica').fillColor('#666666');
-          doc.text('Manifest Summary Report', headerTextX, doc.y);
-
-          currentY = Math.max(currentY + 45, doc.y + 10);
+          // Simplified manifest header - single line with manifest ID
+          doc.fontSize(9).font('Helvetica-Bold').fillColor('#000000');
+          const manifestHeaderText = `${paymentTypeLabel} Manifest (Manifest ID - ${manifest_id})`;
+          doc.text(manifestHeaderText, leftMarginRef, currentY, { width: 248 });
+          
+          // Move Y position below header for table
+          currentY += 12;
           doc.y = currentY;
 
-          // Warehouse Address (Small text)
-          if (vendorAddress) {
-            doc.fontSize(7).font('Helvetica').fillColor('#333333');
-            doc.text(`Address: ${vendorAddress}`, leftMarginRef, doc.y, { width: 248 });
-            doc.moveDown(0.5);
-          }
+          // Calculate dynamic column widths based on carrier name lengths
+          // First, find the longest carrier name (after removing "Shipway")
+          let maxCarrierNameLength = 0;
+          summary.forEach((row) => {
+            const cleanCarrierName = (row.carrier_name || 'Unknown').replace(/Shipway\s*/gi, '');
+            const nameLength = cleanCarrierName.length;
+            if (nameLength > maxCarrierNameLength) {
+              maxCarrierNameLength = nameLength;
+            }
+          });
 
-          // Manifest Type Icon and ID
-          const paymentTypeLabel = payment_type === 'C' ? 'COD' : 'Pre-Paid';
-          const iconLetter = payment_type === 'C' ? 'C' : 'P';
+          // Calculate carrier column width dynamically (min 50, max 85) - reduced for more Order IDs space
+          // Use character width approximation: ~4.5 points per character at font size 7
+          const charWidth = 4.5;
+          const carrierTextWidth = maxCarrierNameLength * charWidth;
+          const carrierPadding = 8; // Left + right padding (reduced from 10)
+          const dynamicCarrierWidth = Math.max(50, Math.min(85, carrierTextWidth + carrierPadding));
 
-          const iconBoxSize = 25;
-          doc.rect(leftMarginRef, doc.y, iconBoxSize, iconBoxSize).stroke('#000000');
-          doc.fontSize(14).font('Helvetica-Bold').text(iconLetter, leftMarginRef + 7, doc.y + 5);
+          // Adjust other columns to maintain total width of 248
+          const fixedWidths = { orders: 25, signature: 45 }; // Reduced signature from 63 to 45
+          const remainingWidth = 248 - dynamicCarrierWidth - fixedWidths.orders - fixedWidths.signature;
+          const orderIdsWidth = Math.max(80, remainingWidth); // Gets extra width from signature reduction
 
-          doc.fontSize(9).font('Helvetica-Bold').text(`${paymentTypeLabel} MANIFEST`, leftMarginRef + iconBoxSize + 10, doc.y - 18);
-          doc.fontSize(8).font('Helvetica').text(`ID: ${manifest_id}`, leftMarginRef + iconBoxSize + 10, doc.y);
-
-          doc.moveDown(1);
-          currentY = doc.y;
-
-          // Detailed Table for Thermal
-          const colWidths = { carrier: 55, orders: 25, orderIds: 105, signature: 63 };
-          doc.fontSize(8).font('Helvetica-Bold').fillColor('#000000');
+          // Detailed Table for Thermal with dynamic column widths
+          const colWidths = { 
+            carrier: dynamicCarrierWidth, 
+            orders: fixedWidths.orders, 
+            orderIds: orderIdsWidth, 
+            signature: fixedWidths.signature 
+          };
+          doc.fontSize(7).font('Helvetica-Bold').fillColor('#000000'); // Reduced from 8 to 7
 
           // Table Headers
           let headerX = leftMarginRef;
@@ -6698,28 +6772,30 @@ router.post('/download-manifest-summary', async (req, res) => {
           headerX += colWidths.orderIds;
 
           doc.rect(headerX, currentY, colWidths.signature, 15).stroke();
-          doc.text('Signature', headerX + 3, currentY + 4);
+          doc.text('Sign', headerX + 3, currentY + 4);
 
           currentY += 15;
           let manifestTotal = 0;
 
           // Table Rows
-          doc.font('Helvetica').fontSize(7);
+          doc.font('Helvetica').fontSize(7); // Increased from 6 to 7
           summary.forEach((row, rowIndex) => {
-            const carrierName = (row.carrier_name || 'Unknown').replace(/Shipway\s*/gi, '').substring(0, 12);
+            // Remove "Shipway" prefix but keep full carrier name
+            const carrierName = (row.carrier_name || 'Unknown').replace(/Shipway\s*/gi, '');
             const orderIdsText = row.order_ids || '';
-            const rowHeight = calculateRowHeight(orderIdsText, colWidths.orderIds - 6, 7);
+            const rowHeight = calculateRowHeight(orderIdsText, colWidths.orderIds - 6, 7); // Updated to match font size 7
 
-            // Safer overflow threshold (380) to leave room for the footer on the last row
-            // Margin remains 20 at top, but bottom is 5 (set via addPage) to prevent auto-breaks
-            const overflowThreshold = (rowIndex === summary.length - 1) ? 360 : 380;
+            // Check if we need a new page (only if this is the last row of the last manifest)
+            // Otherwise, we already checked before starting the table
+            const isLastRowOfLastManifest = (i === sortedManifests.length - 1) && (rowIndex === summary.length - 1);
+            const overflowThreshold = isLastRowOfLastManifest ? 360 : 380;
 
             if (currentY + rowHeight > overflowThreshold) {
               doc.addPage({ size: [288, 432], margin: { top: 20, left: 20, right: 20, bottom: 5 } });
               currentY = 20;
 
               // Redraw headers on new page
-              doc.fontSize(8).font('Helvetica-Bold');
+              doc.fontSize(7).font('Helvetica-Bold'); // Reduced from 8 to 7
               let hX = leftMarginRef;
               doc.rect(hX, currentY, colWidths.carrier, 15).stroke();
               doc.text('Carrier', hX + 3, currentY + 4);
@@ -6731,10 +6807,10 @@ router.post('/download-manifest-summary', async (req, res) => {
               doc.text('Order IDs', hX + 3, currentY + 4);
               hX += colWidths.orderIds;
               doc.rect(hX, currentY, colWidths.signature, 15).stroke();
-              doc.text('Signature', hX + 3, currentY + 4);
+              doc.text('Sign', hX + 3, currentY + 4);
 
               currentY += 15;
-              doc.font('Helvetica').fontSize(7);
+              doc.font('Helvetica').fontSize(7); // Increased from 6 to 7
             }
 
             let cellX = leftMarginRef;
@@ -6756,17 +6832,24 @@ router.post('/download-manifest-summary', async (req, res) => {
             manifestTotal += parseInt(row.order_count);
           });
 
-          // Footer
+          // Footer for this manifest
           doc.y = currentY + 8;
-          doc.fontSize(9).font('Helvetica-Bold').text(`Total Orders: ${manifestTotal}`, { align: 'right' });
+          doc.fontSize(8).font('Helvetica-Bold').text(`Total ${paymentTypeLabel} Orders: ${manifestTotal}`, { align: 'right' }); // Set to 8pt
 
-          doc.moveDown(0.3);
-          doc.fontSize(7).font('Helvetica').text(`Date: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`, { align: 'left' });
-          doc.text(`WH ID: ${vendorWarehouseId}`, { align: 'left' });
-
+          currentY = doc.y + 15; // Space before next manifest
           storeTotal += manifestTotal;
-          continue;
         }
+
+        // Store total footer (only on last page)
+        doc.y = currentY + 5;
+        doc.fontSize(9).font('Helvetica-Bold').fillColor('#000000');
+        doc.text(`${storeName} Total: ${storeTotal} Orders`, leftMarginRef, doc.y);
+        continue;
+      }
+
+      // Process each manifest (COD and/or Prepaid) for this store (A4 format)
+      for (let i = 0; i < storeData.manifests.length; i++) {
+        const { manifest_id, payment_type, summary } = storeData.manifests[i];
 
         // Determine payment type label and icon
         const paymentTypeLabel = payment_type === 'C' ? 'COD' : 'Pre-Paid';

@@ -707,7 +707,7 @@ class ShipwayService {
             'Authorization': this.basicAuthHeader,
             'Content-Type': 'application/json',
           },
-          timeout: 20000,
+          timeout: 60000, // Increased to 60 seconds to handle slower API responses
         });
 
         if (response.status !== 200 || !response.data) {
@@ -826,6 +826,12 @@ class ShipwayService {
 
     } catch (error) {
       this.logApiActivity({ type: 'shipway-error', error: error.message, stack: error.stack });
+      
+      // Provide more specific error messages for timeout cases
+      if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) {
+        throw new Error('Failed to fetch orders from Shipway API: Request timeout - The API took longer than 60 seconds to respond. This may indicate network issues or the API is experiencing high load.');
+      }
+      
       throw new Error('Failed to fetch orders from Shipway API: ' + error.message);
     }
 
