@@ -6515,7 +6515,8 @@ router.post('/download-manifest-summary', async (req, res) => {
 
     const doc = new PDFDocument({
       size: pageSize,
-      margin: pageMargin,
+      // Use a smaller bottom margin for thermal to allow full manual control over paging
+      margin: isThermal ? { top: 20, left: 20, right: 20, bottom: 5 } : pageMargin,
       info: {
         Title: 'Manifest Summary Report',
         Author: 'Clamio Vendor System'
@@ -6628,7 +6629,7 @@ router.post('/download-manifest-summary', async (req, res) => {
         if (isThermal) {
           // Add new page for each manifest in thermal format (except first store's first manifest)
           if (storeIndex > 0 || i > 0) {
-            doc.addPage({ size: [288, 432], margin: 20 });
+            doc.addPage({ size: [288, 432], margin: { top: 20, left: 20, right: 20, bottom: 5 } });
           }
 
           const leftMarginRef = 20;
@@ -6704,15 +6705,36 @@ router.post('/download-manifest-summary', async (req, res) => {
 
           // Table Rows
           doc.font('Helvetica').fontSize(7);
-          summary.forEach(row => {
+          summary.forEach((row, rowIndex) => {
             const carrierName = (row.carrier_name || 'Unknown').replace(/Shipway\s*/gi, '').substring(0, 12);
             const orderIdsText = row.order_ids || '';
             const rowHeight = calculateRowHeight(orderIdsText, colWidths.orderIds - 6, 7);
 
-            // Check for page overflow
-            if (currentY + rowHeight > 410) {
-              doc.addPage({ size: [288, 432], margin: 20 });
+            // Safer overflow threshold (380) to leave room for the footer on the last row
+            // Margin remains 20 at top, but bottom is 5 (set via addPage) to prevent auto-breaks
+            const overflowThreshold = (rowIndex === summary.length - 1) ? 360 : 380;
+
+            if (currentY + rowHeight > overflowThreshold) {
+              doc.addPage({ size: [288, 432], margin: { top: 20, left: 20, right: 20, bottom: 5 } });
               currentY = 20;
+
+              // Redraw headers on new page
+              doc.fontSize(8).font('Helvetica-Bold');
+              let hX = leftMarginRef;
+              doc.rect(hX, currentY, colWidths.carrier, 15).stroke();
+              doc.text('Carrier', hX + 3, currentY + 4);
+              hX += colWidths.carrier;
+              doc.rect(hX, currentY, colWidths.orders, 15).stroke();
+              doc.text('Qty', hX + 3, currentY + 4);
+              hX += colWidths.orders;
+              doc.rect(hX, currentY, colWidths.orderIds, 15).stroke();
+              doc.text('Order IDs', hX + 3, currentY + 4);
+              hX += colWidths.orderIds;
+              doc.rect(hX, currentY, colWidths.signature, 15).stroke();
+              doc.text('Signature', hX + 3, currentY + 4);
+
+              currentY += 15;
+              doc.font('Helvetica').fontSize(7);
             }
 
             let cellX = leftMarginRef;
@@ -6735,10 +6757,10 @@ router.post('/download-manifest-summary', async (req, res) => {
           });
 
           // Footer
-          doc.y = currentY + 10;
+          doc.y = currentY + 8;
           doc.fontSize(9).font('Helvetica-Bold').text(`Total Orders: ${manifestTotal}`, { align: 'right' });
 
-          doc.moveDown(0.5);
+          doc.moveDown(0.3);
           doc.fontSize(7).font('Helvetica').text(`Date: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`, { align: 'left' });
           doc.text(`WH ID: ${vendorWarehouseId}`, { align: 'left' });
 
