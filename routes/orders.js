@@ -3,7 +3,7 @@ const router = express.Router();
 const path = require('path');
 const fs = require('fs');
 const fetch = require('node-fetch');
-const { authenticateBasicAuth, requireAdminOrSuperadmin } = require('../middleware/auth');
+const { authenticateBasicAuth, requireAdminOrSuperadmin, requireAnyUser } = require('../middleware/auth');
 const carrierServiceabilityService = require('../services/carrierServiceabilityService');
 
 // Apply authentication to all order routes
@@ -199,7 +199,17 @@ async function createLabelGenerationNotification(errorMessage, orderId, vendor, 
  * @desc    Get all orders from MySQL database
  * @access  Admin, Superadmin
  */
-router.get('/', requireAdminOrSuperadmin, async (req, res) => {
+router.get('/', requireAnyUser, async (req, res) => {
+  const { status } = req.query;
+
+  // Vendors are only allowed to see 'unclaimed' orders via this main endpoint
+  if (req.user.role === 'vendor' && status !== 'unclaimed') {
+    return res.status(403).json({
+      success: false,
+      message: 'Vendors can only access unclaimed orders via this endpoint. Please use specific vendor endpoints for claimed orders.'
+    });
+  }
+
   try {
     const database = require('../config/database');
 
@@ -1204,6 +1214,7 @@ router.get('/dashboard-stats', async (req, res) => {
   console.log('\n📊 DASHBOARD STATS REQUEST START');
   console.log('================================');
 
+  const vendor = req.user;
   const database = require('../config/database');
   try {
     // Wait for MySQL initialization
@@ -1374,6 +1385,7 @@ router.get('/grouped', async (req, res) => {
   const limit = parseInt(req.query.limit) || 50;
   console.log('📄 Pagination params:', { page, limit });
 
+  const vendor = req.user;
   const database = require('../config/database');
   try {
     // Wait for MySQL initialization
