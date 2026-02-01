@@ -6631,53 +6631,119 @@ router.post('/download-manifest-summary', async (req, res) => {
             doc.addPage({ size: [288, 432], margin: 20 });
           }
 
-          // Thermal Layout: Compact 4x6
-          doc.fontSize(14).font('Helvetica-Bold').text(storeName, { align: 'center' });
-          doc.fontSize(10).font('Helvetica').text('Manifest Summary', { align: 'center' });
-          doc.moveDown(0.5);
-          doc.rect(20, doc.y, 248, 1).fill('#000000');
-          doc.moveDown(0.5);
+          const leftMarginRef = 20;
+          let currentY = doc.y;
 
+          // Header: Logo and Store Name
+          let logoWidth = 0;
+          if (logoBuffer) {
+            try {
+              logoWidth = 40;
+              const logoHeight = 40;
+              doc.image(logoBuffer, leftMarginRef, currentY, { width: logoWidth, height: logoHeight, fit: [logoWidth, logoHeight] });
+            } catch (error) {
+              console.log(`⚠️ Logo embed fail (Thermal):`, error.message);
+              logoWidth = 0;
+            }
+          }
+
+          const headerTextX = logoWidth > 0 ? leftMarginRef + logoWidth + 8 : leftMarginRef;
+          doc.fontSize(11).font('Helvetica-Bold').fillColor('#000000');
+          doc.text(storeName, headerTextX, currentY + 5, { width: 248 - (headerTextX - leftMarginRef), height: 15, ellipsis: true });
+
+          doc.fontSize(8).font('Helvetica').fillColor('#666666');
+          doc.text('Manifest Summary Report', headerTextX, doc.y);
+
+          currentY = Math.max(currentY + 45, doc.y + 10);
+          doc.y = currentY;
+
+          // Warehouse Address (Small text)
+          if (vendorAddress) {
+            doc.fontSize(7).font('Helvetica').fillColor('#333333');
+            doc.text(`Address: ${vendorAddress}`, leftMarginRef, doc.y, { width: 248 });
+            doc.moveDown(0.5);
+          }
+
+          // Manifest Type Icon and ID
           const paymentTypeLabel = payment_type === 'C' ? 'COD' : 'Pre-Paid';
-          doc.fontSize(12).font('Helvetica-Bold').text(paymentTypeLabel, { align: 'left' });
-          doc.fontSize(10).font('Helvetica').text(`Manifest ID: ${manifest_id}`, { align: 'left' });
-          doc.moveDown(0.5);
+          const iconLetter = payment_type === 'C' ? 'C' : 'P';
 
-          // Summary details
+          const iconBoxSize = 25;
+          doc.rect(leftMarginRef, doc.y, iconBoxSize, iconBoxSize).stroke('#000000');
+          doc.fontSize(14).font('Helvetica-Bold').text(iconLetter, leftMarginRef + 7, doc.y + 5);
+
+          doc.fontSize(9).font('Helvetica-Bold').text(`${paymentTypeLabel} MANIFEST`, leftMarginRef + iconBoxSize + 10, doc.y - 18);
+          doc.fontSize(8).font('Helvetica').text(`ID: ${manifest_id}`, leftMarginRef + iconBoxSize + 10, doc.y);
+
+          doc.moveDown(1);
+          currentY = doc.y;
+
+          // Detailed Table for Thermal
+          const colWidths = { carrier: 55, orders: 25, orderIds: 105, signature: 63 };
+          doc.fontSize(8).font('Helvetica-Bold').fillColor('#000000');
+
+          // Table Headers
+          let headerX = leftMarginRef;
+          doc.rect(headerX, currentY, colWidths.carrier, 15).stroke();
+          doc.text('Carrier', headerX + 3, currentY + 4);
+          headerX += colWidths.carrier;
+
+          doc.rect(headerX, currentY, colWidths.orders, 15).stroke();
+          doc.text('Qty', headerX + 3, currentY + 4);
+          headerX += colWidths.orders;
+
+          doc.rect(headerX, currentY, colWidths.orderIds, 15).stroke();
+          doc.text('Order IDs', headerX + 3, currentY + 4);
+          headerX += colWidths.orderIds;
+
+          doc.rect(headerX, currentY, colWidths.signature, 15).stroke();
+          doc.text('Signature', headerX + 3, currentY + 4);
+
+          currentY += 15;
           let manifestTotal = 0;
-          doc.fontSize(9).font('Helvetica-Bold');
-          doc.text('Carrier', 20, doc.y, { continued: true });
-          doc.text('Count', { align: 'right' });
-          doc.rect(20, doc.y, 248, 0.5).stroke();
-          doc.moveDown(0.2);
 
-          doc.font('Helvetica').fontSize(9);
+          // Table Rows
+          doc.font('Helvetica').fontSize(7);
           summary.forEach(row => {
-            const carrierName = (row.carrier_name || 'Unknown').replace(/Shipway\s*/gi, '');
-            doc.text(carrierName, 20, doc.y, { continued: true });
-            doc.text(row.order_count.toString(), { align: 'right' });
+            const carrierName = (row.carrier_name || 'Unknown').replace(/Shipway\s*/gi, '').substring(0, 12);
+            const orderIdsText = row.order_ids || '';
+            const rowHeight = calculateRowHeight(orderIdsText, colWidths.orderIds - 6, 7);
+
+            // Check for page overflow
+            if (currentY + rowHeight > 410) {
+              doc.addPage({ size: [288, 432], margin: 20 });
+              currentY = 20;
+            }
+
+            let cellX = leftMarginRef;
+            doc.rect(cellX, currentY, colWidths.carrier, rowHeight).stroke();
+            doc.text(carrierName, cellX + 3, currentY + 5);
+            cellX += colWidths.carrier;
+
+            doc.rect(cellX, currentY, colWidths.orders, rowHeight).stroke();
+            doc.text(row.order_count.toString(), cellX + 3, currentY + 5, { align: 'center', width: colWidths.orders - 6 });
+            cellX += colWidths.orders;
+
+            doc.rect(cellX, currentY, colWidths.orderIds, rowHeight).stroke();
+            doc.text(orderIdsText, cellX + 3, currentY + 5, { width: colWidths.orderIds - 6 });
+            cellX += colWidths.orderIds;
+
+            doc.rect(cellX, currentY, colWidths.signature, rowHeight).stroke();
+
+            currentY += rowHeight;
             manifestTotal += parseInt(row.order_count);
           });
 
-          doc.moveDown(0.5);
-          doc.rect(20, doc.y, 248, 1).fill('#000000');
-          doc.moveDown(0.5);
-          doc.fontSize(11).font('Helvetica-Bold').text(`Total Orders: ${manifestTotal}`, { align: 'right' });
+          // Footer
+          doc.y = currentY + 10;
+          doc.fontSize(9).font('Helvetica-Bold').text(`Total Orders: ${manifestTotal}`, { align: 'right' });
 
-          doc.moveDown(1);
-          doc.fontSize(8).font('Helvetica').text(`Date: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`, { align: 'left' });
+          doc.moveDown(0.5);
+          doc.fontSize(7).font('Helvetica').text(`Date: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`, { align: 'left' });
           doc.text(`WH ID: ${vendorWarehouseId}`, { align: 'left' });
 
-          // Signature Area
-          doc.moveDown(2);
-          doc.rect(20, doc.y, 100, 0.5).stroke();
-          doc.fontSize(8).text('Warehouse Sign', 20, doc.y + 5);
-
-          doc.rect(168, doc.y - 12.5, 100, 0.5).stroke();
-          doc.text('Courier Sign', 168, doc.y + 5);
-
           storeTotal += manifestTotal;
-          continue; // Skip A4 logic
+          continue;
         }
 
         // Determine payment type label and icon
