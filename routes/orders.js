@@ -6340,7 +6340,7 @@ router.get('/auto-reverse-stats', authenticateBasicAuth, requireAdminOrSuperadmi
  * @access  Vendor (token required)
  */
 router.post('/download-manifest-summary', async (req, res) => {
-  const { manifest_ids } = req.body;
+  const { manifest_ids, format = 'a4' } = req.body;
   const token = req.headers['authorization'];
 
   console.log('🔵 DOWNLOAD MANIFEST SUMMARY REQUEST START');
@@ -6509,9 +6509,13 @@ router.post('/download-manifest-summary', async (req, res) => {
 
     // Generate PDF
     const PDFDocument = require('pdfkit');
+    const isThermal = format === 'thermal';
+    const pageSize = isThermal ? [288, 432] : 'A4';
+    const pageMargin = isThermal ? 20 : 50;
+
     const doc = new PDFDocument({
-      size: 'A4',
-      margin: 50,
+      size: pageSize,
+      margin: pageMargin,
       info: {
         Title: 'Manifest Summary Report',
         Author: 'Clamio Vendor System'
@@ -6528,7 +6532,7 @@ router.post('/download-manifest-summary', async (req, res) => {
     // Pipe PDF to response
     doc.pipe(res);
 
-    const leftMargin = 50;
+    const leftMargin = pageMargin;
 
     // Generate separate PDF section for each store
     const storeKeys = Object.keys(manifestDataByStore);
@@ -6554,52 +6558,55 @@ router.post('/download-manifest-summary', async (req, res) => {
       }
 
       // Add new page for each store (except the first one)
-      if (storeIndex > 0) {
+      if (storeIndex > 0 && !isThermal) {
         doc.addPage();
       }
 
-      // Top Section: Logo and Store Name (Left aligned)
-      const topY = 50;
+      if (!isThermal) {
+        // A4 Layout: Existing logic
+        // Top Section: Logo and Store Name (Left aligned)
+        const topY = pageMargin;
 
-      // Add logo at top left (if available)
-      let logoWidth = 0;
-      if (logoBuffer) {
-        try {
-          logoWidth = 55;
-          const logoHeight = 55;
-          doc.image(logoBuffer, leftMargin, topY, { width: logoWidth, height: logoHeight, fit: [logoWidth, logoHeight] });
-          console.log(`✅ Logo embedded for ${storeName}`);
-        } catch (error) {
-          console.log(`⚠️ Could not embed logo for ${storeName}:`, error.message);
-          logoWidth = 0; // Reset if embedding failed
+        // Add logo at top left (if available)
+        let logoWidth = 0;
+        if (logoBuffer) {
+          try {
+            logoWidth = 55;
+            const logoHeight = 55;
+            doc.image(logoBuffer, leftMargin, topY, { width: logoWidth, height: logoHeight, fit: [logoWidth, logoHeight] });
+            console.log(`✅ Logo embedded for ${storeName}`);
+          } catch (error) {
+            console.log(`⚠️ Could not embed logo for ${storeName}:`, error.message);
+            logoWidth = 0; // Reset if embedding failed
+          }
+        } else {
+          console.log(`ℹ️ No logo for ${storeName} - keeping logo space blank`);
         }
-      } else {
-        console.log(`ℹ️ No logo for ${storeName} - keeping logo space blank`);
-      }
 
-      // Add store name next to logo (or at left margin if no logo)
-      const storeNameX = logoWidth > 0 ? leftMargin + logoWidth + 10 : leftMargin;
-      doc.fontSize(20).font('Helvetica-Bold').fillColor('#000000');
-      doc.text(storeName, storeNameX, topY + 15);
+        // Add store name next to logo (or at left margin if no logo)
+        const storeNameX = logoWidth > 0 ? leftMargin + logoWidth + 10 : leftMargin;
+        doc.fontSize(20).font('Helvetica-Bold').fillColor('#000000');
+        doc.text(storeName, storeNameX, topY + 15);
 
-      doc.y = topY + 50;
+        doc.y = topY + 50;
 
-      // PDF Header - Underlined
-      doc.fontSize(14).font('Helvetica-Bold').fillColor('#000000');
-      doc.text('Manifest Summary Report', leftMargin, doc.y, { underline: true });
-      doc.y += 20;
+        // PDF Header - Underlined
+        doc.fontSize(14).font('Helvetica-Bold').fillColor('#000000');
+        doc.text('Manifest Summary Report', leftMargin, doc.y, { underline: true });
+        doc.y += 20;
 
-      // Header information - Left aligned
-      doc.fontSize(9).font('Helvetica');
-      doc.text(`Generated On: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`, leftMargin, doc.y);
-      doc.y += 12;
-      doc.text(`Warehouse ID: ${vendorWarehouseId}`, leftMargin, doc.y);
-      doc.y += 12;
-      if (vendorAddress) {
-        doc.text(`Warehouse Address: ${vendorAddress}`, leftMargin, doc.y);
+        // Header information - Left aligned
+        doc.fontSize(9).font('Helvetica');
+        doc.text(`Generated On: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`, leftMargin, doc.y);
         doc.y += 12;
+        doc.text(`Warehouse ID: ${vendorWarehouseId}`, leftMargin, doc.y);
+        doc.y += 12;
+        if (vendorAddress) {
+          doc.text(`Warehouse Address: ${vendorAddress}`, leftMargin, doc.y);
+          doc.y += 12;
+        }
+        doc.y += 15;
       }
-      doc.y += 15;
 
       // Helper function to calculate dynamic row height based on text
       function calculateRowHeight(text, maxWidth, fontSize) {
@@ -6617,6 +6624,61 @@ router.post('/download-manifest-summary', async (req, res) => {
       // Process each manifest (COD and/or Prepaid) for this store
       for (let i = 0; i < storeData.manifests.length; i++) {
         const { manifest_id, payment_type, summary } = storeData.manifests[i];
+
+        if (isThermal) {
+          // Add new page for each manifest in thermal format (except first store's first manifest)
+          if (storeIndex > 0 || i > 0) {
+            doc.addPage({ size: [288, 432], margin: 20 });
+          }
+
+          // Thermal Layout: Compact 4x6
+          doc.fontSize(14).font('Helvetica-Bold').text(storeName, { align: 'center' });
+          doc.fontSize(10).font('Helvetica').text('Manifest Summary', { align: 'center' });
+          doc.moveDown(0.5);
+          doc.rect(20, doc.y, 248, 1).fill('#000000');
+          doc.moveDown(0.5);
+
+          const paymentTypeLabel = payment_type === 'C' ? 'COD' : 'Pre-Paid';
+          doc.fontSize(12).font('Helvetica-Bold').text(paymentTypeLabel, { align: 'left' });
+          doc.fontSize(10).font('Helvetica').text(`Manifest ID: ${manifest_id}`, { align: 'left' });
+          doc.moveDown(0.5);
+
+          // Summary details
+          let manifestTotal = 0;
+          doc.fontSize(9).font('Helvetica-Bold');
+          doc.text('Carrier', 20, doc.y, { continued: true });
+          doc.text('Count', { align: 'right' });
+          doc.rect(20, doc.y, 248, 0.5).stroke();
+          doc.moveDown(0.2);
+
+          doc.font('Helvetica').fontSize(9);
+          summary.forEach(row => {
+            const carrierName = (row.carrier_name || 'Unknown').replace(/Shipway\s*/gi, '');
+            doc.text(carrierName, 20, doc.y, { continued: true });
+            doc.text(row.order_count.toString(), { align: 'right' });
+            manifestTotal += parseInt(row.order_count);
+          });
+
+          doc.moveDown(0.5);
+          doc.rect(20, doc.y, 248, 1).fill('#000000');
+          doc.moveDown(0.5);
+          doc.fontSize(11).font('Helvetica-Bold').text(`Total Orders: ${manifestTotal}`, { align: 'right' });
+
+          doc.moveDown(1);
+          doc.fontSize(8).font('Helvetica').text(`Date: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`, { align: 'left' });
+          doc.text(`WH ID: ${vendorWarehouseId}`, { align: 'left' });
+
+          // Signature Area
+          doc.moveDown(2);
+          doc.rect(20, doc.y, 100, 0.5).stroke();
+          doc.fontSize(8).text('Warehouse Sign', 20, doc.y + 5);
+
+          doc.rect(168, doc.y - 12.5, 100, 0.5).stroke();
+          doc.text('Courier Sign', 168, doc.y + 5);
+
+          storeTotal += manifestTotal;
+          continue; // Skip A4 logic
+        }
 
         // Determine payment type label and icon
         const paymentTypeLabel = payment_type === 'C' ? 'COD' : 'Pre-Paid';
