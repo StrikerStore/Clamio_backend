@@ -383,6 +383,80 @@ async function getRTOFocusOrders(req, res) {
 }
 
 /**
+ * Get critical orders (claims.is_critical = 1)
+ * These are orders that need urgent attention
+ * @param {Object} req - Express request
+ * @param {Object} res - Express response
+ */
+async function getCriticalOrders(req, res) {
+  try {
+    console.log('📊 Fetching critical orders...');
+
+    // Wait for MySQL initialization
+    await database.waitForMySQLInitialization();
+
+    if (!database.isMySQLAvailable()) {
+      return res.status(500).json({
+        success: false,
+        error: 'Database connection not available',
+        message: 'Database connection not available'
+      });
+    }
+
+    const { account_code } = req.query;
+    const orders = await database.getCriticalOrders(account_code || null);
+
+    console.log(`✅ Fetched ${orders.length} critical orders`);
+
+    // Process orders to match frontend expectations (same as orders tab)
+    // Map product_image to image field exactly like /api/orders/admin/all does
+    // Use customer_name_from_info (from customer_info table) if available, otherwise fall back to customer_name
+    const processedOrders = orders.map(order => ({
+      unique_id: order.unique_id,
+      order_id: order.order_id,
+      customer_name: order.customer_name_from_info || order.customer_name || 'N/A',
+      vendor_name: order.vendor_name || (order.claimed_by ? order.claimed_by : 'Unclaimed'),
+      product_name: order.product_name || 'N/A',
+      product_code: order.product_code || 'N/A',
+      quantity: order.quantity || '1',
+      status: order.status || 'unclaimed',
+      value: order.selling_price || '0',
+      priority: 'medium',
+      created_at: order.order_date || 'N/A',
+      claimed_at: order.claimed_at || null,
+      claimed_by: order.claimed_by || null,
+      image: order.product_image || order.image || '/placeholder.svg',
+      store_name: order.store_name || null,
+      store_status: 'active',
+      account_code: order.account_code || null,
+      awb: order.awb || null,
+      // Keep all original fields for compatibility
+      claims_status: order.claims_status,
+      is_critical: order.is_critical,
+      carrier_name: order.carrier_name,
+      current_shipment_status: order.current_shipment_status,
+      order_date: order.order_date
+    }));
+
+    res.json({
+      success: true,
+      data: {
+        totalOrders: processedOrders.length,
+        orders: processedOrders
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error fetching critical orders:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch critical orders',
+      message: error.message
+    });
+  }
+}
+
+/**
  * Update RTO focus orders status (batch update)
  * Updates order_status and sets is_focus = 0
  * @param {Object} req - Express request with orderIds and newStatus
@@ -605,6 +679,7 @@ async function addManualRTOEntry(req, res) {
 }
 
 module.exports = {
+  getCriticalOrders,
   getAggregatedInventory,
   uploadRTODetails,
   getRTOInventory,

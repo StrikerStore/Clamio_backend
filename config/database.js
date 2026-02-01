@@ -7091,6 +7091,88 @@ class Database {
   }
 
   /**
+   * Get all critical orders (claims.is_critical = 1)
+   * These are orders that need urgent attention
+   * @param {string} accountCode - Optional account code filter
+   * @returns {Promise<Array>} Array of critical orders with order details
+   */
+  async getCriticalOrders(accountCode = null) {
+    await this.waitForMySQLInitialization();
+    
+    // Use pool if available (preferred for parallel execution), otherwise fall back to connection
+    const db = this.mysqlPool || this.mysqlConnection;
+    if (!db) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      let query = `
+        SELECT 
+          o.order_id,
+          o.unique_id,
+          o.customer_name,
+          o.product_name,
+          o.product_code,
+          o.quantity,
+          o.selling_price,
+          o.order_date,
+          o.account_code,
+          c.status as claims_status,
+          c.claimed_by,
+          c.claimed_at,
+          c.is_critical,
+          l.awb,
+          l.carrier_name,
+          l.current_shipment_status,
+          s.store_name,
+          u.name as vendor_name,
+          p.image as product_image,
+          CASE 
+            WHEN l.current_shipment_status IS NOT NULL AND l.current_shipment_status != '' 
+            THEN l.current_shipment_status 
+            ELSE c.status 
+          END as status,
+          CASE
+            WHEN ci.billing_firstname IS NOT NULL AND ci.billing_firstname != '' 
+            THEN TRIM(CONCAT(COALESCE(ci.billing_firstname, ''), ' ', COALESCE(ci.billing_lastname, '')))
+            WHEN ci.shipping_firstname IS NOT NULL AND ci.shipping_firstname != ''
+            THEN TRIM(CONCAT(COALESCE(ci.shipping_firstname, ''), ' ', COALESCE(ci.shipping_lastname, '')))
+            WHEN o.customer_name IS NOT NULL AND o.customer_name != ''
+            THEN o.customer_name
+            ELSE NULL
+          END as customer_name_from_info
+        FROM claims c
+        INNER JOIN orders o ON c.order_unique_id = o.unique_id AND c.account_code = o.account_code
+        LEFT JOIN products p ON (
+          (REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id)
+          AND o.account_code = p.account_code
+        )
+        LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
+        LEFT JOIN store_info s ON o.account_code = s.account_code
+        LEFT JOIN users u ON c.claimed_by = u.warehouseId
+        LEFT JOIN customer_info ci ON o.order_id = ci.order_id AND o.account_code = ci.account_code
+        WHERE c.is_critical = 1
+      `;
+      const params = [];
+
+      if (accountCode) {
+        query += ` AND o.account_code = ?`;
+        params.push(accountCode);
+      }
+
+      query += ` ORDER BY o.order_date ASC, o.order_id`;
+
+      const [rows] = await db.execute(query, params);
+      return rows;
+    } catch (error) {
+      console.error('❌ [Critical Orders] Error getting critical orders:', error);
+      throw error;
+    }
+  }
+
+  /**
    * Update RTO focus orders status
    * Updates order_status and sets is_focus = 0 for the given order_ids
    * @param {string[]} orderIds - Array of order IDs to update

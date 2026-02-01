@@ -789,22 +789,6 @@ app.listen(PORT, async () => {
     }
   })();
 
-  // Run Claims Criticality update once on startup
-  (async () => {
-    try {
-      console.log('[Claims Criticality] Running initial criticality update on startup...');
-      const autoReversalService = require('./services/autoReversalService');
-      const result = await autoReversalService.updateClaimsCriticality();
-      if (result.success) {
-        console.log(`[Claims Criticality] Startup update completed. Affected rows: ${result.data.affected_rows}`);
-      } else {
-        console.log(`[Claims Criticality] Startup update failed: ${result.message}`);
-      }
-    } catch (err) {
-      console.error('[Claims Criticality] Startup update error:', err.message);
-    }
-  })();
-
   // Run active orders tracking once immediately on startup, then process RTO inventory
   (async () => {
     try {

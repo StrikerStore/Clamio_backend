@@ -104,6 +104,18 @@ router.put(
 );
 
 /**
+ * @route   GET /api/admin/inventory/critical-orders
+ * @desc    Get critical orders (claims.is_critical = 1)
+ * @access  Admin, Superadmin
+ */
+router.get(
+  '/critical-orders',
+  authenticateBasicAuth,
+  requireAdminOrSuperadmin,
+  inventoryController.getCriticalOrders
+);
+
+/**
  * @route   GET /api/admin/inventory/rto-locations
  * @desc    Get distinct RTO warehouse locations for dropdown
  * @access  Admin, Superadmin
