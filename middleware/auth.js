@@ -79,8 +79,17 @@ const authenticateBasicAuth = async (req, res, next) => {
       });
     }
 
-    const credentials = decodeBasicAuth(authHeader);
+    let credentials = decodeBasicAuth(authHeader);
     if (!credentials) {
+      // Fallback: Check if the header itself is a valid vendor token (UUID)
+      // This supports existing vendor panel integrations that don't use Basic Auth yet
+      const user = await database.getUserByToken(authHeader);
+
+      if (user && user.status === 'active' && user.active_session === 'TRUE') {
+        req.user = user;
+        return next();
+      }
+
       return res.status(401).json({
         success: false,
         message: 'Invalid Basic Auth format'
@@ -214,13 +223,13 @@ const authenticateAdmin = async (req, res, next) => {
 const optionalAuth = (req, res, next) => {
   try {
     const authHeader = req.headers['authorization'];
-    
+
     if (authHeader && authHeader.startsWith('Basic ')) {
       const credentials = decodeBasicAuth(authHeader);
       if (credentials) {
         const { email, password } = credentials;
         const user = database.getUserByEmail(email);
-        
+
         if (user && user.status === 'active' && bcrypt.compareSync(password, user.password)) {
           req.user = user;
         }
@@ -256,7 +265,7 @@ const rateLimit = (maxAttempts = 5, windowMs = 15 * 60 * 1000) => {
     }
 
     const currentAttempts = attempts.get(key) || [];
-    
+
     if (currentAttempts.length >= maxAttempts) {
       return res.status(429).json({
         success: false,
@@ -292,11 +301,11 @@ module.exports = {
   decodeBasicAuth,
   encodeBasicAuth,
   authenticateBasicAuth,
-  
+
   // Password functions
   hashPassword,
   comparePassword,
-  
+
   // Authorization functions
   authorizeRoles,
   requireSuperadmin,
@@ -307,10 +316,10 @@ module.exports = {
   authenticateSuperAdmin,
   authenticateAdmin,
   optionalAuth,
-  
+
   // Rate limiting
   rateLimit,
-  
+
   // JWT functions (for backward compatibility)
   generateToken,
   verifyToken,

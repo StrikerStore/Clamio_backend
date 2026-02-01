@@ -2591,7 +2591,7 @@ router.post('/download-label', async (req, res) => {
     console.log('🔍 DOWNLOAD LABEL DEBUG:');
     console.log('  - Token received:', token ? token.substring(0, 20) + '...' : 'null');
 
-    vendor = await database.getUserByToken(token);
+    vendor = req.user || await database.getUserByToken(token);
 
     if (!vendor || vendor.active_session !== 'TRUE') {
       console.log('❌ VENDOR NOT FOUND OR INACTIVE ', vendor);
@@ -4484,7 +4484,7 @@ router.post('/bulk-download-labels', async (req, res) => {
       return res.status(500).json({ success: false, message: 'Database connection not available' });
     }
 
-    const vendor = await database.getUserByToken(token);
+    const vendor = req.user || await database.getUserByToken(token);
 
     if (!vendor || vendor.active_session !== 'TRUE') {
       console.log(`❌ [${batchId}] VENDOR NOT FOUND OR INACTIVE`, vendor);
@@ -4876,7 +4876,7 @@ router.post('/bulk-download-labels-merge', async (req, res) => {
     }
 
     // Verify vendor token
-    const vendor = await database.getUserByToken(token);
+    const vendor = req.user || await database.getUserByToken(token);
 
     if (!vendor || vendor.active_session !== 'TRUE') {
       console.log('❌ VENDOR NOT FOUND OR INACTIVE');
@@ -4991,7 +4991,7 @@ router.post('/download-pdf', async (req, res) => {
       return res.status(500).json({ success: false, message: 'Database connection not available' });
     }
 
-    const vendor = await database.getUserByToken(token);
+    const vendor = req.user || await database.getUserByToken(token);
 
     if (!vendor || vendor.active_session !== 'TRUE') {
       console.log('❌ VENDOR NOT FOUND OR INACTIVE ', vendor);
@@ -5300,7 +5300,7 @@ router.post('/mark-ready', async (req, res) => {
       return res.status(500).json({ success: false, message: 'Database connection not available' });
     }
 
-    const vendor = await database.getUserByToken(token);
+    const vendor = req.user || await database.getUserByToken(token);
 
     if (!vendor || vendor.active_session !== 'TRUE') {
       console.log('❌ VENDOR NOT FOUND OR INACTIVE ', vendor);
@@ -5451,7 +5451,7 @@ router.post('/bulk-mark-ready', async (req, res) => {
       return res.status(500).json({ success: false, message: 'Database connection not available' });
     }
 
-    const vendor = await database.getUserByToken(token);
+    const vendor = req.user || await database.getUserByToken(token);
 
     if (!vendor || vendor.active_session !== 'TRUE') {
       console.log('❌ VENDOR NOT FOUND OR INACTIVE ', vendor);
@@ -5742,7 +5742,7 @@ router.post('/refresh', async (req, res) => {
       return res.status(500).json({ success: false, message: 'Database connection not available' });
     }
 
-    const vendor = await database.getUserByToken(token);
+    const vendor = req.user || await database.getUserByToken(token);
 
     if (!vendor || vendor.active_session !== 'TRUE') {
       console.log('❌ VENDOR NOT FOUND OR INACTIVE ', vendor);
@@ -5836,7 +5836,7 @@ router.post('/reverse', async (req, res) => {
       return res.status(500).json({ success: false, message: 'Database connection not available' });
     }
 
-    const vendor = await database.getUserByToken(token);
+    const vendor = req.user || await database.getUserByToken(token);
 
     if (!vendor || vendor.active_session !== 'TRUE') {
       console.log('❌ VENDOR NOT FOUND OR INACTIVE ', vendor);
@@ -6062,7 +6062,7 @@ router.post('/reverse-grouped', async (req, res) => {
       return res.status(500).json({ success: false, message: 'Database connection not available' });
     }
 
-    const vendor = await database.getUserByToken(token);
+    const vendor = req.user || await database.getUserByToken(token);
 
     if (!vendor || vendor.active_session !== 'TRUE') {
       console.log('❌ VENDOR NOT FOUND OR INACTIVE ', vendor);
@@ -6353,7 +6353,7 @@ router.post('/download-manifest-summary', async (req, res) => {
       return res.status(500).json({ success: false, message: 'Database connection not available' });
     }
 
-    const vendor = await database.getUserByToken(token);
+    const vendor = req.user || await database.getUserByToken(token);
 
     if (!vendor || vendor.active_session !== 'TRUE') {
       console.log('❌ VENDOR NOT FOUND OR INACTIVE');
