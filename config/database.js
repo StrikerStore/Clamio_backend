@@ -72,6 +72,7 @@ class Database {
       await this.createClaimsTable();
       await this.createNotificationsTable();
       await this.createWhMappingTable();
+      await this.createCustomerMessageTrackingTable();
       this.mysqlInitialized = true;
     } catch (error) {
       console.error('❌ MySQL connection pool failed:', error.message);
@@ -1266,6 +1267,35 @@ class Database {
 
     } catch (error) {
       console.error('❌ Error migrating labels data:', error.message);
+    }
+  }
+
+  /**
+   * Create customer_message_tracking table for tracking customer message status
+   */
+  async createCustomerMessageTrackingTable() {
+    if (!this.mysqlConnection) return;
+
+    try {
+      console.log('🔄 Creating customer_message_tracking table...');
+
+      const createTableQuery = `
+        CREATE TABLE IF NOT EXISTS customer_message_tracking (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          order_id VARCHAR(100) NOT NULL,
+          account_code VARCHAR(50) NOT NULL,
+          message_status VARCHAR(100) NOT NULL,
+          sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          INDEX idx_order_account (order_id, account_code),
+          INDEX idx_sent_at (sent_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+      `;
+
+      await this.mysqlConnection.execute(createTableQuery);
+      console.log('✅ customer_message_tracking table created/verified');
+    } catch (error) {
+      console.error('❌ Error creating customer_message_tracking table:', error.message);
     }
   }
 
@@ -7991,6 +8021,143 @@ class Database {
       return rows;
     } catch (error) {
       console.error('Error in getVendorHandoverTrend:', error);
+      throw error;
+    }
+  }
+
+  // ==================== CUSTOMER MESSAGE TRACKING METHODS ====================
+
+  /**
+   * Insert a new customer message tracking record
+   * @param {string} orderId - Order ID
+   * @param {string} accountCode - Account code
+   * @param {string} messageStatus - Message status (e.g., 'sent', 'pending', 'failed')
+   * @returns {Promise<Object>} Inserted record
+   */
+  async insertCustomerMessageTracking(orderId, accountCode, messageStatus) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      const [result] = await this.mysqlConnection.execute(
+        `INSERT INTO customer_message_tracking (order_id, account_code, message_status, sent_at)
+         VALUES (?, ?, ?, NOW())`,
+        [orderId, accountCode, messageStatus]
+      );
+
+      return {
+        id: result.insertId,
+        order_id: orderId,
+        account_code: accountCode,
+        message_status: messageStatus,
+        sent_at: new Date()
+      };
+    } catch (error) {
+      console.error('Error inserting customer message tracking:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get latest message status for multiple orders (bulk fetch)
+   * @param {Array<{order_id: string, account_code: string}>} orderAccountPairs - Array of order/account pairs
+   * @returns {Promise<Map>} Map of order_id+account_code -> latest message_status
+   */
+  async getLatestMessageStatusByOrders(orderAccountPairs) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    if (!orderAccountPairs || orderAccountPairs.length === 0) {
+      return new Map();
+    }
+
+    try {
+      // Build WHERE clause for all order/account combinations
+      const conditions = orderAccountPairs.map(() => '(order_id = ? AND account_code = ?)').join(' OR ');
+      const params = orderAccountPairs.flatMap(pair => [pair.order_id, pair.account_code]);
+
+      const query = `
+        SELECT 
+          cmt1.order_id,
+          cmt1.account_code,
+          cmt1.message_status,
+          cmt1.sent_at
+        FROM customer_message_tracking cmt1
+        INNER JOIN (
+          SELECT order_id, account_code, MAX(sent_at) as max_sent_at
+          FROM customer_message_tracking
+          WHERE ${conditions}
+          GROUP BY order_id, account_code
+        ) cmt2 
+        ON cmt1.order_id = cmt2.order_id 
+        AND cmt1.account_code = cmt2.account_code 
+        AND cmt1.sent_at = cmt2.max_sent_at
+      `;
+
+      const [rows] = await this.mysqlConnection.execute(query, params);
+
+      // Create map with composite key
+      const messageStatusMap = new Map();
+      rows.forEach(row => {
+        const key = `${row.order_id}|${row.account_code}`;
+        messageStatusMap.set(key, row.message_status);
+      });
+
+      return messageStatusMap;
+    } catch (error) {
+      console.error('Error getting latest message status:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get utility parameter value from utility table
+   * @param {string} parameter - Parameter name
+   * @returns {Promise<string|null>} Parameter value or null if not found
+   */
+  async getUtilityValue(parameter) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      const [rows] = await this.mysqlConnection.execute(
+        'SELECT value FROM utility WHERE parameter = ?',
+        [parameter]
+      );
+
+      return rows.length > 0 ? rows[0].value : null;
+    } catch (error) {
+      console.error('Error getting utility value:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Set utility parameter value in utility table (insert or update)
+   * @param {string} parameter - Parameter name
+   * @param {string} value - Parameter value
+   * @param {string} createdBy - Who is setting this value (default: 'system')
+   * @returns {Promise<boolean>} True if successful
+   */
+  async setUtilityValue(parameter, value, createdBy = 'system') {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      await this.mysqlConnection.execute(
+        `INSERT INTO utility (parameter, value, created_by)
+         VALUES (?, ?, ?)
+         ON DUPLICATE KEY UPDATE value = ?, modified_at = NOW()`,
+        [parameter, value, createdBy, value]
+      );
+
+      return true;
+    } catch (error) {
+      console.error('Error setting utility value:', error);
       throw error;
     }
   }

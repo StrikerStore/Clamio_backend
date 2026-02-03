@@ -6624,7 +6624,7 @@ router.post('/download-manifest-summary', async (req, res) => {
 
       if (isThermal) {
         console.log(`📄 [THERMAL] Processing store: ${storeName} with ${storeData.manifests.length} manifest(s)`);
-        
+
         // Add new page for each store (except first store)
         if (storeIndex > 0) {
           doc.addPage({ size: [288, 432], margin: { top: 20, left: 20, right: 20, bottom: 5 } });
@@ -6670,7 +6670,7 @@ router.post('/download-manifest-summary', async (req, res) => {
           doc.text(`Address: ${vendorAddress}`, leftMarginRef, currentY, { width: 248 });
           currentY += 10; // Move to next line
         }
-        
+
         // Add spacing after address before first manifest
         currentY += 15; // Increased spacing for better readability
         doc.y = currentY;
@@ -6691,7 +6691,7 @@ router.post('/download-manifest-summary', async (req, res) => {
           const manifestHeaderHeight = 12; // Header text + spacing
           const tableHeaderHeight = 15;
           let tableRowsHeight = 0;
-          
+
           summary.forEach((row) => {
             const orderIdsText = row.order_ids || '';
             const rowHeight = calculateRowHeight(orderIdsText, 105 - 6, 7);
@@ -6720,7 +6720,7 @@ router.post('/download-manifest-summary', async (req, res) => {
           doc.fontSize(9).font('Helvetica-Bold').fillColor('#000000');
           const manifestHeaderText = `${paymentTypeLabel} Manifest (Manifest ID - ${manifest_id})`;
           doc.text(manifestHeaderText, leftMarginRef, currentY, { width: 248 });
-          
+
           // Move Y position below header for table
           currentY += 12;
           doc.y = currentY;
@@ -6749,11 +6749,11 @@ router.post('/download-manifest-summary', async (req, res) => {
           const orderIdsWidth = Math.max(80, remainingWidth); // Gets extra width from signature reduction
 
           // Detailed Table for Thermal with dynamic column widths
-          const colWidths = { 
-            carrier: dynamicCarrierWidth, 
-            orders: fixedWidths.orders, 
-            orderIds: orderIdsWidth, 
-            signature: fixedWidths.signature 
+          const colWidths = {
+            carrier: dynamicCarrierWidth,
+            orders: fixedWidths.orders,
+            orderIds: orderIdsWidth,
+            signature: fixedWidths.signature
           };
           doc.fontSize(7).font('Helvetica-Bold').fillColor('#000000'); // Reduced from 8 to 7
 
@@ -7125,6 +7125,133 @@ router.get('/rto-inventory/status', requireAdminOrSuperadmin, async (req, res) =
     return res.status(500).json({
       success: false,
       message: 'Failed to get RTO inventory status',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * @route   POST /api/orders/message-tracking
+ * @desc    Record customer message tracking status
+ * @access  Authenticated (requires basic auth)
+ */
+router.post('/message-tracking', async (req, res) => {
+  try {
+    const { order_id, account_code, message_status } = req.body;
+
+    // Validation
+    if (!order_id || !account_code || !message_status) {
+      return res.status(400).json({
+        success: false,
+        message: 'order_id, account_code, and message_status are required'
+      });
+    }
+
+    const database = require('../config/database');
+    await database.waitForMySQLInitialization();
+
+    if (!database.isMySQLAvailable()) {
+      return res.status(500).json({
+        success: false,
+        message: 'Database connection not available'
+      });
+    }
+
+    // Insert tracking record
+    const result = await database.insertCustomerMessageTracking(
+      order_id,
+      account_code,
+      message_status
+    );
+
+    console.log(`✅ [Message Tracking] Recorded status "${message_status}" for order ${order_id} (${account_code})`);
+
+    return res.json({
+      success: true,
+      message: 'Message tracking record created',
+      data: result
+    });
+
+  } catch (error) {
+    console.error('❌ POST MESSAGE TRACKING ERROR:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to record message tracking',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * @route   POST /api/orders/trigger-webhook
+ * @desc    Manual trigger for webhook (testing only)
+ * @access  Admin/Superadmin only
+ */
+router.post('/trigger-webhook', requireAdminOrSuperadmin, async (req, res) => {
+  try {
+    const { order_ids } = req.body;
+
+    if (!order_ids || !Array.isArray(order_ids) || order_ids.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'order_ids array is required'
+      });
+    }
+
+    const database = require('../config/database');
+    await database.waitForMySQLInitialization();
+
+    if (!database.isMySQLAvailable()) {
+      return res.status(500).json({
+        success: false,
+        message: 'Database connection not available'
+      });
+    }
+
+    // Get order details for the specified order_ids
+    const placeholders = order_ids.map(() => '?').join(',');
+    const [orders] = await database.mysqlConnection.execute(
+      `SELECT l.order_id, l.account_code, l.current_shipment_status
+       FROM labels l
+       WHERE l.order_id IN (${placeholders})`,
+      order_ids
+    );
+
+    if (orders.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'No orders found'
+      });
+    }
+
+    // Create mock status changes for testing
+    const statusChangedOrders = orders.map(order => ({
+      order_id: order.order_id,
+      account_code: order.account_code,
+      new_status: order.current_shipment_status,
+      old_status: 'Testing - Manual Trigger'
+    }));
+
+    // Trigger webhook
+    const webhookService = require('../services/webhookService');
+    const webhookResult = await webhookService.sendStatusUpdateWebhook(statusChangedOrders);
+
+    console.log(`✅ [Manual Webhook Trigger] Webhook triggered for ${orders.length} orders`);
+
+    return res.json({
+      success: true,
+      message: 'Webhook triggered successfully',
+      data: {
+        orders: statusChangedOrders,
+        webhookResult: webhookResult
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ TRIGGER WEBHOOK ERROR:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to trigger webhook',
       error: error.message
     });
   }

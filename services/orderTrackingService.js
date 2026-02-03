@@ -57,6 +57,7 @@ class OrderTrackingService {
 
       let successCount = 0;
       let errorCount = 0;
+      const statusChangedOrders = []; // Track orders with status changes
 
       // Group orders by account_code (each store has different auth_token)
       const ordersByStore = new Map();
@@ -99,6 +100,15 @@ class OrderTrackingService {
             results.forEach((result, index) => {
               if (result.status === 'fulfilled') {
                 successCount++;
+                // Collect orders with status changes
+                if (result.value.statusChanged) {
+                  statusChangedOrders.push({
+                    order_id: result.value.order_id,
+                    account_code: result.value.account_code,
+                    new_status: result.value.currentStatus,
+                    old_status: result.value.oldStatus
+                  });
+                }
               } else {
                 errorCount++;
                 console.error(`❌ [Active Tracking] Failed to process order ${batch[index].order_id}:`, result.reason?.message);
@@ -130,6 +140,21 @@ class OrderTrackingService {
       } catch (validationError) {
         console.error('[Handover/Tracking Validation] Validation check failed:', validationError.message);
         // Don't fail the entire sync if validation fails
+      }
+
+      // Send webhook for orders with status changes
+      if (statusChangedOrders.length > 0) {
+        try {
+          console.log(`📤 [Webhook] Triggering webhook for ${statusChangedOrders.length} orders with status changes...`);
+          const webhookService = require('./webhookService');
+          const webhookResult = await webhookService.sendStatusUpdateWebhook(statusChangedOrders);
+          console.log(`✅ [Webhook] ${webhookResult.success ? 'Successfully sent' : 'Failed to send'}: ${webhookResult.message}`);
+        } catch (webhookError) {
+          console.error('❌ [Webhook] Failed to send webhook:', webhookError.message);
+          // Don't fail the entire sync if webhook fails
+        }
+      } else {
+        console.log('📤 [Webhook] No status changes detected, skipping webhook');
       }
 
       return {
@@ -452,6 +477,15 @@ class OrderTrackingService {
         }
       }
 
+      // Get current status from labels table to detect changes
+      const [currentLabel] = await database.mysqlConnection.execute(
+        'SELECT current_shipment_status FROM labels WHERE order_id = ? AND account_code = ?',
+        [orderId, accountCode]
+      );
+
+      const oldStatus = currentLabel.length > 0 ? currentLabel[0].current_shipment_status : null;
+      const statusChanged = oldStatus && oldStatus !== normalizedLatestStatus;
+
       await database.updateLabelsShipmentStatus(orderId, accountCode, normalizedLatestStatus, isHandover, handoverTimestamp);
 
       // Check if status is RTO-related and store in RTO tracking table
@@ -493,7 +527,11 @@ class OrderTrackingService {
         eventsCount: normalizedTrackingEvents.length,
         orderType: actualOrderType,
         currentStatus: normalizedLatestStatus,
-        isHandover: isHandover
+        isHandover: isHandover,
+        statusChanged: statusChanged,
+        oldStatus: oldStatus,
+        order_id: orderId,
+        account_code: accountCode
       };
 
     } catch (error) {
