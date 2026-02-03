@@ -206,6 +206,7 @@ class Database {
           { raw: "Pickup Failed", renamed: "Pickup Failed", color: "red", is_handover: 0 },
           { raw: "Shipment Booked", renamed: "Shipment Booked", color: "blue", is_handover: 0 },
           { raw: "SHPFR3", renamed: "Pickup Failed", color: "red", is_handover: 0 },
+          { raw: "SHPFR11", renamed: "Manifest Uploaded", color: "blue", is_handover: 0 },
           { raw: "CROV", renamed: "Delivery Attempted", color: "yellow", is_handover: 1 },
           { raw: "DEL", renamed: "Delivered", color: "green", is_handover: 1 },
           { raw: "Delivered", renamed: "Delivered", color: "green", is_handover: 1 },
@@ -224,7 +225,8 @@ class Database {
           { raw: "SHNDR16", renamed: "Consignee Unavailable", color: "red", is_handover: 1 },
           { raw: "SHNDR4", renamed: "Delivery Reattempt", color: "yellow", is_handover: 1 },
           { raw: "SHNDR6", renamed: "Consignee Refused", color: "red", is_handover: 1 },
-          { raw: "UNDELIVERED", renamed: "Undelivered", color: "red", is_handover: 1 }
+          { raw: "UNDELIVERED", renamed: "Undelivered", color: "red", is_handover: 1 },
+          { raw: "PICKED UP", renamed: "Picked Up", color: "orange", is_handover: 1 },
         ];
 
         await this.mysqlConnection.execute(
@@ -7098,7 +7100,7 @@ class Database {
    */
   async getCriticalOrders(accountCode = null) {
     await this.waitForMySQLInitialization();
-    
+
     // Use pool if available (preferred for parallel execution), otherwise fall back to connection
     const db = this.mysqlPool || this.mysqlConnection;
     if (!db) {
