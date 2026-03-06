@@ -3447,142 +3447,199 @@ async function generateFormattedLabelPDF(shippingUrl, format) {
 
 /**
  * Handle order cloning (Condition 2: Clone required)
+ *
+ * TRANSACTION LOG APPROACH:
+ *  - Before touching Shipway, write intent to clone_transactions (status = 'initiated').
+ *  - After each step group succeeds, advance the status checkpoint.
+ *  - On retry, read the stored clone_order_id and resume from the last checkpoint.
+ *  - This prevents duplicate clones: retries NEVER call generateUniqueCloneId() again.
  */
 async function handleOrderCloning(originalOrderId, claimedProducts, allOrderProducts, vendor, forceCloneSuffix = null) {
   const MAX_ATTEMPTS = 5;
-  let cloneOrderId;
+  const accountCode = claimedProducts[0]?.account_code;
 
-  console.log('🚀 Starting updated clone process...');
+  console.log('🚀 Starting clone process with transaction log...');
   console.log(`📊 Input Analysis:`);
   console.log(`  - Original Order ID: ${originalOrderId}`);
   console.log(`  - Total products in order: ${allOrderProducts.length}`);
   console.log(`  - Products claimed by vendor: ${claimedProducts.length}`);
   console.log(`  - Vendor warehouse ID: ${vendor.warehouseId}`);
-  if (forceCloneSuffix) {
-    console.log(`  - Forced Clone Suffix: ${forceCloneSuffix} (Retry attempt to avoid conflict)`);
+
+  // ============================================================================
+  // PHASE 1: CHECK FOR EXISTING TRANSACTION (resume or new?)
+  // ============================================================================
+  let tx = null;
+  let inputData = null;
+  let skipToStep = 1;
+
+  // Only query the transaction log if we are not in a forced suffix scenario
+  if (!forceCloneSuffix) {
+    try {
+      tx = await findExistingCloneTransaction(originalOrderId, vendor.warehouseId, accountCode);
+    } catch (txLookupError) {
+      console.warn(`⚠️ Could not query clone_transactions (non-blocking): ${txLookupError.message}`);
+    }
   }
 
-  try {
-    // ============================================================================
-    // STEP 0: DATA PREPARATION & CONSISTENCY
-    // ============================================================================
-    console.log('\n📋 STEP 0: Capturing and freezing input data...');
+  if (tx) {
+    // ─── RESUME PATH ────────────────────────────────────────────────────────
+    console.log(`\n🔄 RESUMING existing clone transaction #${tx.id}`);
+    console.log(`  - Stored clone_order_id: ${tx.clone_order_id}`);
+    console.log(`  - Last saved status:     ${tx.status}`);
 
-    const inputData = await prepareInputData(originalOrderId, claimedProducts, allOrderProducts, vendor, forceCloneSuffix);
-    cloneOrderId = inputData.cloneOrderId;
-
-    console.log(`✅ Input data captured and frozen:`);
-    console.log(`  - Clone Order ID: ${cloneOrderId}`);
+    // Rebuild inputData using the STORED clone_order_id — do NOT generate a new one
+    console.log('\n📋 STEP 0: Capturing and freezing input data (resume mode)...');
+    inputData = await prepareInputData(originalOrderId, claimedProducts, allOrderProducts, vendor, null);
+    inputData.cloneOrderId = tx.clone_order_id; // ← THE KEY: use stored ID, not a new one
+    console.log(`✅ STEP 0 COMPLETED: Input data frozen, using stored clone ID: ${inputData.cloneOrderId}`);
     console.log(`  - Claimed products: ${inputData.claimedProducts.length}`);
     console.log(`  - Remaining products: ${inputData.remainingProducts.length}`);
     console.log(`  - Data timestamp: ${inputData.timestamp}`);
 
-    // ============================================================================
-    // STEP 1: CREATE CLONE ORDER (NO LABEL)
-    // ============================================================================
-    console.log('\n🔧 STEP 1: Creating clone order (without label)...');
+    switch (tx.status) {
+      case 'initiated': skipToStep = 1; break; // Nothing sent to Shipway yet
+      case 'clone_created': skipToStep = 3; break; // Clone in Shipway, original not updated
+      case 'original_updated': skipToStep = 5; break; // Shipway done, local DB not updated
+      case 'db_updated': skipToStep = 6; break; // DB done, label not generated
+      default: skipToStep = 1;
+    }
+    console.log(`  - Resuming from Step ${skipToStep}`);
 
-    await retryOperation(
-      (data) => createCloneOrderOnly(data),
-      MAX_ATTEMPTS,
-      'Create clone order',
-      inputData
-    );
+  } else {
+    // ─── NEW PATH ────────────────────────────────────────────────────────────
+    console.log('\n🆕 No existing transaction found — starting fresh clone');
 
-    console.log('✅ STEP 1 COMPLETED: Clone order created successfully');
+    console.log('\n📋 STEP 0: Capturing and freezing input data...');
+    inputData = await prepareInputData(originalOrderId, claimedProducts, allOrderProducts, vendor, forceCloneSuffix);
+    console.log(`✅ STEP 0 COMPLETED: Input data captured and frozen`);
+    console.log(`  - Clone Order ID: ${inputData.cloneOrderId}`);
+    console.log(`  - Claimed products: ${inputData.claimedProducts.length}`);
+    console.log(`  - Remaining products: ${inputData.remainingProducts.length}`);
+    console.log(`  - Data timestamp: ${inputData.timestamp}`);
 
-    // ============================================================================
-    // STEP 2: VERIFY CLONE CREATION
-    // ============================================================================
-    console.log('\n🔍 STEP 2: Verifying clone creation...');
+    // Record intent BEFORE touching Shipway so retries always find this record
+    try {
+      tx = await createCloneTransaction({
+        original_order_id: originalOrderId,
+        clone_order_id: inputData.cloneOrderId,
+        account_code: accountCode,
+        vendor_warehouse_id: vendor.warehouseId,
+        claimed_product_unique_ids: JSON.stringify(claimedProducts.map(p => p.unique_id)),
+        claimed_product_codes: JSON.stringify(claimedProducts.map(p => p.product_code))
+      });
+    } catch (txCreateError) {
+      // If we can't write the transaction log, still proceed — worst case is the
+      // old behaviour (orphan possible on crash), but we don't block the vendor.
+      console.warn(`⚠️ Could not create clone_transaction record (non-blocking): ${txCreateError.message}`);
+      tx = { id: null, status: 'initiated' };
+    }
 
-    await retryOperation(
-      (data) => verifyCloneExists(data),
-      MAX_ATTEMPTS,
-      'Verify clone creation',
-      inputData
-    );
+    skipToStep = 1;
+  }
 
-    console.log('✅ STEP 2 COMPLETED: Clone creation verified');
+  const cloneOrderId = inputData.cloneOrderId;
 
-    // ============================================================================
-    // STEP 3: UPDATE ORIGINAL ORDER
-    // ============================================================================
-    console.log('\n📝 STEP 3: Updating original order (removing claimed products)...');
+  // ============================================================================
+  // PHASE 2: EXECUTE STEPS — skip steps already completed in a previous attempt
+  // ============================================================================
+  try {
+    // ── STEPS 1 & 2: Create clone in Shipway + verify ────────────────────────
+    if (skipToStep <= 1) {
+      console.log('\n🔧 STEP 1: Creating clone order (without label)...');
+      await retryOperation(
+        (data) => createCloneOrderOnly(data),
+        MAX_ATTEMPTS,
+        'Create clone order',
+        inputData
+      );
+      console.log('✅ STEP 1 COMPLETED: Clone order created successfully');
 
-    await retryOperation(
-      (data) => updateOriginalOrder(data),
-      MAX_ATTEMPTS,
-      'Update original order',
-      inputData
-    );
+      console.log('\n🔍 STEP 2: Verifying clone creation...');
+      await retryOperation(
+        (data) => verifyCloneExists(data),
+        MAX_ATTEMPTS,
+        'Verify clone creation',
+        inputData
+      );
+      console.log('✅ STEP 2 COMPLETED: Clone creation verified');
 
-    console.log('✅ STEP 3 COMPLETED: Original order updated');
+      // Checkpoint: clone exists in Shipway
+      if (tx.id) await updateCloneTransactionStatus(tx.id, 'clone_created');
+    } else {
+      console.log(`\n⏭️  SKIPPING Steps 1-2 (already done — status was '${tx.status}')`);
+    }
 
-    // ============================================================================
-    // STEP 4: VERIFY ORIGINAL ORDER UPDATE
-    // ============================================================================
-    console.log('\n🔍 STEP 4: Verifying original order update...');
+    // ── STEPS 3 & 4: Update + verify original order in Shipway ───────────────
+    if (skipToStep <= 3) {
+      console.log('\n📝 STEP 3: Updating original order (removing claimed products)...');
+      await retryOperation(
+        (data) => updateOriginalOrder(data),
+        MAX_ATTEMPTS,
+        'Update original order',
+        inputData
+      );
+      console.log('✅ STEP 3 COMPLETED: Original order updated');
 
-    await retryOperation(
-      (data) => verifyOriginalOrderUpdate(data),
-      MAX_ATTEMPTS,
-      'Verify original order update',
-      inputData
-    );
+      console.log('\n🔍 STEP 4: Verifying original order update...');
+      await retryOperation(
+        (data) => verifyOriginalOrderUpdate(data),
+        MAX_ATTEMPTS,
+        'Verify original order update',
+        inputData
+      );
+      console.log('✅ STEP 4 COMPLETED: Original order update verified');
 
-    console.log('✅ STEP 4 COMPLETED: Original order update verified');
+      // Checkpoint: original order updated in Shipway
+      if (tx.id) await updateCloneTransactionStatus(tx.id, 'original_updated');
+    } else {
+      console.log(`\n⏭️  SKIPPING Steps 3-4 (already done — status was '${tx.status}')`);
+    }
 
-    // ============================================================================
-    // STEP 5: UPDATE LOCAL DATABASE (AFTER CLONE CREATION)
-    // ============================================================================
-    console.log('\n💾 STEP 5: Updating local database after clone creation...');
+    // ── STEP 5: Update local database ────────────────────────────────────────
+    if (skipToStep <= 5) {
+      console.log('\n💾 STEP 5: Updating local database after clone creation...');
+      await retryOperation(
+        (data) => updateLocalDatabaseAfterClone(data),
+        MAX_ATTEMPTS,
+        'Update local database after clone',
+        inputData
+      );
+      console.log('✅ STEP 5 COMPLETED: Local database updated');
 
-    await retryOperation(
-      (data) => updateLocalDatabaseAfterClone(data),
-      MAX_ATTEMPTS,
-      'Update local database after clone',
-      inputData
-    );
+      // Checkpoint: local DB reflects the clone
+      if (tx.id) await updateCloneTransactionStatus(tx.id, 'db_updated');
+    } else {
+      console.log(`\n⏭️  SKIPPING Step 5 (already done — status was '${tx.status}')`);
+    }
 
-    console.log('✅ STEP 5 COMPLETED: Local database updated');
-
-    // ============================================================================
-    // STEP 6: GENERATE LABEL FOR CLONE
-    // ============================================================================
-    console.log('\n🏷️ STEP 6: Generating label for clone order...');
-
+    // ── STEPS 6 & 7: Generate label + mark as downloaded ─────────────────────
+    console.log('\n🏷️  STEP 6: Generating label for clone order...');
     const labelResponse = await retryOperation(
       (data) => generateLabelForClone(data),
       MAX_ATTEMPTS,
       'Generate clone order label',
       inputData
     );
-
     console.log('✅ STEP 6 COMPLETED: Label generated successfully');
 
-    // ============================================================================
-    // STEP 7: MARK LABEL AS DOWNLOADED AND STORE IN LABELS TABLE
-    // ============================================================================
     console.log('\n✅ STEP 7: Marking label as downloaded and caching URL...');
-
     await retryOperation(
       (data) => markLabelAsDownloaded(data, labelResponse),
       MAX_ATTEMPTS,
       'Mark label as downloaded and cache URL',
       inputData
     );
-
     console.log('✅ STEP 7 COMPLETED: Label marked as downloaded and cached');
 
-    // ============================================================================
-    // STEP 8: RETURN SUCCESS
-    // ============================================================================
+    // Checkpoint: clone process fully complete
+    if (tx.id) await updateCloneTransactionStatus(tx.id, 'completed');
+
+    // ── STEP 8: Return success ────────────────────────────────────────────────
     console.log('\n🎉 STEP 8: Clone process completed successfully!');
     console.log(`  - Original Order ID: ${inputData.originalOrderId}`);
-    console.log(`  - Clone Order ID: ${cloneOrderId}`);
-    console.log(`  - Label URL: ${labelResponse.data.shipping_url}`);
-    console.log(`  - AWB: ${labelResponse.data.awb}`);
+    console.log(`  - Clone Order ID:    ${cloneOrderId}`);
+    console.log(`  - Label URL:         ${labelResponse.data.shipping_url}`);
+    console.log(`  - AWB:               ${labelResponse.data.awb}`);
 
     return {
       success: true,
@@ -3596,10 +3653,21 @@ async function handleOrderCloning(originalOrderId, claimedProducts, allOrderProd
     };
 
   } catch (error) {
-    console.error(`❌ Clone process failed after ${MAX_ATTEMPTS} attempts for each step:`, error);
+    // On failure: record the error but DO NOT change the status checkpoint.
+    // The status stays at the last successfully completed checkpoint so the
+    // next retry knows exactly where to resume from.
+    console.error(`❌ Clone process failed: ${error.message}`);
+    if (tx.id) {
+      try {
+        await updateCloneTransactionStatus(tx.id, tx.status, error.message);
+      } catch (txUpdateError) {
+        console.warn(`⚠️ Could not update transaction error state: ${txUpdateError.message}`);
+      }
+    }
     throw new Error(`Order cloning failed: ${error.message}`);
   }
 }
+
 
 /**
  * Helper Functions for Updated Clone Logic
@@ -3636,6 +3704,67 @@ async function retryOperation(operation, maxAttempts, stepName, inputData) {
   }
 
   throw lastError;
+}
+
+// ============================================================================
+// CLONE TRANSACTION LOG HELPERS
+// Bank-style transaction log to enable retry/resume on failure.
+// The clone_order_id is stored here so retries never generate a new clone ID.
+// ============================================================================
+
+/**
+ * Find an in-progress clone transaction for this order + vendor.
+ * Returns null if none found (first attempt) or all previous attempts completed/rolled back.
+ */
+async function findExistingCloneTransaction(originalOrderId, vendorWarehouseId, accountCode) {
+  const database = require('../config/database');
+  const [rows] = await database.mysqlConnection.execute(
+    `SELECT * FROM clone_transactions
+     WHERE original_order_id = ?
+       AND vendor_warehouse_id = ?
+       AND account_code = ?
+       AND status NOT IN ('completed', 'rolled_back')
+     ORDER BY created_at DESC LIMIT 1`,
+    [originalOrderId, vendorWarehouseId, accountCode]
+  );
+  return rows.length > 0 ? rows[0] : null;
+}
+
+/**
+ * Insert a new clone transaction record (status = 'initiated').
+ * Called BEFORE any Shipway API call so we always know the intended clone_order_id.
+ */
+async function createCloneTransaction(data) {
+  const database = require('../config/database');
+  const [result] = await database.mysqlConnection.execute(
+    `INSERT INTO clone_transactions
+     (original_order_id, clone_order_id, account_code, vendor_warehouse_id,
+      claimed_product_unique_ids, claimed_product_codes, status)
+     VALUES (?, ?, ?, ?, ?, ?, 'initiated')`,
+    [
+      data.original_order_id,
+      data.clone_order_id,
+      data.account_code,
+      data.vendor_warehouse_id,
+      data.claimed_product_unique_ids,
+      data.claimed_product_codes
+    ]
+  );
+  console.log(`📝 Clone transaction #${result.insertId} created for ${data.original_order_id} → ${data.clone_order_id}`);
+  return { id: result.insertId, ...data, status: 'initiated' };
+}
+
+/**
+ * Update the status of a clone transaction after each step completes.
+ * On failure the status is NOT changed — leaving it ready for the next retry.
+ */
+async function updateCloneTransactionStatus(txId, status, errorMessage = null) {
+  const database = require('../config/database');
+  await database.mysqlConnection.execute(
+    `UPDATE clone_transactions SET status = ?, error_message = ? WHERE id = ?`,
+    [status, errorMessage, txId]
+  );
+  console.log(`📝 Clone transaction #${txId}: status → '${status}'${errorMessage ? ` (error: ${errorMessage})` : ''}`);
 }
 
 // Step 0: Prepare and freeze input data

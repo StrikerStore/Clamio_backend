@@ -73,6 +73,7 @@ class Database {
       await this.createNotificationsTable();
       await this.createWhMappingTable();
       await this.createCustomerMessageTrackingTable();
+      await this.createCloneTransactionsTable();
       this.mysqlInitialized = true;
     } catch (error) {
       console.error('❌ MySQL connection pool failed:', error.message);
@@ -1296,6 +1297,52 @@ class Database {
       console.log('✅ customer_message_tracking table created/verified');
     } catch (error) {
       console.error('❌ Error creating customer_message_tracking table:', error.message);
+    }
+  }
+
+  /**
+   * Create clone_transactions table for tracking clone attempt state.
+   * Enables retry/resume: on failure, the next attempt reads the stored
+   * clone_order_id and picks up from where the previous attempt stopped.
+   */
+  async createCloneTransactionsTable() {
+    if (!this.mysqlConnection) return;
+
+    try {
+      console.log('🔄 Creating clone_transactions table...');
+
+      const createTableQuery = `
+        CREATE TABLE IF NOT EXISTS clone_transactions (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          original_order_id VARCHAR(100) NOT NULL,
+          clone_order_id VARCHAR(100) NOT NULL,
+          account_code VARCHAR(50) NOT NULL,
+          vendor_warehouse_id VARCHAR(50) NOT NULL,
+          claimed_product_unique_ids TEXT,
+          claimed_product_codes TEXT,
+          status ENUM(
+            'initiated',
+            'clone_created',
+            'original_updated',
+            'db_updated',
+            'completed',
+            'rolled_back'
+          ) DEFAULT 'initiated',
+          error_message TEXT,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+          INDEX idx_original_order (original_order_id),
+          INDEX idx_status (status),
+          INDEX idx_account_code (account_code),
+          INDEX idx_vendor (vendor_warehouse_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+      `;
+
+      await this.mysqlConnection.execute(createTableQuery);
+      console.log('✅ clone_transactions table created/verified');
+    } catch (error) {
+      console.error('❌ Error creating clone_transactions table:', error.message);
     }
   }
 
