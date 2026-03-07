@@ -7460,42 +7460,17 @@ class Database {
       // 2. Joins with products table
       // 3. Uses account_code priority for product name selection when multiple matches exist
       const query = `
-        WITH rto_with_base_sku AS (
+        WITH rto_with_products AS (
           SELECT 
             ri.id,
             ri.rto_wh,
             ri.product_code,
             ri.size,
             ri.quantity,
-            -- Remove "-{size}" suffix from product_code to get base SKU
-            CASE 
-              WHEN ri.size IS NOT NULL AND ri.size != '' 
-                   AND ri.product_code LIKE CONCAT('%-', ri.size)
-              THEN LEFT(ri.product_code, LENGTH(ri.product_code) - LENGTH(CONCAT('-', ri.size)))
-              ELSE ri.product_code
-            END as base_sku
-          FROM rto_inventory ri
-          WHERE ri.quantity > 0
-        ),
-        rto_with_products AS (
-          SELECT 
-            r.id,
-            r.rto_wh,
-            r.product_code,
-            r.size,
-            r.quantity,
-            r.base_sku,
             p.name as product_name,
             p.account_code,
-            -- Priority ranking: STRI=1, DRIB=2, JERS=3, others=4
-            CASE p.account_code
-              WHEN 'STRI' THEN 1
-              WHEN 'DRIB' THEN 2
-              WHEN 'JERS' THEN 3
-              ELSE 4
-            END as priority_rank,
             ROW_NUMBER() OVER (
-              PARTITION BY r.id 
+              PARTITION BY ri.id 
               ORDER BY 
                 CASE p.account_code
                   WHEN 'STRI' THEN 1
@@ -7504,8 +7479,9 @@ class Database {
                   ELSE 4
                 END
             ) as rn
-          FROM rto_with_base_sku r
-          LEFT JOIN products p ON r.base_sku = p.sku_id
+          FROM rto_inventory ri
+          LEFT JOIN products p ON ri.product_code = p.sku_id
+          WHERE ri.quantity > 0
         )
         SELECT 
           id,
@@ -7514,7 +7490,7 @@ class Database {
           size as Size,
           CAST(quantity AS SIGNED) as Quantity,
           product_code,
-          base_sku
+          product_code as base_sku
         FROM rto_with_products
         WHERE rn = 1
         ORDER BY rto_wh, Product_Name, size
@@ -7564,9 +7540,18 @@ class Database {
       // Process each order
       for (const order of unprocessedOrders) {
         try {
+          // Strip size suffix from product_code before storing
+          // e.g. "CLU-ROM-TH-25/26-PV-XL" with size "XL" → "CLU-ROM-TH-25/26-PV"
+          let cleanProductCode = order.product_code;
+          const orderSize = order.size;
+          if (orderSize && cleanProductCode && cleanProductCode.endsWith(`-${orderSize}`)) {
+            cleanProductCode = cleanProductCode.slice(0, -(orderSize.length + 1));
+            console.log(`  🔧 Stripped size from product_code: "${order.product_code}" → "${cleanProductCode}"`);
+          }
+
           await this.upsertRTOInventory(
             order.rto_wh,
-            order.product_code,
+            cleanProductCode,
             order.size,
             order.quantity || 1
           );

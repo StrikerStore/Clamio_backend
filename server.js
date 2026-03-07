@@ -791,6 +791,24 @@ app.listen(PORT, async () => {
     }
   })();
 
+  // Run one-time migration to fix product_code in rto_inventory (strip size suffix)
+  (async () => {
+    try {
+      const fixRtoProductCodes = require('./migrations/fixRtoInventoryProductCodes');
+      console.log('[Migration] Running RTO inventory product code fix...');
+      const result = await fixRtoProductCodes.run();
+      if (result.skipped) {
+        console.log('[Migration] RTO product code fix already completed, skipped.');
+      } else if (result.success) {
+        console.log(`[Migration] RTO product code fix completed. Updated: ${result.updatedCount}, Merged: ${result.mergedCount}`);
+      } else {
+        console.log(`[Migration] RTO product code fix failed: ${result.message}`);
+      }
+    } catch (err) {
+      console.error('[Migration] RTO product code fix error:', err.message);
+    }
+  })();
+
   // Run active orders tracking once immediately on startup, then process RTO inventory
   (async () => {
     try {

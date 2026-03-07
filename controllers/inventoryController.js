@@ -642,8 +642,8 @@ async function addManualRTOEntry(req, res) {
       });
     }
 
-    // Build the product_code by combining sku_id and size
-    const product_code = `${sku_id.trim()}-${size.trim()}`;
+    // Use sku_id directly as product_code (size is stored in its own column)
+    const product_code = sku_id.trim();
 
     console.log(`📦 Adding RTO entry: location=${location}, product_code=${product_code}, size=${size}, qty=${qty}`);
 
