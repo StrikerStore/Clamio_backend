@@ -2590,23 +2590,22 @@ router.post('/download-label', async (req, res) => {
   // ── ASYNC MODE: fire-and-forget, return taskId immediately ───────────────
   if (runAsync) {
     const task = taskStore.createTask('download-label', token.substring(0, 20));
-    // Clone req.body so we can pass it into the background job
-    const reqBody = { order_id, format };
-    const reqHeaders = { authorization: token };
-    // Fire-and-forget — do NOT await
+    const PORT = process.env.PORT || 5000;
+    const savedBody = { order_id, format, async: false };
+    const savedToken = token;
     (async () => {
       try {
-        // Re-run this endpoint's logic synchronously inside the task
-        const fakeReq = { body: reqBody, headers: reqHeaders, user: req.user };
-        const fakeRes = {
-          _result: null,
-          json(data) { this._result = data; },
-          status(code) { return this; }
-        };
-        // We call the actual processing by removing the asyncMode flag and re-running
-        req.body.async = false;
-        await processDownloadLabel(fakeReq, fakeRes);
-        taskStore.completeTask(task.id, fakeRes._result);
+        const internalRes = await fetch(`http://localhost:${PORT}/api/orders/download-label`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': savedToken },
+          body: JSON.stringify(savedBody)
+        });
+        const result = await internalRes.json();
+        if (result.success) {
+          taskStore.completeTask(task.id, result);
+        } else {
+          taskStore.failTask(task.id, result.message || 'Label download failed');
+        }
       } catch (err) {
         taskStore.failTask(task.id, err.message);
       }
@@ -4651,22 +4650,32 @@ router.post('/bulk-download-labels', async (req, res) => {
   // ── ASYNC MODE ────────────────────────────────────────────────────────────
   if (runAsync) {
     const task = taskStore.createTask('bulk-download-labels', token.substring(0, 20));
+    const PORT = process.env.PORT || 5000;
     const savedBody = { order_ids, format, generate_only, async: false };
     const savedToken = token;
-    const savedUser = req.user;
     (async () => {
       try {
-        const fakeReq = { body: savedBody, headers: { authorization: savedToken }, user: savedUser };
-        const fakeRes = {
-          _result: null, _status: 200,
-          json(data) { this._result = data; return this; },
-          status(code) { this._status = code; return this; }
-        };
-        await handleBulkDownloadLabels(fakeReq, fakeRes);
-        if (fakeRes._status >= 400) {
-          taskStore.failTask(task.id, fakeRes._result?.message || 'Bulk download failed');
+        const internalRes = await fetch(`http://localhost:${PORT}/api/orders/bulk-download-labels`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': savedToken },
+          body: JSON.stringify(savedBody)
+        });
+        const contentType = internalRes.headers.get('content-type') || '';
+        if (contentType.includes('application/json')) {
+          const result = await internalRes.json();
+          if (result.success) {
+            taskStore.completeTask(task.id, result);
+          } else {
+            taskStore.failTask(task.id, result.message || 'Bulk download failed');
+          }
         } else {
-          taskStore.completeTask(task.id, fakeRes._result);
+          // PDF binary response
+          const buffer = await internalRes.buffer();
+          taskStore.completeTask(task.id, {
+            success: true,
+            pdfBase64: buffer.toString('base64'),
+            contentType: contentType || 'application/pdf'
+          });
         }
       } catch (err) {
         taskStore.failTask(task.id, err.message);
@@ -5069,31 +5078,32 @@ router.post('/bulk-download-labels-merge', async (req, res) => {
   // ── ASYNC MODE ────────────────────────────────────────────────────────────
   if (runAsync) {
     const task = taskStore.createTask('bulk-download-merge', token.substring(0, 20));
+    const PORT = process.env.PORT || 5000;
     const savedBody = { order_ids, format, async: false };
     const savedToken = token;
-    const savedUser = req.user;
     (async () => {
       try {
-        const fakeReq = { body: savedBody, headers: { authorization: savedToken }, user: savedUser };
-        const fakeRes = {
-          _result: null, _status: 200, _buffer: null, _contentType: null,
-          json(data) { this._result = data; return this; },
-          status(code) { this._status = code; return this; },
-          setHeader(k, v) { if (k === 'Content-Type') this._contentType = v; return this; },
-          send(data) { this._buffer = data; return this; }
-        };
-        await handleBulkDownloadLabelsMerge(fakeReq, fakeRes);
-        if (fakeRes._status >= 400) {
-          taskStore.failTask(task.id, fakeRes._result?.message || 'Merge failed');
-        } else if (fakeRes._buffer) {
-          // PDF buffer: encode as base64 so it can be transferred via JSON
+        const internalRes = await fetch(`http://localhost:${PORT}/api/orders/bulk-download-labels-merge`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': savedToken },
+          body: JSON.stringify(savedBody)
+        });
+        const contentType = internalRes.headers.get('content-type') || '';
+        if (contentType.includes('application/json')) {
+          const result = await internalRes.json();
+          if (result.success) {
+            taskStore.completeTask(task.id, result);
+          } else {
+            taskStore.failTask(task.id, result.message || 'Merge failed');
+          }
+        } else {
+          // PDF binary response — encode as base64 for polling delivery
+          const buffer = await internalRes.buffer();
           taskStore.completeTask(task.id, {
             success: true,
-            pdfBase64: fakeRes._buffer.toString('base64'),
-            contentType: fakeRes._contentType || 'application/pdf'
+            pdfBase64: buffer.toString('base64'),
+            contentType: contentType || 'application/pdf'
           });
-        } else {
-          taskStore.completeTask(task.id, fakeRes._result);
         }
       } catch (err) {
         taskStore.failTask(task.id, err.message);
@@ -6633,25 +6643,35 @@ router.post('/download-manifest-summary', async (req, res) => {
     });
   }
 
-  // ── ASYNC MODE: for manifest, we run synchronously but wrap in task ───────
-  // Manifest generation is fast but can block if user switches app mid-download
+  // ── ASYNC MODE ────────────────────────────────────────────────────────────
   if (runAsync) {
     const task = taskStore.createTask('manifest-summary', token.substring(0, 20));
+    const PORT = process.env.PORT || 5000;
+    const savedBody = { manifest_ids, format, async: false };
+    const savedToken = token;
     (async () => {
       try {
-        const fakeReq = { body: { manifest_ids, format, async: false }, headers: { authorization: token }, user: req.user };
-        const fakeRes = {
-          _result: null, _status: 200,
-          json(data) { this._result = data; return this; },
-          status(code) { this._status = code; return this; },
-          setHeader() { return this; },
-          send(data) { this._result = data; return this; }
-        };
-        await processManifestSummary(fakeReq, fakeRes);
-        if (fakeRes._status >= 400) {
-          taskStore.failTask(task.id, fakeRes._result?.message || 'Manifest generation failed');
+        const internalRes = await fetch(`http://localhost:${PORT}/api/orders/download-manifest-summary`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': savedToken },
+          body: JSON.stringify(savedBody)
+        });
+        const contentType = internalRes.headers.get('content-type') || '';
+        if (contentType.includes('application/json')) {
+          const result = await internalRes.json();
+          if (result.success) {
+            taskStore.completeTask(task.id, result);
+          } else {
+            taskStore.failTask(task.id, result.message || 'Manifest generation failed');
+          }
         } else {
-          taskStore.completeTask(task.id, fakeRes._result);
+          // PDF binary response
+          const buffer = await internalRes.buffer();
+          taskStore.completeTask(task.id, {
+            success: true,
+            pdfBase64: buffer.toString('base64'),
+            contentType: contentType || 'application/pdf'
+          });
         }
       } catch (err) {
         taskStore.failTask(task.id, err.message);
