@@ -5,6 +5,7 @@ const fs = require('fs');
 const fetch = require('node-fetch');
 const { authenticateBasicAuth, requireAdminOrSuperadmin, requireAnyUser } = require('../middleware/auth');
 const carrierServiceabilityService = require('../services/carrierServiceabilityService');
+const taskStore = require('../services/taskStore');
 
 // Apply authentication to all order routes
 router.use(authenticateBasicAuth);
@@ -2572,17 +2573,45 @@ router.get('/priority-carrier-stats', authenticateBasicAuth, requireAdminOrSuper
  * @access  Vendor (token required)
  */
 router.post('/download-label', async (req, res) => {
-  const { order_id, format = 'thermal' } = req.body;
+  const { order_id, format = 'thermal', async: runAsync } = req.body;
   const token = req.headers['authorization'];
 
   console.log('🔵 DOWNLOAD LABEL REQUEST START');
   console.log('  - order_id:', order_id);
   console.log('  - format:', format);
+  console.log('  - async mode:', runAsync ? 'YES' : 'NO');
   console.log('  - token received:', token ? 'YES' : 'NO');
 
   if (!order_id || !token) {
     console.log('❌ DOWNLOAD LABEL FAILED: Missing required fields');
     return res.status(400).json({ success: false, message: 'order_id and Authorization token required' });
+  }
+
+  // ── ASYNC MODE: fire-and-forget, return taskId immediately ───────────────
+  if (runAsync) {
+    const task = taskStore.createTask('download-label', token.substring(0, 20));
+    // Clone req.body so we can pass it into the background job
+    const reqBody = { order_id, format };
+    const reqHeaders = { authorization: token };
+    // Fire-and-forget — do NOT await
+    (async () => {
+      try {
+        // Re-run this endpoint's logic synchronously inside the task
+        const fakeReq = { body: reqBody, headers: reqHeaders, user: req.user };
+        const fakeRes = {
+          _result: null,
+          json(data) { this._result = data; },
+          status(code) { return this; }
+        };
+        // We call the actual processing by removing the asyncMode flag and re-running
+        req.body.async = false;
+        await processDownloadLabel(fakeReq, fakeRes);
+        taskStore.completeTask(task.id, fakeRes._result);
+      } catch (err) {
+        taskStore.failTask(task.id, err.message);
+      }
+    })();
+    return res.json({ success: true, taskId: task.id, async: true });
   }
 
   // Declare vendor outside try block so it's accessible in catch block
@@ -4603,14 +4632,13 @@ async function syncOrdersFromShipway() {
  */
 router.post('/bulk-download-labels', async (req, res) => {
   const requestStartTime = Date.now();
-  const { order_ids, format = 'thermal', generate_only = false } = req.body;
+  const { order_ids, format = 'thermal', generate_only = false, async: runAsync } = req.body;
   const token = req.headers['authorization'];
 
   // Generate unique batch ID for this parallel processing operation
   const batchId = `BATCH_${Date.now()}_${Math.random().toString(36).substring(2, 9).toUpperCase()}`;
 
-  console.log(`🔵 [${batchId}] BULK DOWNLOAD LABELS REQUEST: ${order_ids.length} orders, format: ${format}, generate_only: ${generate_only}`);
-  console.log(`  - [${batchId}] Start time: ${new Date().toISOString()}`);
+  console.log(`🔵 [${batchId}] BULK DOWNLOAD LABELS REQUEST: format: ${format}, generate_only: ${generate_only}, async: ${runAsync ? 'YES' : 'NO'}`);
 
   if (!order_ids || !Array.isArray(order_ids) || order_ids.length === 0 || !token) {
     console.log(`❌ [${batchId}] BULK DOWNLOAD LABELS FAILED: Missing required fields`);
@@ -4618,6 +4646,33 @@ router.post('/bulk-download-labels', async (req, res) => {
       success: false,
       message: 'order_ids array and Authorization token required'
     });
+  }
+
+  // ── ASYNC MODE ────────────────────────────────────────────────────────────
+  if (runAsync) {
+    const task = taskStore.createTask('bulk-download-labels', token.substring(0, 20));
+    const savedBody = { order_ids, format, generate_only, async: false };
+    const savedToken = token;
+    const savedUser = req.user;
+    (async () => {
+      try {
+        const fakeReq = { body: savedBody, headers: { authorization: savedToken }, user: savedUser };
+        const fakeRes = {
+          _result: null, _status: 200,
+          json(data) { this._result = data; return this; },
+          status(code) { this._status = code; return this; }
+        };
+        await handleBulkDownloadLabels(fakeReq, fakeRes);
+        if (fakeRes._status >= 400) {
+          taskStore.failTask(task.id, fakeRes._result?.message || 'Bulk download failed');
+        } else {
+          taskStore.completeTask(task.id, fakeRes._result);
+        }
+      } catch (err) {
+        taskStore.failTask(task.id, err.message);
+      }
+    })();
+    return res.json({ success: true, taskId: task.id, async: true });
   }
 
   try {
@@ -5001,7 +5056,7 @@ router.post('/bulk-download-labels', async (req, res) => {
  * @access  Vendor (token required)
  */
 router.post('/bulk-download-labels-merge', async (req, res) => {
-  const { order_ids, format = 'thermal' } = req.body;
+  const { order_ids, format = 'thermal', async: runAsync } = req.body;
   const token = req.headers['authorization'];
 
   if (!order_ids || !Array.isArray(order_ids) || order_ids.length === 0 || !token) {
@@ -5009,6 +5064,42 @@ router.post('/bulk-download-labels-merge', async (req, res) => {
       success: false,
       message: 'order_ids array and Authorization token required'
     });
+  }
+
+  // ── ASYNC MODE ────────────────────────────────────────────────────────────
+  if (runAsync) {
+    const task = taskStore.createTask('bulk-download-merge', token.substring(0, 20));
+    const savedBody = { order_ids, format, async: false };
+    const savedToken = token;
+    const savedUser = req.user;
+    (async () => {
+      try {
+        const fakeReq = { body: savedBody, headers: { authorization: savedToken }, user: savedUser };
+        const fakeRes = {
+          _result: null, _status: 200, _buffer: null, _contentType: null,
+          json(data) { this._result = data; return this; },
+          status(code) { this._status = code; return this; },
+          setHeader(k, v) { if (k === 'Content-Type') this._contentType = v; return this; },
+          send(data) { this._buffer = data; return this; }
+        };
+        await handleBulkDownloadLabelsMerge(fakeReq, fakeRes);
+        if (fakeRes._status >= 400) {
+          taskStore.failTask(task.id, fakeRes._result?.message || 'Merge failed');
+        } else if (fakeRes._buffer) {
+          // PDF buffer: encode as base64 so it can be transferred via JSON
+          taskStore.completeTask(task.id, {
+            success: true,
+            pdfBase64: fakeRes._buffer.toString('base64'),
+            contentType: fakeRes._contentType || 'application/pdf'
+          });
+        } else {
+          taskStore.completeTask(task.id, fakeRes._result);
+        }
+      } catch (err) {
+        taskStore.failTask(task.id, err.message);
+      }
+    })();
+    return res.json({ success: true, taskId: task.id, async: true });
   }
 
   try {
@@ -5822,7 +5913,30 @@ router.post('/bulk-mark-ready', async (req, res) => {
  * @access  Admin/Superadmin only
  */
 router.post('/admin/refresh', authenticateBasicAuth, requireAdminOrSuperadmin, async (req, res) => {
+  const { async: runAsync } = req.body || {};
   console.log('🔵 ADMIN REFRESH ORDERS REQUEST START');
+  console.log('  - async mode:', runAsync ? 'YES' : 'NO');
+
+  // ── ASYNC MODE ────────────────────────────────────────────────────────────
+  if (runAsync) {
+    const task = taskStore.createTask('admin-refresh', 'admin');
+    (async () => {
+      try {
+        const database = require('../config/database');
+        await database.waitForMySQLInitialization();
+        const multiStoreSyncService = require('../services/multiStoreSyncService');
+        const result = await multiStoreSyncService.syncAllStores();
+        taskStore.completeTask(task.id, {
+          success: true,
+          message: `Orders refreshed. ${result.successfulStores}/${result.totalStores} stores synced, ${result.totalOrders} orders.`,
+          data: { sync_result: result, timestamp: new Date().toISOString() }
+        });
+      } catch (err) {
+        taskStore.failTask(task.id, err.message);
+      }
+    })();
+    return res.json({ success: true, taskId: task.id, async: true });
+  }
 
   try {
     // Wait for MySQL initialization
@@ -5869,13 +5983,40 @@ router.post('/admin/refresh', authenticateBasicAuth, requireAdminOrSuperadmin, a
  */
 router.post('/refresh', async (req, res) => {
   const token = req.headers['authorization'];
+  const { async: runAsync } = req.body || {};
 
   console.log('🔵 REFRESH ORDERS REQUEST START');
   console.log('  - token received:', token ? 'YES' : 'NO');
+  console.log('  - async mode:', runAsync ? 'YES' : 'NO');
 
   if (!token) {
     console.log('❌ REFRESH ORDERS FAILED: Missing token');
     return res.status(400).json({ success: false, message: 'Authorization token required' });
+  }
+
+  // ── ASYNC MODE ────────────────────────────────────────────────────────────
+  if (runAsync) {
+    const task = taskStore.createTask('refresh', token.substring(0, 20));
+    (async () => {
+      try {
+        const database = require('../config/database');
+        await database.waitForMySQLInitialization();
+        const vendor = req.user || await database.getUserByToken(token);
+        if (!vendor || vendor.active_session !== 'TRUE') {
+          return taskStore.failTask(task.id, 'Invalid or inactive vendor token');
+        }
+        const multiStoreSyncService = require('../services/multiStoreSyncService');
+        const result = await multiStoreSyncService.syncAllStores();
+        taskStore.completeTask(task.id, {
+          success: true,
+          message: `Orders refreshed. ${result.successfulStores}/${result.totalStores} stores synced, ${result.totalOrders} orders.`,
+          data: { sync_result: result, timestamp: new Date().toISOString() }
+        });
+      } catch (err) {
+        taskStore.failTask(task.id, err.message);
+      }
+    })();
+    return res.json({ success: true, taskId: task.id, async: true });
   }
 
   try {
@@ -6476,11 +6617,12 @@ router.get('/auto-reverse-stats', authenticateBasicAuth, requireAdminOrSuperadmi
  * @access  Vendor (token required)
  */
 router.post('/download-manifest-summary', async (req, res) => {
-  const { manifest_ids, format = 'a4' } = req.body;
+  const { manifest_ids, format = 'a4', async: runAsync } = req.body;
   const token = req.headers['authorization'];
 
   console.log('🔵 DOWNLOAD MANIFEST SUMMARY REQUEST START');
   console.log('  - manifest_ids:', manifest_ids);
+  console.log('  - async mode:', runAsync ? 'YES' : 'NO');
   console.log('  - token received:', token ? 'YES' : 'NO');
 
   if (!manifest_ids || !token) {
@@ -6489,6 +6631,33 @@ router.post('/download-manifest-summary', async (req, res) => {
       success: false,
       message: 'manifest_ids and Authorization token required'
     });
+  }
+
+  // ── ASYNC MODE: for manifest, we run synchronously but wrap in task ───────
+  // Manifest generation is fast but can block if user switches app mid-download
+  if (runAsync) {
+    const task = taskStore.createTask('manifest-summary', token.substring(0, 20));
+    (async () => {
+      try {
+        const fakeReq = { body: { manifest_ids, format, async: false }, headers: { authorization: token }, user: req.user };
+        const fakeRes = {
+          _result: null, _status: 200,
+          json(data) { this._result = data; return this; },
+          status(code) { this._status = code; return this; },
+          setHeader() { return this; },
+          send(data) { this._result = data; return this; }
+        };
+        await processManifestSummary(fakeReq, fakeRes);
+        if (fakeRes._status >= 400) {
+          taskStore.failTask(task.id, fakeRes._result?.message || 'Manifest generation failed');
+        } else {
+          taskStore.completeTask(task.id, fakeRes._result);
+        }
+      } catch (err) {
+        taskStore.failTask(task.id, err.message);
+      }
+    })();
+    return res.json({ success: true, taskId: task.id, async: true });
   }
 
   try {

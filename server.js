@@ -18,6 +18,7 @@ const publicRoutes = require('./routes/public');
 const storeRoutes = require('./routes/stores');
 const warehouseMappingRoutes = require('./routes/warehouseMapping');
 const analyticsRoutes = require('./routes/analytics');
+const tasksRoutes = require('./routes/tasks');
 
 // Import database to initialize it
 const database = require('./config/database');
@@ -332,6 +333,7 @@ app.use('/api/admin/inventory', inventoryRoutes);
 app.use('/api/stores', storeRoutes);
 app.use('/api/warehouse-mapping', warehouseMappingRoutes);
 app.use('/api/analytics', analyticsRoutes);
+app.use('/api/tasks', tasksRoutes);
 
 
 /**
