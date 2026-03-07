@@ -3656,10 +3656,17 @@ async function handleOrderCloning(originalOrderId, claimedProducts, allOrderProd
     // On failure: record the error but DO NOT change the status checkpoint.
     // The status stays at the last successfully completed checkpoint so the
     // next retry knows exactly where to resume from.
+    // BUG FIX: Previously used tx.status here which was the STALE in-memory value
+    // from the initial DB read — this was reverting all checkpoint progress.
     console.error(`❌ Clone process failed: ${error.message}`);
     if (tx.id) {
       try {
-        await updateCloneTransactionStatus(tx.id, tx.status, error.message);
+        const database = require('../config/database');
+        await database.mysqlConnection.execute(
+          `UPDATE clone_transactions SET error_message = ? WHERE id = ?`,
+          [error.message, tx.id]
+        );
+        console.log(`📝 Clone transaction #${tx.id}: error recorded (status NOT changed)`);
       } catch (txUpdateError) {
         console.warn(`⚠️ Could not update transaction error state: ${txUpdateError.message}`);
       }
