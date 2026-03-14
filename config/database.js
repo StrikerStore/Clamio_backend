@@ -4082,7 +4082,11 @@ class Database {
             ELSE c.status 
           END as status
         FROM orders o
-        LEFT JOIN products p ON (
+        LEFT JOIN (
+          SELECT sku_id, account_code, MIN(image) as image
+          FROM products
+          GROUP BY sku_id, account_code
+        ) p ON (
           (REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
           REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
           REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id)
@@ -4093,7 +4097,7 @@ class Database {
         LEFT JOIN store_info s ON o.account_code = s.account_code
         WHERE ${whereConditions}
         ORDER BY o.order_date DESC, o.order_id, o.product_name
-        LIMIT ${parseInt(limit)} OFFSET ${parseInt(offset)}`;
+        LIMIT ${parseInt(limit)} OFFSET ${parseInt(offset)}` ;
 
       // Build COUNT query for total count and quantity (same WHERE clause, includes store_info for status filtering)
       const countQuery = `
@@ -4316,7 +4320,11 @@ class Database {
             ELSE NULL
           END as customer_name_from_info
         FROM orders o
-        LEFT JOIN products p ON (
+        LEFT JOIN (
+          SELECT sku_id, account_code, MIN(image) as image
+          FROM products
+          GROUP BY sku_id, account_code
+        ) p ON (
           (REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
           REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
           REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id)
@@ -4326,10 +4334,18 @@ class Database {
         LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
         LEFT JOIN store_info s ON o.account_code = s.account_code
         LEFT JOIN users u ON c.claimed_by = u.warehouseId
-        LEFT JOIN customer_info ci ON o.order_id = ci.order_id AND o.account_code = ci.account_code
+        LEFT JOIN (
+          SELECT order_id, account_code,
+            MIN(billing_firstname) as billing_firstname,
+            MIN(billing_lastname) as billing_lastname,
+            MIN(shipping_firstname) as shipping_firstname,
+            MIN(shipping_lastname) as shipping_lastname
+          FROM customer_info
+          GROUP BY order_id, account_code
+        ) ci ON o.order_id = ci.order_id AND o.account_code = ci.account_code
         WHERE ${whereConditions}
         ORDER BY o.order_date DESC, o.order_id, o.product_name
-        LIMIT ${parseInt(limit)} OFFSET ${parseInt(offset)}`;
+        LIMIT ${parseInt(limit)} OFFSET ${parseInt(offset)}` ;
 
       // Build COUNT query for total count and quantity
       const countQuery = `
