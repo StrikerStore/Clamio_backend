@@ -82,40 +82,47 @@ async function cancelBulkOperation(shopifyGraphqlUrl, headers, bulkOperationId) 
  * @param {object} headers - The headers for Shopify API (including Authorization)
  * @param {boolean} forceNew - Whether to force a new operation (will cancel existing ones)
  */
-async function fetchAndSaveShopifyProducts(shopifyGraphqlUrl, headers, forceNew = false) {
+async function fetchAndSaveShopifyProducts(shopifyGraphqlUrl, headers, forceNew = false, overrideAccountCode = null) {
   try {
     console.log('[Shopify] Starting bulk product fetch...');
     console.log('[Shopify] Endpoint:', shopifyGraphqlUrl);
     console.log('[Shopify] Headers:', Object.keys(headers));
     console.log('[Shopify] Output: MySQL database');
 
-    // Get account_code from store_info table based on Shopify credentials
+    // Get account_code: use override if provided (multi-store sync), otherwise derive from credentials
     await database.waitForMySQLInitialization();
-    const shopifyToken = headers['X-Shopify-Access-Token'];
-    const store = await database.getStoreByShopifyCredentials(shopifyGraphqlUrl, shopifyToken);
-    
-    if (!store || !store.account_code) {
-      // Extract domain for better log message
-      let storeDomain = shopifyGraphqlUrl;
-      if (shopifyGraphqlUrl.includes('://')) {
-        const urlMatch = shopifyGraphqlUrl.match(/https?:\/\/([^\/]+)/);
-        if (urlMatch) {
-          storeDomain = urlMatch[1].split('/')[0];
+    let accountCode = overrideAccountCode;
+
+    if (!accountCode) {
+      // Legacy path: derive account_code from Shopify credentials (used by server.js startup)
+      const shopifyToken = headers['X-Shopify-Access-Token'];
+      const store = await database.getStoreByShopifyCredentials(shopifyGraphqlUrl, shopifyToken);
+      
+      if (!store || !store.account_code) {
+        // Extract domain for better log message
+        let storeDomain = shopifyGraphqlUrl;
+        if (shopifyGraphqlUrl.includes('://')) {
+          const urlMatch = shopifyGraphqlUrl.match(/https?:\/\/([^\/]+)/);
+          if (urlMatch) {
+            storeDomain = urlMatch[1].split('/')[0];
+          }
         }
+        
+        console.log(`⚠️ [Shopify] Store not found in store_info table for Shopify URL: ${shopifyGraphqlUrl} (domain: ${storeDomain})`);
+        console.log(`ℹ️ [Shopify] No stores configured yet. Superadmin can create stores via the admin panel.`);
+        console.log(`ℹ️ [Shopify] Skipping product fetch until stores are configured.`);
+        return {
+          success: false,
+          message: 'No store found for the provided Shopify credentials',
+          skipped: true
+        };
       }
       
-      console.log(`⚠️ [Shopify] Store not found in store_info table for Shopify URL: ${shopifyGraphqlUrl} (domain: ${storeDomain})`);
-      console.log(`ℹ️ [Shopify] No stores configured yet. Superadmin can create stores via the admin panel.`);
-      console.log(`ℹ️ [Shopify] Skipping product fetch until stores are configured.`);
-      return {
-        success: false,
-        message: 'No store found for the provided Shopify credentials',
-        skipped: true
-      };
+      accountCode = store.account_code;
+      console.log(`[Shopify] Found store: ${store.store_name} (account_code: ${accountCode})`);
+    } else {
+      console.log(`[Shopify] Using provided account_code: ${accountCode}`);
     }
-    
-    const accountCode = store.account_code;
-    console.log(`[Shopify] Found store: ${store.store_name} (account_code: ${accountCode})`);
 
     // Check for existing running operations
     const runningOperation = await checkForRunningBulkOperations(shopifyGraphqlUrl, headers);
@@ -329,6 +336,8 @@ async function saveToDatabase(products, accountCode) {
         .replace(/[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$/i, '')
         // Remove age ranges (24-26, 25-26, etc.) at the end
         .replace(/[-_][0-9]+-[0-9]+$/, '')
+        // Remove decimal numbers at the end (size numbers like 5.5, 6.5, 7.5, etc.)
+        .replace(/[-_][0-9]+\.[0-9]+$/, '')
         // Remove single numbers at the end (size numbers like 32, 34, etc.)
         .replace(/[-_][0-9]+$/, '')
         // Clean up any double dashes or underscores (IMPORTANT: do this BEFORE trimming)
@@ -498,8 +507,8 @@ class ShopifyProductFetcher {
       'Content-Type': 'application/json'
     };
 
-    // Fetch and save products
-    const result = await fetchAndSaveShopifyProducts(shopifyGraphqlUrl, headers, false);
+    // Fetch and save products (pass accountCode to avoid re-deriving from credentials)
+    const result = await fetchAndSaveShopifyProducts(shopifyGraphqlUrl, headers, false, this.accountCode);
     
     return {
       productCount: result.productsCount || 0,

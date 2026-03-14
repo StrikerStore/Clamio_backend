@@ -1,4 +1,5 @@
 const { ShipwayCarrierService } = require('./shipwayCarrierService');
+const ShiprocketService = require('./shiprocketService');
 const database = require('../config/database');
 
 class CarrierSyncService {
@@ -9,6 +10,7 @@ class CarrierSyncService {
   /**
    * Start the carrier sync process - STORE SPECIFIC
    * Syncs carriers for each active store separately
+   * Supports both Shipway and Shiprocket shipping partners
    */
   async startCarrierSync() {
     if (this.isRunning) {
@@ -44,18 +46,26 @@ class CarrierSyncService {
       // Sync carriers for all stores in PARALLEL for better speed
       const syncPromises = activeStores.map(async (store) => {
         try {
-          console.log(`\n🔄 [${store.account_code}] Syncing carriers for "${store.store_name}"...`);
+          const shippingPartner = (store.shipping_partner || 'Shipway').toLowerCase();
+          console.log(`\n🔄 [${store.account_code}] Syncing carriers for "${store.store_name}" (${shippingPartner})...`);
           
-          const carrierService = new ShipwayCarrierService(store.account_code);
-          const result = await carrierService.syncCarriersToMySQL();
+          let result;
+          if (shippingPartner === 'shiprocket') {
+            const shiprocketService = new ShiprocketService(store.account_code);
+            result = await shiprocketService.syncCarriersToMySQL();
+          } else {
+            const carrierService = new ShipwayCarrierService(store.account_code);
+            result = await carrierService.syncCarriersToMySQL();
+          }
           
           const carrierCount = result.carrierCount || result.total || 0;
           
-          console.log(`✅ [${store.account_code}] Carriers synced: ${carrierCount}`);
+          console.log(`✅ [${store.account_code}] Carriers synced: ${carrierCount} (${shippingPartner})`);
           
           return {
             accountCode: store.account_code,
             storeName: store.store_name,
+            shippingPartner: shippingPartner,
             carrierCount: carrierCount,
             success: true
           };

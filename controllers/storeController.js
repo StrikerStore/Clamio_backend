@@ -22,6 +22,7 @@ class StoreController {
         id: store.id,
         account_code: store.account_code,
         store_name: store.store_name,
+        shipping_partner: store.shipping_partner,
         username: store.username,
         shopify_store_url: store.shopify_store_url,
         status: store.status,
@@ -134,7 +135,7 @@ class StoreController {
         store_name,
         shipping_partner,
         username, 
-        password, 
+        password,
         shopify_store_url, 
         shopify_token,
         status
@@ -183,8 +184,82 @@ class StoreController {
       // Encrypt password
       const encryptedPassword = encryptionService.encrypt(password);
       
-      // Generate Basic Auth token
-      const authToken = Buffer.from(`${username}:${password}`).toString('base64');
+      let authToken;
+      
+      // Handle different shipping partners
+      if (shipping_partner === 'Shiprocket') {
+        // For Shiprocket: Call login API to get token
+        console.log('🔄 Calling Shiprocket login API...');
+        try {
+          const loginResponse = await axios.post('https://apiv2.shiprocket.in/v1/external/auth/login', {
+            email: username, // username field contains email for Shiprocket
+            password: password
+          }, {
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            timeout: 10000
+          });
+          
+          if (loginResponse.status === 200 && loginResponse.data && loginResponse.data.token) {
+            authToken = `Bearer ${loginResponse.data.token}`;
+            console.log('✅ Shiprocket login successful, token obtained');
+          } else {
+            throw new Error('Invalid response from Shiprocket login API');
+          }
+        } catch (error) {
+          console.error('❌ Shiprocket login failed:', error.message);
+          console.error('Error details:', {
+            hasResponse: !!error.response,
+            status: error.response?.status,
+            statusText: error.response?.statusText,
+            data: error.response?.data,
+            code: error.code
+          });
+          
+          if (error.response) {
+            const status = error.response.status;
+            const responseData = error.response.data;
+            
+              // Try multiple ways to extract error message from Shiprocket API
+              let errorMessage = 'Invalid credentials';
+              if (responseData) {
+                if (typeof responseData === 'string') {
+                  errorMessage = responseData;
+                } else if (responseData.message) {
+                  errorMessage = responseData.message;
+                } else if (responseData.error) {
+                  errorMessage = responseData.error;
+                } else if (responseData.errors && Array.isArray(responseData.errors)) {
+                  errorMessage = responseData.errors.map(e => e.message || e).join(', ');
+                } else if (typeof responseData === 'object' && Object.keys(responseData).length > 0) {
+                  errorMessage = JSON.stringify(responseData);
+                }
+              }
+              
+              // Clean up error message - remove any references to "Shipway" if present
+              errorMessage = errorMessage.replace(/Shipway/gi, 'Shiprocket');
+              
+              return res.status(status || 401).json({
+                success: false,
+                message: `Shiprocket authentication failed: ${errorMessage}`
+              });
+          } else if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT') {
+            return res.status(503).json({
+              success: false,
+              message: 'Cannot connect to Shiprocket API. Please check your internet connection.'
+            });
+          }
+          
+          return res.status(500).json({
+            success: false,
+            message: `Shiprocket login failed: ${error.message || 'Unknown error'}`
+          });
+        }
+      } else {
+        // For Shipway: Generate Basic Auth token
+        authToken = `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`;
+      }
       
       // Create store
       await database.createStore({
@@ -193,7 +268,7 @@ class StoreController {
         shipping_partner: shipping_partner,
         username: username,
         password_encrypted: encryptedPassword,
-        auth_token: `Basic ${authToken}`,
+        auth_token: authToken,
         shopify_store_url: shopify_store_url,
         shopify_token: shopify_token,
         status: status,
@@ -202,18 +277,26 @@ class StoreController {
       
       console.log(`✅ Store created: ${store_name} (${accountCode})`);
 
-      // Immediately sync this new store (orders, carriers, products) using multi-store sync service
+      // Sync for both Shipway and Shiprocket stores
       let syncResult = null;
-      try {
-        console.log(`🚀 Triggering initial sync for new store: ${accountCode}`);
-        syncResult = await multiStoreSyncService.syncStore(accountCode);
-        console.log(`✅ Initial sync completed for new store: ${accountCode}`);
-      } catch (syncError) {
-        console.error(`⚠️ Initial sync failed for new store ${accountCode}:`, syncError.message);
-        // Don't fail store creation if sync fails – just report it in response
+      if (shipping_partner === 'Shipway' || shipping_partner === 'Shiprocket') {
+        try {
+          console.log(`🚀 Triggering initial sync for new ${shipping_partner} store: ${accountCode}`);
+          syncResult = await multiStoreSyncService.syncStore(accountCode);
+          console.log(`✅ Initial sync completed for new store: ${accountCode}`);
+        } catch (syncError) {
+          console.error(`⚠️ Initial sync failed for new store ${accountCode}:`, syncError.message);
+          // Don't fail store creation if sync fails – just report it in response
+          syncResult = {
+            success: false,
+            error: syncError.message
+          };
+        }
+      } else {
+        console.log(`⏭️ Skipping sync for ${shipping_partner} store (sync not yet configured)`);
         syncResult = {
-          success: false,
-          error: syncError.message
+          success: true,
+          message: 'Store created successfully. Sync will be configured later.'
         };
       }
       
@@ -247,7 +330,7 @@ class StoreController {
       const { 
         store_name, 
         username, 
-        password, 
+        password,
         shopify_store_url, 
         shopify_token,
         status
@@ -278,15 +361,116 @@ class StoreController {
         // Encrypt new password
         updateData.password_encrypted = encryptionService.encrypt(password);
         
-        // Regenerate auth token with new password
         const currentUsername = username !== undefined ? username : existingStore.username;
-        updateData.auth_token = `Basic ${Buffer.from(`${currentUsername}:${password}`).toString('base64')}`;
+        
+        // Handle different shipping partners
+        if (existingStore.shipping_partner === 'Shiprocket') {
+          // For Shiprocket: Call login API to get new token
+          console.log('🔄 Calling Shiprocket login API for token refresh...');
+          try {
+            const loginResponse = await axios.post('https://apiv2.shiprocket.in/v1/external/auth/login', {
+              email: currentUsername,
+              password: password
+            }, {
+              headers: {
+                'Content-Type': 'application/json'
+              },
+              timeout: 10000
+            });
+            
+            if (loginResponse.status === 200 && loginResponse.data && loginResponse.data.token) {
+              updateData.auth_token = `Bearer ${loginResponse.data.token}`;
+              console.log('✅ Shiprocket token refreshed successfully');
+            } else {
+              throw new Error('Invalid response from Shiprocket login API');
+            }
+          } catch (error) {
+            console.error('❌ Shiprocket login failed during update:', error.message);
+            console.error('Error details:', {
+              hasResponse: !!error.response,
+              status: error.response?.status,
+              statusText: error.response?.statusText,
+              data: error.response?.data,
+              code: error.code
+            });
+            
+            if (error.response) {
+              const status = error.response.status;
+              const responseData = error.response.data;
+              
+              // Try multiple ways to extract error message from Shiprocket API
+              let errorMessage = 'Invalid credentials';
+              if (responseData) {
+                if (typeof responseData === 'string') {
+                  errorMessage = responseData;
+                } else if (responseData.message) {
+                  errorMessage = responseData.message;
+                } else if (responseData.error) {
+                  errorMessage = responseData.error;
+                } else if (responseData.errors && Array.isArray(responseData.errors)) {
+                  errorMessage = responseData.errors.map(e => e.message || e).join(', ');
+                } else if (typeof responseData === 'object' && Object.keys(responseData).length > 0) {
+                  errorMessage = JSON.stringify(responseData);
+                }
+              }
+              
+              // Clean up error message - remove any references to "Shipway" if present
+              errorMessage = errorMessage.replace(/Shipway/gi, 'Shiprocket');
+              
+              return res.status(status || 401).json({
+                success: false,
+                message: `Shiprocket authentication failed: ${errorMessage}`
+              });
+            } else if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT') {
+              return res.status(503).json({
+                success: false,
+                message: 'Cannot connect to Shiprocket API. Please check your internet connection.'
+              });
+            }
+            
+            return res.status(500).json({
+              success: false,
+              message: `Shiprocket login failed: ${error.message || 'Unknown error'}`
+            });
+          }
+        } else {
+          // For Shipway: Generate Basic Auth token
+          updateData.auth_token = `Basic ${Buffer.from(`${currentUsername}:${password}`).toString('base64')}`;
+        }
       } else if (username !== undefined && username !== existingStore.username) {
         // Username changed but password not provided - regenerate auth token with existing password
         if (existingStore.password_encrypted) {
           try {
             const existingPassword = encryptionService.decrypt(existingStore.password_encrypted);
-            updateData.auth_token = `Basic ${Buffer.from(`${username}:${existingPassword}`).toString('base64')}`;
+            
+            if (existingStore.shipping_partner === 'Shiprocket') {
+              // For Shiprocket: Call login API
+              console.log('🔄 Calling Shiprocket login API for username change...');
+              try {
+                const loginResponse = await axios.post('https://apiv2.shiprocket.in/v1/external/auth/login', {
+                  email: username,
+                  password: existingPassword
+                }, {
+                  headers: {
+                    'Content-Type': 'application/json'
+                  },
+                  timeout: 10000
+                });
+                
+                if (loginResponse.status === 200 && loginResponse.data && loginResponse.data.token) {
+                  updateData.auth_token = `Bearer ${loginResponse.data.token}`;
+                  console.log('✅ Shiprocket token refreshed for username change');
+                } else {
+                  throw new Error('Invalid response from Shiprocket login API');
+                }
+              } catch (error) {
+                console.error('❌ Shiprocket login failed during username update:', error.message);
+                // Continue without regenerating auth token if login fails
+              }
+            } else {
+              // For Shipway: Generate Basic Auth token
+              updateData.auth_token = `Basic ${Buffer.from(`${username}:${existingPassword}`).toString('base64')}`;
+            }
           } catch (error) {
             console.error('Error decrypting existing password for auth token regeneration:', error);
             // Continue without regenerating auth token if decryption fails
@@ -316,10 +500,31 @@ class StoreController {
       await database.updateStore(accountCode, updateData);
       
       console.log(`✅ Store updated: ${accountCode}`);
+
+      // Sync for both Shipway and Shiprocket stores after update
+      let syncResult = null;
+      if (existingStore.shipping_partner === 'Shipway' || existingStore.shipping_partner === 'Shiprocket') {
+        try {
+          console.log(`🚀 Triggering sync for updated ${existingStore.shipping_partner} store: ${accountCode}`);
+          syncResult = await multiStoreSyncService.syncStore(accountCode);
+          console.log(`✅ Sync completed for updated store: ${accountCode}`);
+        } catch (syncError) {
+          console.error(`⚠️ Sync failed for updated store ${accountCode}:`, syncError.message);
+          // Don't fail store update if sync fails – just report it in response
+          syncResult = {
+            success: false,
+            error: syncError.message
+          };
+        }
+      }
       
       res.json({
         success: true,
-        message: 'Store updated successfully'
+        message: 'Store updated successfully',
+        data: {
+          account_code: accountCode,
+          sync_result: syncResult
+        }
       });
       
     } catch (error) {
@@ -462,6 +667,113 @@ class StoreController {
           success: false,
           message: 'Shipway connection failed',
           error: error.message
+        });
+      }
+    }
+  }
+
+  /**
+   * Test Shiprocket connection
+   */
+  async testShiprocketConnection(req, res) {
+    try {
+      const { username, password } = req.body;
+      
+      console.log('🔵 Testing Shiprocket connection for:', username);
+      
+      if (!username || !password) {
+        return res.status(400).json({
+          success: false,
+          message: 'Username (email) and password are required'
+        });
+      }
+      
+      // Call Shiprocket login API
+      console.log('🔄 Calling Shiprocket login API...');
+      const response = await axios.post('https://apiv2.shiprocket.in/v1/external/auth/login', {
+        email: username, // username field contains email for Shiprocket
+        password: password
+      }, {
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        timeout: 10000
+      });
+      
+      if (response.status === 200 && response.data && response.data.token) {
+        res.json({
+          success: true,
+          message: 'Shiprocket connection successful'
+        });
+      } else {
+        res.status(400).json({
+          success: false,
+          message: 'Shiprocket connection failed: Invalid response'
+        });
+      }
+      
+    } catch (error) {
+      console.error('Test Shiprocket connection error:', error.message);
+      console.error('Error details:', {
+        hasResponse: !!error.response,
+        status: error.response?.status,
+        statusText: error.response?.statusText,
+        data: error.response?.data,
+        code: error.code,
+        message: error.message
+      });
+      
+      if (error.response) {
+        const status = error.response.status;
+        const statusText = error.response.statusText;
+        const responseData = error.response.data;
+        
+        // Try multiple ways to extract error message from Shiprocket API
+        let errorMessage = 'Unknown error';
+        if (responseData) {
+          if (typeof responseData === 'string') {
+            errorMessage = responseData;
+          } else if (responseData.message) {
+            errorMessage = responseData.message;
+          } else if (responseData.error) {
+            errorMessage = responseData.error;
+          } else if (responseData.errors && Array.isArray(responseData.errors)) {
+            errorMessage = responseData.errors.map(e => e.message || e).join(', ');
+          } else if (typeof responseData === 'object') {
+            errorMessage = JSON.stringify(responseData);
+          }
+        } else {
+          errorMessage = statusText || 'Connection failed';
+        }
+        
+        // Clean up error message - remove any references to "Shipway" if present (shouldn't happen but just in case)
+        errorMessage = errorMessage.replace(/Shipway/gi, 'Shiprocket');
+        
+        if (status === 401 || status === 403) {
+          res.status(401).json({
+            success: false,
+            message: `Shiprocket authentication failed: ${errorMessage}`
+          });
+        } else if (status === 422) {
+          res.status(422).json({
+            success: false,
+            message: `Shiprocket validation error: ${errorMessage}`
+          });
+        } else {
+          res.status(status || 500).json({
+            success: false,
+            message: `Shiprocket connection failed: ${errorMessage}`
+          });
+        }
+      } else if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT') {
+        res.status(503).json({
+          success: false,
+          message: 'Cannot connect to Shiprocket API. Please check your internet connection.'
+        });
+      } else {
+        res.status(500).json({
+          success: false,
+          message: `Shiprocket connection failed: ${error.message || 'Unknown error'}`
         });
       }
     }

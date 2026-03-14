@@ -80,11 +80,18 @@ class NewMachineSetup {
       // 2. Products table
       await this.connection.execute(`
         CREATE TABLE IF NOT EXISTS products (
-          id VARCHAR(50) PRIMARY KEY,
+          id VARCHAR(50) NOT NULL,
           name VARCHAR(500) NOT NULL,
           image VARCHAR(500),
           altText TEXT,
-          totalImages INTEGER DEFAULT 0
+          totalImages INTEGER DEFAULT 0,
+          sku_id VARCHAR(100),
+          account_code VARCHAR(50) NOT NULL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          PRIMARY KEY (id, account_code),
+          INDEX idx_account_code (account_code),
+          UNIQUE INDEX idx_sku_account_unique (sku_id, account_code)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `);
       console.log('✅ Products table created/verified');
@@ -169,6 +176,9 @@ class NewMachineSetup {
         CREATE TABLE IF NOT EXISTS orders (
           id VARCHAR(50) PRIMARY KEY,
           unique_id VARCHAR(100) UNIQUE,
+          shipment_id VARCHAR(100),
+          channel_id VARCHAR(100),
+          partner_order_id VARCHAR(100),
           order_id VARCHAR(100),
           customer_name VARCHAR(255),
           order_date DATETIME,

@@ -101,7 +101,8 @@ router.get('/stores', authenticateBasicAuth, requireAdminOrSuperadmin, async (re
       .filter(store => store.status === 'active')
       .map(store => ({
         account_code: store.account_code,
-        store_name: store.store_name
+        store_name: store.store_name,
+        shipping_partner: store.shipping_partner || 'Shipway'
       }));
 
     return res.status(200).json({
@@ -113,6 +114,106 @@ router.get('/stores', authenticateBasicAuth, requireAdminOrSuperadmin, async (re
     return res.status(500).json({
       success: false,
       message: 'Failed to get stores',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * @route   GET /api/warehouse-mapping/shiprocket-pickups/:accountCode
+ * @desc    Fetch pickup locations from Shiprocket API for a given store
+ * @access  Admin/Superadmin only
+ */
+router.get('/shiprocket-pickups/:accountCode', authenticateBasicAuth, requireAdminOrSuperadmin, async (req, res) => {
+  try {
+    const { accountCode } = req.params;
+
+    if (!accountCode) {
+      return res.status(400).json({
+        success: false,
+        message: 'accountCode is required'
+      });
+    }
+
+    // Validate account_code exists in store_info
+    const store = await database.getStoreByAccountCode(accountCode);
+    if (!store) {
+      return res.status(400).json({
+        success: false,
+        message: 'Store not found for the provided account_code'
+      });
+    }
+
+    if (store.status !== 'active') {
+      return res.status(400).json({
+        success: false,
+        message: 'Store is not active'
+      });
+    }
+
+    if ((store.shipping_partner || '').toLowerCase() !== 'shiprocket') {
+      return res.status(400).json({
+        success: false,
+        message: 'This store is not a Shiprocket store'
+      });
+    }
+
+    if (!store.auth_token) {
+      return res.status(400).json({
+        success: false,
+        message: 'Shiprocket auth token not found for this store. Please check store credentials.'
+      });
+    }
+
+    // Call Shiprocket API to get pickup locations
+    const axios = require('axios');
+    const response = await axios.get('https://apiv2.shiprocket.in/v1/external/settings/company/pickup', {
+      headers: {
+        'Authorization': store.auth_token,
+        'Content-Type': 'application/json',
+      },
+      timeout: 30000,
+    });
+
+    if (response.status !== 200 || !response.data) {
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to fetch pickup locations from Shiprocket'
+      });
+    }
+
+    const pickupLocations = (response.data?.data?.shipping_address || []).map(loc => ({
+      id: loc.id,
+      pickup_location: loc.pickup_location,
+      address: loc.address,
+      address_2: loc.address_2 || '',
+      city: loc.city,
+      state: loc.state,
+      country: loc.country,
+      pin_code: loc.pin_code,
+      phone: loc.phone,
+      name: loc.name,
+      status: loc.status,
+      rto_address_id: loc.rto_address_id
+    }));
+
+    return res.status(200).json({
+      success: true,
+      data: pickupLocations
+    });
+  } catch (error) {
+    console.error('Error fetching Shiprocket pickup locations:', error.message);
+    
+    if (error.response && error.response.status === 401) {
+      return res.status(401).json({
+        success: false,
+        message: 'Shiprocket authentication failed. Please check store credentials.'
+      });
+    }
+
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch Shiprocket pickup locations',
       error: error.message
     });
   }
@@ -200,7 +301,7 @@ router.post('/validate', authenticateBasicAuth, requireAdminOrSuperadmin, async 
  */
 router.post('/', authenticateBasicAuth, requireAdminOrSuperadmin, async (req, res) => {
   try {
-    const { claimio_wh_id, vendor_wh_id, account_code, return_warehouse_id } = req.body;
+    const { claimio_wh_id, vendor_wh_id, account_code, return_warehouse_id, pickup_location } = req.body;
 
     if (!claimio_wh_id || !vendor_wh_id || !account_code) {
       return res.status(400).json({
@@ -250,7 +351,8 @@ router.post('/', authenticateBasicAuth, requireAdminOrSuperadmin, async (req, re
       claimio_wh_id,
       vendor_wh_id,
       account_code,
-      return_warehouse_id: return_warehouse_id || null
+      return_warehouse_id: return_warehouse_id || null,
+      pickup_location: pickup_location || null
     });
 
     return res.status(201).json({

@@ -180,7 +180,8 @@ class ShipwayService {
         // API returned an error response
         const status = error.response.status;
         if (status === 401) {
-          throw new Error('Invalid Shipway API credentials. Please check your configuration.');
+          // Keep message generic – don't expose shipping partner name in UI
+          throw new Error('Invalid shipping API credentials. Please check your configuration.');
         } else if (status === 404) {
           throw new Error('Warehouse not found with the provided ID.');
         } else if (status === 429) {

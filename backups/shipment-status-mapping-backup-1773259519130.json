@@ -1,0 +1,140 @@
+[
+  {
+    "raw": "AWB_ASSIGNED",
+    "renamed": "Shipment Booked",
+    "color": "blue",
+    "is_handover": 0
+  },
+  {
+    "raw": "Pickup Failed",
+    "renamed": "Pickup Failed",
+    "color": "red",
+    "is_handover": 0
+  },
+  {
+    "raw": "Shipment Booked",
+    "renamed": "Shipment Booked",
+    "color": "blue",
+    "is_handover": 0
+  },
+  {
+    "raw": "SHPFR3",
+    "renamed": "Pickup Failed",
+    "color": "red",
+    "is_handover": 0
+  },
+  {
+    "raw": "CROV",
+    "renamed": "Delivery Attempted",
+    "color": "yellow",
+    "is_handover": 1
+  },
+  {
+    "raw": "DEL",
+    "renamed": "Delivered",
+    "color": "green",
+    "is_handover": 1
+  },
+  {
+    "raw": "Delivered",
+    "renamed": "Delivered",
+    "color": "green",
+    "is_handover": 1
+  },
+  {
+    "raw": "In Transit",
+    "renamed": "In Transit",
+    "color": "orange",
+    "is_handover": 1
+  },
+  {
+    "raw": "INT",
+    "renamed": "In Transit",
+    "color": "orange",
+    "is_handover": 1
+  },
+  {
+    "raw": "Out for Delivery",
+    "renamed": "Out for Delivery",
+    "color": "yellow",
+    "is_handover": 1
+  },
+  {
+    "raw": "REACHED_AT_DESTINATION_HUB",
+    "renamed": "In Transit",
+    "color": "orange",
+    "is_handover": 1
+  },
+  {
+    "raw": "RTD",
+    "renamed": "RTO Delivered",
+    "color": "green",
+    "is_handover": 1
+  },
+  {
+    "raw": "RTO",
+    "renamed": "RTO",
+    "color": "red",
+    "is_handover": 1
+  },
+  {
+    "raw": "RTO Delivered",
+    "renamed": "RTO Delivered",
+    "color": "green",
+    "is_handover": 1
+  },
+  {
+    "raw": "RTO Undelivered",
+    "renamed": "RTO Undelivered",
+    "color": "maroon",
+    "is_handover": 1
+  },
+  {
+    "raw": "RTO_IN_TRANSIT",
+    "renamed": "RTO In Transit",
+    "color": "orange",
+    "is_handover": 1
+  },
+  {
+    "raw": "RTO_INITIATED",
+    "renamed": "RTO Initiated",
+    "color": "red",
+    "is_handover": 1
+  },
+  {
+    "raw": "RTONDR5",
+    "renamed": "RTO Undelivered",
+    "color": "maroon",
+    "is_handover": 1
+  },
+  {
+    "raw": "RTOUND",
+    "renamed": "RTO Lost",
+    "color": "maroon",
+    "is_handover": 1
+  },
+  {
+    "raw": "SHNDR16",
+    "renamed": "Consignee Unavailable",
+    "color": "red",
+    "is_handover": 1
+  },
+  {
+    "raw": "SHNDR4",
+    "renamed": "Delivery Reattempt",
+    "color": "yellow",
+    "is_handover": 1
+  },
+  {
+    "raw": "SHNDR6",
+    "renamed": "Consignee Refused",
+    "color": "red",
+    "is_handover": 1
+  },
+  {
+    "raw": "UNDELIVERED",
+    "renamed": "Undelivered",
+    "color": "red",
+    "is_handover": 1
+  }
+]

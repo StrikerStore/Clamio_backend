@@ -78,6 +78,14 @@ router.patch('/:accountCode/toggle-status', storeController.toggleStoreStatus);
 router.post('/test-shipway', storeController.testShipwayConnection);
 
 /**
+ * @route   POST /api/stores/test-shiprocket
+ * @desc    Test Shiprocket connection
+ * @access  Superadmin
+ * @body    { username, password }
+ */
+router.post('/test-shiprocket', storeController.testShiprocketConnection);
+
+/**
  * @route   POST /api/stores/test-shopify
  * @desc    Test Shopify connection
  * @access  Superadmin

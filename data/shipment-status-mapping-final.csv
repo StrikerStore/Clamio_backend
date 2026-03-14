@@ -1,0 +1,55 @@
+raw,renamed,color,is_handover
+Shipped,In Transit,orange,1
+Delivered,Delivered,green,1
+Canceled,Canceled,red,0
+RTO Initiated,RTO,red,1
+RTO Delivered,RTO Delivered,green,1
+Lost,Lost,maroon,1
+Pickup Error,Pickup Failed,red,0
+RTO Acknowledged,RTO,red,1
+Pickup Rescheduled,Pickup Reschedule,blue,0
+Cancellation Requested,Cancel Request,red,0
+Out For Delivery,Out for Delivery,yellow,1
+In Transit,In Transit,orange,1
+Out For Pickup,Out For Pickup,yellow,0
+Pickup Exception,Pickup Failed,red,0
+Undelivered,Undelivered,red,1
+Delayed,Delayed,red,1
+DESTROYED,Lost,maroon,1
+DAMAGED,Lost,maroon,1
+Pickup Booked,Shipment Booked,blue,0
+REACHED AT DESTINATION HUB,In Transit,orange,1
+RTO_NDR,RTO Undelivered,maroon,1
+RTO_OFD,RTO OFD,yellow,1
+PICKED UP,Picked Up,orange,1
+DISPOSED OFF,Disposed,maroon,1
+RTO IN INTRANSIT,RTO In Transit,orange,1
+Reached Warehouse,In Transit,orange,1
+Handover to Courier,In Transit,orange,1
+Shipment Booked,Shipment Booked,blue,0
+Picklist Generated,Manifest Uploaded,blue,0
+FC MANIFEST GENERATED,Manifest Uploaded,blue,0
+UNTRACEABLE,Lost,maroon,1
+AWB_ASSIGNED,Shipment Booked,blue,0
+Pickup Failed,Pickup Failed,red,0
+SHPFR3,Pickup Failed,red,0
+CROV,Delivery Attempted,yellow,1
+DEL,Delivered,green,1
+INT,In Transit,orange,1
+REACHED_AT_DESTINATION_HUB,In Transit,orange,1
+RTD,RTO Delivered,green,1
+RTO,RTO,red,1
+RTO Undelivered,RTO Undelivered,maroon,1
+RTO_IN_TRANSIT,RTO In Transit,orange,1
+RTO_INITIATED,RTO Initiated,red,1
+RTONDR5,RTO Undelivered,maroon,1
+RTOUND,RTO Lost,maroon,1
+SHNDR16,Consignee Unavailable,red,1
+SHNDR4,Delivery Reattempt,yellow,1
+SHNDR6,Consignee Refused,red,1
+SCH,Shipment Booked,blue,0
+PKF,Pickup Failed,red,0
+PCAN,Pickup Failed,red,0
+NFI,Not Found/No Information,maroon,1
+OFD,Out for Delivery,yellow,1
+SHPFR11,Manifest Uploaded,blue,0

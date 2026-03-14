@@ -16,6 +16,31 @@ const database = require('../config/database');
 router.get('/vapid-key', notificationController.getVapidKey);
 
 /**
+ * @route   GET /api/public/health
+ * @desc    Health check endpoint to verify backend server is running
+ * @access  Public
+ */
+router.get('/health', async (req, res) => {
+    try {
+        const dbStatus = database.isMySQLAvailable() ? 'connected' : 'disconnected';
+        res.json({
+            success: true,
+            status: 'ok',
+            timestamp: new Date().toISOString(),
+            database: dbStatus,
+            message: 'Backend server is running'
+        });
+    } catch (error) {
+        console.error('Health check error:', error);
+        res.status(500).json({
+            success: false,
+            status: 'error',
+            message: 'Backend server error'
+        });
+    }
+});
+
+/**
  * @route   GET /api/public/shipment-status-mapping
  * @desc    Get shipment status mapping for frontend badge colors and display names
  * @access  Public (status display is public information)

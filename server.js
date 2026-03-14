@@ -26,6 +26,7 @@ const { fetchAndSaveShopifyProducts } = require('./services/shopifyProductFetche
 const cron = require('node-cron');
 const { runMultiStoreMigration } = require('./utils/migrationRunner');
 const { runCarriersMigration } = require('./scripts/migrate-carriers-table');
+const { runConsolidatedMigration } = require('./utils/consolidatedMigrationRunner');
 
 // Import vendor error tracking middleware
 const { trackVendorErrors, handleVendorErrors } = require('./middleware/vendorErrorTracking');
@@ -508,6 +509,20 @@ app.listen(PORT, async () => {
     console.log('⚠️ Automatic migrations disabled (RUN_MIGRATIONS=false)');
   }
 
+  // Run consolidated migration (one-time, tracks completion)
+  // Set RUN_CONSOLIDATED_MIGRATION=false in .env to disable
+  // This migration runs once and tracks completion in utility table
+  const runConsolidated = process.env.RUN_CONSOLIDATED_MIGRATION !== 'false';
+  if (runConsolidated) {
+    try {
+      await runConsolidatedMigration();
+    } catch (error) {
+      console.error('⚠️ Consolidated migration warning (server will continue):', error.message);
+    }
+  } else {
+    console.log('⚠️ Consolidated migration disabled (RUN_CONSOLIDATED_MIGRATION=false)');
+  }
+
   // Start periodic database health check (every 15 minutes)
   setInterval(async () => {
     try {
@@ -788,24 +803,6 @@ app.listen(PORT, async () => {
       }
     } catch (err) {
       console.error('[Migration] RTO warehouse migration error:', err.message);
-    }
-  })();
-
-  // Run one-time migration to fix product_code in rto_inventory (strip size suffix)
-  (async () => {
-    try {
-      const fixRtoProductCodes = require('./migrations/fixRtoInventoryProductCodes');
-      console.log('[Migration] Running RTO inventory product code fix...');
-      const result = await fixRtoProductCodes.run();
-      if (result.skipped) {
-        console.log('[Migration] RTO product code fix already completed, skipped.');
-      } else if (result.success) {
-        console.log(`[Migration] RTO product code fix completed. Updated: ${result.updatedCount}, Merged: ${result.mergedCount}`);
-      } else {
-        console.log(`[Migration] RTO product code fix failed: ${result.message}`);
-      }
-    } catch (err) {
-      console.error('[Migration] RTO product code fix error:', err.message);
     }
   })();
 

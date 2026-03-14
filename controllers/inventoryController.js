@@ -78,6 +78,7 @@ async function getAggregatedInventory(req, res) {
       LEFT JOIN products p ON (
         (REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
         REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
+        REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+\.[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
         REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id)
         AND o.account_code = p.account_code
       )
@@ -642,8 +643,8 @@ async function addManualRTOEntry(req, res) {
       });
     }
 
-    // Use sku_id directly as product_code (size is stored in its own column)
-    const product_code = sku_id.trim();
+    // Build the product_code by combining sku_id and size
+    const product_code = `${sku_id.trim()}-${size.trim()}`;
 
     console.log(`📦 Adding RTO entry: location=${location}, product_code=${product_code}, size=${size}, qty=${qty}`);
 

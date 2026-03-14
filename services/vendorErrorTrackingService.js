@@ -9,6 +9,36 @@ const pushNotificationService = require('./pushNotificationService');
 class VendorErrorTrackingService {
   constructor() {
     console.log('🔍 Vendor Error Tracking Service initialized');
+
+    // Allowed notification types based on notifications.type ENUM definition
+    this.allowedNotificationTypes = new Set([
+      'reverse_order_failure',
+      'shipment_assignment_error',
+      'carrier_unavailable',
+      'low_balance',
+      'warehouse_issue',
+      'payment_failed',
+      'order_stuck',
+      'vendor_error',
+      'vendor_api_error',
+      'vendor_connection_error',
+      'vendor_validation_error',
+      'vendor_timeout_error',
+      'vendor_authentication_error',
+      'order_claim_error',
+      'order_processing_error',
+      'label_download_error',
+      'authentication_error',
+      'data_fetch_error',
+      'data_refresh_error',
+      'settlement_error',
+      'address_error',
+      'file_upload_error',
+      'file_download_error',
+      'vendor_operation_error',
+      'system_notification',
+      'other',
+    ]);
   }
 
   /**
@@ -82,7 +112,17 @@ class VendorErrorTrackingService {
         notificationData.error_details
       ];
 
-      const result = await database.query(query, params);
+      let result;
+      try {
+        result = await database.query(query, params);
+      } catch (dbError) {
+        // MySQL ENUM mismatch or truncation (e.g. column 'type') should not break main flow
+        if (dbError && (dbError.code === 'WARN_DATA_TRUNCATED' || dbError.errno === 1265)) {
+          console.error('⚠️ Notification insert warning (type may not exist in ENUM):', dbError.sqlMessage || dbError.message);
+          return { success: false, warning: 'notification_insert_truncated' };
+        }
+        throw dbError;
+      }
       console.log('✅ Vendor error notification created with ID:', result.insertId);
 
       // Get the created notification
@@ -134,7 +174,8 @@ class VendorErrorTrackingService {
 
     // If error type is mapped, use it
     if (error.type && errorTypeMap[error.type]) {
-      return errorTypeMap[error.type];
+      const mappedType = errorTypeMap[error.type];
+      return this.allowedNotificationTypes.has(mappedType) ? mappedType : 'other';
     }
 
     // Fallback to operation-based mapping
@@ -174,7 +215,8 @@ class VendorErrorTrackingService {
       'download_file': 'file_download_error'
     };
 
-    return operationTypeMap[operation] || 'vendor_operation_error';
+    const opType = operationTypeMap[operation] || 'vendor_operation_error';
+    return this.allowedNotificationTypes.has(opType) ? opType : 'other';
   }
 
   /**

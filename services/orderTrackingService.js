@@ -3,7 +3,7 @@ const database = require('../config/database');
 
 /**
  * Order Tracking Service
- * Handles fetching and storing order tracking data from Shipway API
+ * Handles fetching and storing order tracking data from Shipway and Shiprocket APIs
  * Supports dual cron logic: active orders (hourly) and inactive orders (daily)
  * Now supports multi-store via account_code from orders
  */
@@ -12,6 +12,7 @@ class OrderTrackingService {
     this.isActiveSyncRunning = false;
     this.isInactiveSyncRunning = false;
     this.shipwayApiUrl = 'https://app.shipway.com/api/tracking';
+    this.shiprocketApiUrl = 'https://apiv2.shiprocket.in/v1/external/courier/track/awbs';
     // Store credentials cache: account_code -> auth_token
     this.storeCredentialsCache = new Map();
   }
@@ -59,35 +60,47 @@ class OrderTrackingService {
       let errorCount = 0;
       const statusChangedOrders = []; // Track orders with status changes
 
-      // Group orders by account_code (each store has different auth_token)
-      const ordersByStore = new Map();
+      // Group orders by shipping_partner and account_code (each store has different auth_token)
+      const ordersByPartnerAndStore = new Map();
       for (const order of activeOrders) {
         if (!order.awb) continue; // Skip orders without AWB
+        if (!order.shipping_partner) continue; // Skip orders without shipping_partner
 
-        if (!ordersByStore.has(order.account_code)) {
-          ordersByStore.set(order.account_code, []);
+        const key = `${order.shipping_partner}|${order.account_code}`;
+        if (!ordersByPartnerAndStore.has(key)) {
+          ordersByPartnerAndStore.set(key, []);
         }
-        ordersByStore.get(order.account_code).push(order);
+        ordersByPartnerAndStore.get(key).push(order);
       }
 
-      console.log(`📊 [Active Tracking] Orders grouped into ${ordersByStore.size} store(s)`);
+      console.log(`📊 [Active Tracking] Orders grouped into ${ordersByPartnerAndStore.size} partner-store combination(s)`);
 
-      // Process each store's orders with batch AWB fetching
+      // Process each partner-store combination with batch AWB fetching
       const awbBatchSize = 50; // Max AWBs per API call
 
-      for (const [accountCode, storeOrders] of ordersByStore) {
-        console.log(`🏪 [Active Tracking] Processing store ${accountCode}: ${storeOrders.length} orders`);
+      for (const [key, storeOrders] of ordersByPartnerAndStore) {
+        const [shippingPartner, accountCode] = key.split('|');
+        console.log(`🏪 [Active Tracking] Processing ${shippingPartner} store ${accountCode}: ${storeOrders.length} orders`);
 
         // Split orders into batches of 50 AWBs
         for (let i = 0; i < storeOrders.length; i += awbBatchSize) {
           const batch = storeOrders.slice(i, i + awbBatchSize);
           const awbs = batch.map(order => order.awb);
 
-          console.log(`📡 [Active Tracking] Fetching batch ${Math.floor(i / awbBatchSize) + 1}/${Math.ceil(storeOrders.length / awbBatchSize)} (${awbs.length} AWBs) for store ${accountCode}`);
+          console.log(`📡 [Active Tracking] Fetching batch ${Math.floor(i / awbBatchSize) + 1}/${Math.ceil(storeOrders.length / awbBatchSize)} (${awbs.length} AWBs) for ${shippingPartner} store ${accountCode}`);
 
           try {
-            // Fetch tracking data for all AWBs in batch with single API call
-            const trackingDataMap = await this.fetchBatchTrackingFromShipway(awbs, accountCode);
+            // Fetch tracking data based on shipping partner
+            let trackingDataMap;
+            if (shippingPartner.toLowerCase() === 'shiprocket') {
+              trackingDataMap = await this.fetchBatchTrackingFromShiprocket(awbs, accountCode);
+            } else if (shippingPartner.toLowerCase() === 'shipway') {
+              trackingDataMap = await this.fetchBatchTrackingFromShipway(awbs, accountCode);
+            } else {
+              console.log(`⚠️ [Active Tracking] Unknown shipping partner: ${shippingPartner}, skipping batch`);
+              errorCount += batch.length;
+              continue;
+            }
 
             // Process each order with its pre-fetched tracking data
             const processPromises = batch.map(async order => {
@@ -116,7 +129,7 @@ class OrderTrackingService {
             });
 
           } catch (batchError) {
-            console.error(`❌ [Active Tracking] Batch fetch failed for store ${accountCode}:`, batchError.message);
+            console.error(`❌ [Active Tracking] Batch fetch failed for ${shippingPartner} store ${accountCode}:`, batchError.message);
             errorCount += batch.length;
           }
 
@@ -220,35 +233,47 @@ class OrderTrackingService {
       let successCount = 0;
       let errorCount = 0;
 
-      // Group orders by account_code (each store has different auth_token)
-      const ordersByStore = new Map();
+      // Group orders by shipping_partner and account_code (each store has different auth_token)
+      const ordersByPartnerAndStore = new Map();
       for (const order of inactiveOrders) {
         if (!order.awb) continue; // Skip orders without AWB
+        if (!order.shipping_partner) continue; // Skip orders without shipping_partner
 
-        if (!ordersByStore.has(order.account_code)) {
-          ordersByStore.set(order.account_code, []);
+        const key = `${order.shipping_partner}|${order.account_code}`;
+        if (!ordersByPartnerAndStore.has(key)) {
+          ordersByPartnerAndStore.set(key, []);
         }
-        ordersByStore.get(order.account_code).push(order);
+        ordersByPartnerAndStore.get(key).push(order);
       }
 
-      console.log(`📊 [Inactive Tracking] Orders grouped into ${ordersByStore.size} store(s)`);
+      console.log(`📊 [Inactive Tracking] Orders grouped into ${ordersByPartnerAndStore.size} partner-store combination(s)`);
 
-      // Process each store's orders with batch AWB fetching
+      // Process each partner-store combination with batch AWB fetching
       const awbBatchSize = 50; // Max AWBs per API call
 
-      for (const [accountCode, storeOrders] of ordersByStore) {
-        console.log(`🏪 [Inactive Tracking] Processing store ${accountCode}: ${storeOrders.length} orders`);
+      for (const [key, storeOrders] of ordersByPartnerAndStore) {
+        const [shippingPartner, accountCode] = key.split('|');
+        console.log(`🏪 [Inactive Tracking] Processing ${shippingPartner} store ${accountCode}: ${storeOrders.length} orders`);
 
         // Split orders into batches of 50 AWBs
         for (let i = 0; i < storeOrders.length; i += awbBatchSize) {
           const batch = storeOrders.slice(i, i + awbBatchSize);
           const awbs = batch.map(order => order.awb);
 
-          console.log(`📡 [Inactive Tracking] Fetching batch ${Math.floor(i / awbBatchSize) + 1}/${Math.ceil(storeOrders.length / awbBatchSize)} (${awbs.length} AWBs) for store ${accountCode}`);
+          console.log(`📡 [Inactive Tracking] Fetching batch ${Math.floor(i / awbBatchSize) + 1}/${Math.ceil(storeOrders.length / awbBatchSize)} (${awbs.length} AWBs) for ${shippingPartner} store ${accountCode}`);
 
           try {
-            // Fetch tracking data for all AWBs in batch with single API call
-            const trackingDataMap = await this.fetchBatchTrackingFromShipway(awbs, accountCode);
+            // Fetch tracking data based on shipping partner
+            let trackingDataMap;
+            if (shippingPartner.toLowerCase() === 'shiprocket') {
+              trackingDataMap = await this.fetchBatchTrackingFromShiprocket(awbs, accountCode);
+            } else if (shippingPartner.toLowerCase() === 'shipway') {
+              trackingDataMap = await this.fetchBatchTrackingFromShipway(awbs, accountCode);
+            } else {
+              console.log(`⚠️ [Inactive Tracking] Unknown shipping partner: ${shippingPartner}, skipping batch`);
+              errorCount += batch.length;
+              continue;
+            }
 
             // Process each order with its pre-fetched tracking data
             const processPromises = batch.map(async order => {
@@ -268,7 +293,7 @@ class OrderTrackingService {
             });
 
           } catch (batchError) {
-            console.error(`❌ [Inactive Tracking] Batch fetch failed for store ${accountCode}:`, batchError.message);
+            console.error(`❌ [Inactive Tracking] Batch fetch failed for ${shippingPartner} store ${accountCode}:`, batchError.message);
             errorCount += batch.length;
           }
 
@@ -394,6 +419,114 @@ class OrderTrackingService {
         throw new Error(`Shipway API error: ${error.response.data?.message || error.response.statusText}`);
       } else if (error.code === 'ECONNABORTED') {
         throw new Error('Request timeout - Shipway API not responding');
+      } else {
+        throw new Error(`Network error: ${error.message}`);
+      }
+    }
+  }
+
+  /**
+   * Fetch tracking data from Shiprocket API using batch AWB fetching (POST method)
+   * @param {string[]} awbs - Array of AWB numbers to fetch tracking for
+   * @param {string} accountCode - The account_code for the store
+   * @returns {Promise<Map>} Map of AWB -> tracking data
+   */
+  async fetchBatchTrackingFromShiprocket(awbs, accountCode) {
+    const trackingDataMap = new Map();
+
+    try {
+      if (!accountCode) {
+        throw new Error('account_code is required for fetching tracking data');
+      }
+
+      if (!awbs || awbs.length === 0) {
+        return trackingDataMap;
+      }
+
+      // Get store-specific credentials (Bearer token)
+      const bearerToken = await this.getStoreCredentials(accountCode);
+
+      // Shiprocket API uses POST with body
+      const requestBody = { awbs };
+
+      console.log(`📡 [API] Calling Shiprocket Tracking API for ${awbs.length} AWBs (store: ${accountCode})`);
+
+      const response = await axios.post(this.shiprocketApiUrl, requestBody, {
+        headers: {
+          'Authorization': bearerToken,
+          'Content-Type': 'application/json'
+        },
+        timeout: 60000 // 60 second timeout for batch requests
+      });
+
+      if (response.status !== 200) {
+        throw new Error(`Shiprocket API returned status ${response.status}`);
+      }
+
+      const data = response.data;
+
+      // Shiprocket returns an object with AWB codes as keys
+      if (!data || typeof data !== 'object') {
+        console.log(`⚠️ [API] No tracking data returned for batch`);
+        return trackingDataMap;
+      }
+
+      // Process each tracking result (AWB is the key)
+      for (const [awb, trackingResult] of Object.entries(data)) {
+        if (!trackingResult || !trackingResult.tracking_data) {
+          console.log(`⚠️ [API] No tracking_data for AWB ${awb}`);
+          continue;
+        }
+
+        const trackingData = trackingResult.tracking_data;
+
+        // Check if tracking is successful
+        if (trackingData.track_status !== 1) {
+          console.log(`⚠️ [API] Track status is not 1 for AWB ${awb}`);
+          continue;
+        }
+
+        // Extract current status from shipment_track array
+        const shipmentTrack = trackingData.shipment_track || [];
+        if (shipmentTrack.length === 0 || !shipmentTrack[0].current_status) {
+          console.log(`⚠️ [API] No current_status found for AWB ${awb}`);
+          continue;
+        }
+
+        const currentStatus = shipmentTrack[0].current_status;
+        const currentDateTime = new Date().toISOString().slice(0, 19).replace('T', ' ');
+
+        // Extract shipment_track_activities for RTO warehouse extraction
+        const shipmentTrackActivities = trackingData.shipment_track_activities || [];
+
+        // Extract shipment_details (if available)
+        const shipmentDetails = shipmentTrack.length > 0 ? [shipmentTrack[0]] : [];
+
+        // Create normalized tracking data structure (same format as Shipway)
+        const normalizedData = {
+          success: "1",
+          shipment_status_history: [
+            {
+              name: currentStatus,
+              time: currentDateTime
+            }
+          ],
+          shipment_details: shipmentDetails,
+          shipment_track_activities: shipmentTrackActivities
+        };
+
+        trackingDataMap.set(String(awb), normalizedData);
+      }
+
+      console.log(`✅ [API] Shiprocket batch fetch complete: ${trackingDataMap.size}/${awbs.length} AWBs have tracking data`);
+      return trackingDataMap;
+
+    } catch (error) {
+      if (error.response) {
+        console.error(`❌ [API] Shiprocket batch API error:`, error.response.status, error.response.data);
+        throw new Error(`Shiprocket API error: ${error.response.data?.message || error.response.statusText}`);
+      } else if (error.code === 'ECONNABORTED') {
+        throw new Error('Request timeout - Shiprocket API not responding');
       } else {
         throw new Error(`Network error: ${error.message}`);
       }

@@ -117,8 +117,8 @@ class Database {
          VALUES ('number_of_day_of_order_include', '60', 'system')
          ON DUPLICATE KEY UPDATE modified_at = modified_at`,
         `INSERT INTO utility (parameter, value, created_by)
-         VALUES ('shipping_partner', 'Shipway', 'system')
-         ON DUPLICATE KEY UPDATE modified_at = modified_at`
+         VALUES ('shipping_partner', 'Shipway,Shiprocket', 'system')
+         ON DUPLICATE KEY UPDATE value = IF(value NOT LIKE '%Shiprocket%', CONCAT(value, ',Shiprocket'), value), modified_at = modified_at`
       ];
 
       for (const query of initQueries) {
@@ -323,7 +323,7 @@ class Database {
     try {
       const createTableQuery = `
         CREATE TABLE IF NOT EXISTS products (
-          id VARCHAR(50) PRIMARY KEY,
+          id VARCHAR(50) NOT NULL,
           name VARCHAR(500) NOT NULL,
           image VARCHAR(500),
           altText TEXT,
@@ -332,6 +332,7 @@ class Database {
           account_code VARCHAR(50) NOT NULL,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
           updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          PRIMARY KEY (id, account_code),
           INDEX idx_account_code (account_code)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `;
@@ -355,8 +356,28 @@ class Database {
         }
       }
 
+      // Add unique index on (sku_id, account_code) if it doesn't exist
+      // This ensures sku_id is unique per account_code (allows NULL sku_id values)
+      try {
+        await this.mysqlConnection.execute(`
+          CREATE UNIQUE INDEX idx_sku_account_unique 
+          ON products (sku_id, account_code)
+        `);
+        console.log('✅ Added unique index on (sku_id, account_code)');
+      } catch (error) {
+        // Index might already exist
+        if (error.code === 'ER_DUP_KEYNAME' || error.code === 'ER_DUP_ENTRY') {
+          console.log('ℹ️ Unique index on (sku_id, account_code) already exists');
+        } else {
+          console.error('❌ Error adding unique index on (sku_id, account_code):', error.message);
+        }
+      }
+
       // Add account_code column if it doesn't exist (for existing tables)
       await this.addAccountCodeToProductsIfNotExists();
+
+      // Migrate primary key to composite (id, account_code) if not already done
+      await this.migrateProductsPrimaryKey();
 
       // Add created_at column if it doesn't exist
       try {
@@ -423,6 +444,52 @@ class Database {
       }
     } catch (error) {
       console.error('❌ Error adding account_code column to products table:', error.message);
+    }
+  }
+
+  /**
+   * Migrate products table primary key from (id) to composite (id, account_code)
+   * This allows the same Shopify product to exist in multiple stores
+   */
+  async migrateProductsPrimaryKey() {
+    if (!this.mysqlConnection) return;
+
+    try {
+      // Check current primary key columns
+      const [keyInfo] = await this.mysqlConnection.execute(
+        `SHOW KEYS FROM products WHERE Key_name = 'PRIMARY'`
+      );
+
+      const primaryKeyCols = keyInfo.map(k => k.Column_name);
+
+      // If primary key is only on 'id', migrate to composite (id, account_code)
+      if (primaryKeyCols.length === 1 && primaryKeyCols[0] === 'id') {
+        console.log('🔄 Migrating products primary key to composite (id, account_code)...');
+
+        // First, remove any duplicate rows that might exist (keep the first one)
+        // This prevents the ALTER from failing due to duplicate composite keys
+        try {
+          await this.mysqlConnection.execute(`
+            DELETE p1 FROM products p1
+            INNER JOIN products p2
+            WHERE p1.id = p2.id AND p1.account_code = p2.account_code
+            AND p1.created_at > p2.created_at
+          `);
+        } catch (err) {
+          // Ignore - there may be no duplicates
+        }
+
+        // Drop the old primary key and add the composite one
+        await this.mysqlConnection.execute(
+          `ALTER TABLE products DROP PRIMARY KEY, ADD PRIMARY KEY (id, account_code)`
+        );
+
+        console.log('✅ Products primary key migrated to composite (id, account_code)');
+      } else if (primaryKeyCols.includes('id') && primaryKeyCols.includes('account_code')) {
+        console.log('✅ Products primary key already composite (id, account_code)');
+      }
+    } catch (error) {
+      console.error('❌ Error migrating products primary key:', error.message);
     }
   }
 
@@ -551,6 +618,8 @@ class Database {
         CREATE TABLE IF NOT EXISTS orders (
           id VARCHAR(255) PRIMARY KEY,
           unique_id VARCHAR(100) UNIQUE,
+          shipment_id VARCHAR(100),
+          channel_id VARCHAR(100),
           order_id VARCHAR(100),
           customer_name VARCHAR(255),
           order_date DATETIME,
@@ -574,7 +643,9 @@ class Database {
           INDEX idx_pincode (pincode),
           INDEX idx_order_date (order_date),
           INDEX idx_size (size),
-          INDEX idx_account_code (account_code)
+          INDEX idx_account_code (account_code),
+          INDEX idx_shipment_id (shipment_id),
+          INDEX idx_channel_id (channel_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `;
 
@@ -589,6 +660,9 @@ class Database {
 
       // Add account_code column if it doesn't exist (for existing tables)
       await this.addAccountCodeToOrdersIfNotExists();
+
+      // Add shipment_id and channel_id columns if they don't exist (for Shiprocket)
+      await this.addShiprocketColumnsIfNotExists();
 
       // Create labels table for caching label URLs
       await this.createLabelsTable();
@@ -677,6 +751,65 @@ class Database {
       }
     } catch (error) {
       console.error('❌ Error adding account_code column to orders table:', error.message);
+    }
+  }
+
+  /**
+   * Add shipment_id and channel_id columns to orders table if they don't exist (for Shiprocket)
+   */
+  async addShiprocketColumnsIfNotExists() {
+    if (!this.mysqlConnection) return;
+
+    try {
+      // Check and add shipment_id column
+      const [shipmentCols] = await this.mysqlConnection.execute(
+        `SHOW COLUMNS FROM orders LIKE 'shipment_id'`
+      );
+
+      if (shipmentCols.length === 0) {
+        console.log('🔄 Adding shipment_id column to orders table...');
+        await this.mysqlConnection.execute(
+          `ALTER TABLE orders ADD COLUMN shipment_id VARCHAR(100) AFTER unique_id`
+        );
+        await this.mysqlConnection.execute(
+          `ALTER TABLE orders ADD INDEX idx_shipment_id (shipment_id)`
+        );
+        console.log('✅ shipment_id column added to orders table');
+      }
+
+      // Check and add channel_id column
+      const [channelCols] = await this.mysqlConnection.execute(
+        `SHOW COLUMNS FROM orders LIKE 'channel_id'`
+      );
+
+      if (channelCols.length === 0) {
+        console.log('🔄 Adding channel_id column to orders table...');
+        await this.mysqlConnection.execute(
+          `ALTER TABLE orders ADD COLUMN channel_id VARCHAR(100) AFTER shipment_id`
+        );
+        await this.mysqlConnection.execute(
+          `ALTER TABLE orders ADD INDEX idx_channel_id (channel_id)`
+        );
+        console.log('✅ channel_id column added to orders table');
+      }
+
+      // Check and add partner_order_id column
+      const [partnerOrderCols] = await this.mysqlConnection.execute(
+        `SHOW COLUMNS FROM orders LIKE 'partner_order_id'`
+      );
+
+      if (partnerOrderCols.length === 0) {
+        console.log('🔄 Adding partner_order_id column to orders table...');
+        await this.mysqlConnection.execute(
+          `ALTER TABLE orders ADD COLUMN partner_order_id VARCHAR(100) AFTER channel_id`
+        );
+        await this.mysqlConnection.execute(
+          `ALTER TABLE orders ADD INDEX idx_partner_order_id (partner_order_id)`
+        );
+        console.log('✅ partner_order_id column added to orders table');
+      }
+    } catch (error) {
+      console.error('❌ Error adding Shiprocket columns to orders table:', error.message);
     }
   }
 
@@ -1301,9 +1434,9 @@ class Database {
   }
 
   /**
-   * Create clone_transactions table for tracking clone attempt state.
-   * Enables retry/resume: on failure, the next attempt reads the stored
-   * clone_order_id and picks up from where the previous attempt stopped.
+   * Create clone_transactions table for tracking clone operations
+   * Records each step of the clone process for both Shipway and Shiprocket,
+   * enabling safe resume on retry if a clone fails mid-way.
    */
   async createCloneTransactionsTable() {
     if (!this.mysqlConnection) return;
@@ -1318,24 +1451,22 @@ class Database {
           clone_order_id VARCHAR(100) NOT NULL,
           account_code VARCHAR(50) NOT NULL,
           vendor_warehouse_id VARCHAR(50) NOT NULL,
+          shipping_partner VARCHAR(20) NOT NULL DEFAULT 'shipway',
           claimed_product_unique_ids TEXT,
           claimed_product_codes TEXT,
-          status ENUM(
-            'initiated',
-            'clone_created',
-            'original_updated',
-            'db_updated',
-            'completed',
-            'rolled_back'
-          ) DEFAULT 'initiated',
+          clone_shipment_id VARCHAR(100),
+          awb_code VARCHAR(100),
+          assigned_carrier_id VARCHAR(100),
+          status VARCHAR(30) DEFAULT 'initiated',
           error_message TEXT,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
           updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-
           INDEX idx_original_order (original_order_id),
+          INDEX idx_clone_order (clone_order_id),
           INDEX idx_status (status),
           INDEX idx_account_code (account_code),
-          INDEX idx_vendor (vendor_warehouse_id)
+          INDEX idx_vendor (vendor_warehouse_id),
+          INDEX idx_shipping_partner (shipping_partner)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `;
 
@@ -2019,10 +2150,20 @@ class Database {
 
     try {
       const [rows] = await this.mysqlConnection.execute(
-        'SELECT value FROM utility WHERE parameter = ? ORDER BY value ASC',
+        'SELECT value FROM utility WHERE parameter = ?',
         ['shipping_partner']
       );
-      return rows.map(row => row.value);
+      
+      if (rows.length === 0) {
+        return ['Shipway']; // Default fallback
+      }
+      
+      // Handle comma-separated values or single value
+      const value = rows[0].value;
+      if (value.includes(',')) {
+        return value.split(',').map(v => v.trim()).filter(v => v.length > 0);
+      }
+      return [value];
     } catch (error) {
       console.error('Error getting shipping partners:', error);
       throw new Error('Failed to get shipping partners from database');
@@ -2365,23 +2506,60 @@ class Database {
   }
 
   /**
-   * Get product by ID (Shopify product ID)
+   * Get product by ID and account_code (composite key)
    * @param {string} id - Product ID (Shopify ID)
+   * @param {string} accountCode - Account code for the store
    * @returns {Promise<Object|null>} Product object or null if not found
    */
-  async getProductById(id) {
+  async getProductById(id, accountCode) {
     if (!this.mysqlConnection) {
       throw new Error('MySQL connection not available');
     }
 
     try {
+      if (accountCode) {
+        const [rows] = await this.mysqlConnection.execute(
+          'SELECT * FROM products WHERE id = ? AND account_code = ?',
+          [id, accountCode]
+        );
+        return rows.length > 0 ? rows[0] : null;
+      } else {
+        // Fallback for backward compatibility (without account_code)
+        const [rows] = await this.mysqlConnection.execute(
+          'SELECT * FROM products WHERE id = ?',
+          [id]
+        );
+        return rows.length > 0 ? rows[0] : null;
+      }
+    } catch (error) {
+      console.error('Error getting product by ID:', error);
+      throw new Error('Failed to get product from database');
+    }
+  }
+
+  /**
+   * Get product by sku_id and account_code (unique key for products)
+   * @param {string} skuId - Product SKU ID
+   * @param {string} accountCode - Account code for the store
+   * @returns {Promise<Object|null>} Product object or null if not found
+   */
+  async getProductBySkuId(skuId, accountCode) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      if (!skuId || !accountCode) {
+        return null;
+      }
+
       const [rows] = await this.mysqlConnection.execute(
-        'SELECT * FROM products WHERE id = ?',
-        [id]
+        'SELECT * FROM products WHERE sku_id = ? AND account_code = ?',
+        [skuId, accountCode]
       );
       return rows.length > 0 ? rows[0] : null;
     } catch (error) {
-      console.error('Error getting product by ID:', error);
+      console.error('Error getting product by SKU ID:', error);
       throw new Error('Failed to get product from database');
     }
   }
@@ -2418,7 +2596,7 @@ class Database {
     } catch (error) {
       console.error('Error creating product:', error);
       if (error.code === 'ER_DUP_ENTRY') {
-        throw new Error('Product with this ID already exists');
+        throw new Error('Product with this ID and account_code already exists');
       }
       throw new Error('Failed to create product in database');
     }
@@ -2428,9 +2606,10 @@ class Database {
    * Update product
    * @param {string} id - Product ID (Shopify ID)
    * @param {Object} updateData - Data to update
+   * @param {string} accountCode - Account code for the store
    * @returns {Promise<Object|null>} Updated product object or null if not found
    */
-  async updateProduct(id, updateData) {
+  async updateProduct(id, updateData, accountCode) {
     if (!this.mysqlConnection) {
       throw new Error('MySQL connection not available');
     }
@@ -2464,18 +2643,23 @@ class Database {
         throw new Error('No fields to update');
       }
 
-      values.push(id);
-
-      const [result] = await this.mysqlConnection.execute(
-        `UPDATE products SET ${fields.join(', ')} WHERE id = ?`,
-        values
-      );
-
-      if (result.affectedRows === 0) {
-        return null;
+      if (accountCode) {
+        values.push(id, accountCode);
+        const [result] = await this.mysqlConnection.execute(
+          `UPDATE products SET ${fields.join(', ')} WHERE id = ? AND account_code = ?`,
+          values
+        );
+        if (result.affectedRows === 0) return null;
+        return await this.getProductById(id, accountCode);
+      } else {
+        values.push(id);
+        const [result] = await this.mysqlConnection.execute(
+          `UPDATE products SET ${fields.join(', ')} WHERE id = ?`,
+          values
+        );
+        if (result.affectedRows === 0) return null;
+        return await this.getProductById(id);
       }
-
-      return await this.getProductById(id);
     } catch (error) {
       console.error('Error updating product:', error);
       throw new Error('Failed to update product in database');
@@ -2485,20 +2669,28 @@ class Database {
   /**
    * Delete product
    * @param {string} id - Product ID (Shopify ID)
+   * @param {string} accountCode - Account code for the store
    * @returns {Promise<boolean>} True if deleted, false if not found
    */
-  async deleteProduct(id) {
+  async deleteProduct(id, accountCode) {
     if (!this.mysqlConnection) {
       throw new Error('MySQL connection not available');
     }
 
     try {
-      const [result] = await this.mysqlConnection.execute(
-        'DELETE FROM products WHERE id = ?',
-        [id]
-      );
-
-      return result.affectedRows > 0;
+      if (accountCode) {
+        const [result] = await this.mysqlConnection.execute(
+          'DELETE FROM products WHERE id = ? AND account_code = ?',
+          [id, accountCode]
+        );
+        return result.affectedRows > 0;
+      } else {
+        const [result] = await this.mysqlConnection.execute(
+          'DELETE FROM products WHERE id = ?',
+          [id]
+        );
+        return result.affectedRows > 0;
+      }
     } catch (error) {
       console.error('Error deleting product:', error);
       throw new Error('Failed to delete product from database');
@@ -2520,10 +2712,23 @@ class Database {
       let updated = 0;
 
       for (const product of products) {
-        const existing = await this.getProductById(product.id);
+        // Use sku_id + account_code as unique key (if sku_id exists)
+        // Fallback to id + account_code if sku_id is null/empty
+        let existing = null;
+        
+        if (product.sku_id && product.sku_id.trim() !== '') {
+          // Check by sku_id + account_code (primary unique key)
+          existing = await this.getProductBySkuId(product.sku_id, product.account_code);
+        }
+        
+        // If not found by sku_id, check by id + account_code (fallback)
+        if (!existing) {
+          existing = await this.getProductById(product.id, product.account_code);
+        }
 
         if (existing) {
-          await this.updateProduct(product.id, product);
+          // Update existing product - use existing id for update
+          await this.updateProduct(existing.id, product, product.account_code);
           updated++;
         } else {
           await this.createProduct(product);
@@ -3489,12 +3694,15 @@ class Database {
       // Use INSERT ... ON DUPLICATE KEY UPDATE for orders table
       await this.mysqlConnection.execute(
         `INSERT INTO orders (
-          id, unique_id, order_id, customer_name, order_date,
+          id, unique_id, shipment_id, channel_id, partner_order_id, order_id, customer_name, order_date,
           product_name, product_code, size, quantity, selling_price, order_total, payment_type,
           is_partial_paid, prepaid_amount, order_total_ratio, order_total_split, collectable_amount,
           pincode, is_in_new_order, account_code
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE
+          shipment_id = VALUES(shipment_id),
+          channel_id = VALUES(channel_id),
+          partner_order_id = VALUES(partner_order_id),
           order_date = VALUES(order_date),
           product_name = VALUES(product_name),
           product_code = VALUES(product_code),
@@ -3514,6 +3722,9 @@ class Database {
         [
           orderData.id || null,
           orderData.unique_id || null,
+          orderData.shipment_id || null,
+          orderData.channel_id || null,
+          orderData.partner_order_id || null,
           orderData.order_id || null,
           orderData.customer_name || null,
           orderData.order_date || null,
@@ -3640,6 +3851,8 @@ class Database {
       .replace(/[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$/i, '')
       // Remove age ranges (24-26, 25-26, etc.) at the end
       .replace(/[-_][0-9]+-[0-9]+$/, '')
+      // Remove decimal numbers at the end (size numbers like 5.5, 6.5, 7.5, etc.)
+      .replace(/[-_][0-9]+\.[0-9]+$/, '')
       // Remove single numbers at the end (size numbers like 32, 34, etc.)
       .replace(/[-_][0-9]+$/, '')
       // Clean up any double dashes or underscores
@@ -3669,6 +3882,12 @@ class Database {
     const ageRangeMatch = skuId.match(/[-_]([0-9]+-[0-9]+)$/);
     if (ageRangeMatch) {
       return ageRangeMatch[1];
+    }
+
+    // Try to extract decimal numbers at the end (size numbers like 5.5, 6.5, etc.)
+    const decimalMatch = skuId.match(/[-_]([0-9]+\.[0-9]+)$/);
+    if (decimalMatch) {
+      return decimalMatch[1];
     }
 
     // Try to extract single numbers at the end (size numbers like 32, 34, etc.)
@@ -3715,6 +3934,7 @@ class Database {
         LEFT JOIN products p ON (
           (REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
           REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+\.[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
           REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id)
           AND o.account_code = p.account_code
         )
@@ -3765,6 +3985,7 @@ class Database {
         LEFT JOIN products p ON (
           (REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
           REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+\.[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
           REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id)
           AND o.account_code = p.account_code
         )
@@ -3800,11 +4021,14 @@ class Database {
       // Create placeholders for IN clause (?, ?, ?, ...)
       const placeholders = order_ids.map(() => '?').join(',');
 
-      const [rows] = await this.mysqlConnection.execute(`
+      // Use pool if available (preferred for parallel execution), otherwise fall back to connection
+      const db = this.mysqlPool || this.mysqlConnection;
+
+      const [rows] = await db.execute(`
         SELECT 
           o.*,
           p.image as product_image,
-          c.status,
+          c.status as claims_status,
           c.claimed_by,
           c.claimed_at,
           c.last_claimed_by,
@@ -3819,16 +4043,28 @@ class Database {
           l.carrier_name,
           l.handover_at,
           c.priority_carrier,
-          l.is_manifest
+          l.is_manifest,
+          l.manifest_id,
+          l.current_shipment_status,
+          l.is_handover,
+          s.store_name,
+          s.status as store_status,
+          CASE 
+            WHEN l.current_shipment_status IS NOT NULL AND l.current_shipment_status != '' 
+            THEN l.current_shipment_status 
+            ELSE c.status 
+          END as status
         FROM orders o
         LEFT JOIN products p ON (
           (REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
           REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+\.[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
           REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id)
           AND o.account_code = p.account_code
         )
         LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
         LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
+        LEFT JOIN store_info s ON o.account_code = s.account_code
         WHERE o.order_id IN (${placeholders})
         ORDER BY o.order_id, o.product_name
       `, order_ids);
@@ -3882,6 +4118,7 @@ class Database {
         LEFT JOIN products p ON (
           (REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
           REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+\.[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
           REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id)
           AND o.account_code = p.account_code
         )
@@ -3944,6 +4181,7 @@ class Database {
         LEFT JOIN products p ON (
           (REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
           REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+\.[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
           REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id)
           AND o.account_code = p.account_code
         )
@@ -4082,13 +4320,10 @@ class Database {
             ELSE c.status 
           END as status
         FROM orders o
-        LEFT JOIN (
-          SELECT sku_id, account_code, MIN(image) as image
-          FROM products
-          GROUP BY sku_id, account_code
-        ) p ON (
+        LEFT JOIN products p ON (
           (REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
           REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+\.[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
           REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id)
           AND o.account_code = p.account_code
         )
@@ -4097,7 +4332,7 @@ class Database {
         LEFT JOIN store_info s ON o.account_code = s.account_code
         WHERE ${whereConditions}
         ORDER BY o.order_date DESC, o.order_id, o.product_name
-        LIMIT ${parseInt(limit)} OFFSET ${parseInt(offset)}` ;
+        LIMIT ${parseInt(limit)} OFFSET ${parseInt(offset)}`;
 
       // Build COUNT query for total count and quantity (same WHERE clause, includes store_info for status filtering)
       const countQuery = `
@@ -4320,13 +4555,10 @@ class Database {
             ELSE NULL
           END as customer_name_from_info
         FROM orders o
-        LEFT JOIN (
-          SELECT sku_id, account_code, MIN(image) as image
-          FROM products
-          GROUP BY sku_id, account_code
-        ) p ON (
+        LEFT JOIN products p ON (
           (REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
           REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+\.[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
           REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id)
           AND o.account_code = p.account_code
         )
@@ -4334,18 +4566,10 @@ class Database {
         LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
         LEFT JOIN store_info s ON o.account_code = s.account_code
         LEFT JOIN users u ON c.claimed_by = u.warehouseId
-        LEFT JOIN (
-          SELECT order_id, account_code,
-            MIN(billing_firstname) as billing_firstname,
-            MIN(billing_lastname) as billing_lastname,
-            MIN(shipping_firstname) as shipping_firstname,
-            MIN(shipping_lastname) as shipping_lastname
-          FROM customer_info
-          GROUP BY order_id, account_code
-        ) ci ON o.order_id = ci.order_id AND o.account_code = ci.account_code
+        LEFT JOIN customer_info ci ON o.order_id = ci.order_id AND o.account_code = ci.account_code
         WHERE ${whereConditions}
         ORDER BY o.order_date DESC, o.order_id, o.product_name
-        LIMIT ${parseInt(limit)} OFFSET ${parseInt(offset)}` ;
+        LIMIT ${parseInt(limit)} OFFSET ${parseInt(offset)}`;
 
       // Build COUNT query for total count and quantity
       const countQuery = `
@@ -4729,6 +4953,7 @@ class Database {
         LEFT JOIN products p ON (
           (REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
           REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+\.[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
           REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id)
           AND o.account_code = p.account_code
         )
@@ -4788,15 +5013,21 @@ class Database {
         LEFT JOIN products p ON (
           (REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
           REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+\.[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
           REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id)
           AND o.account_code = p.account_code
         )
         LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
         LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
+        LEFT JOIN store_info s ON o.account_code = s.account_code
         WHERE c.claimed_by = ? 
         AND (c.status = 'claimed' OR c.status = 'ready_for_handover')
-        AND (o.is_in_new_order = 1 OR c.label_downloaded = 1)
         AND (l.is_manifest IS NULL OR l.is_manifest = 0)
+        AND (
+          (COALESCE(s.shipping_partner, '') = 'Shiprocket' AND o.is_in_new_order = 1)
+          OR 
+          (COALESCE(s.shipping_partner, '') != 'Shiprocket' AND (o.is_in_new_order = 1 OR c.label_downloaded = 1))
+        )
         ORDER BY o.order_date DESC, o.order_id
       `, [warehouseId]);
 
@@ -4840,6 +5071,7 @@ class Database {
           l.is_manifest,
           l.current_shipment_status,
           l.is_handover,
+          s.shipping_partner,
           CASE 
             WHEN l.current_shipment_status IS NOT NULL AND l.current_shipment_status != '' 
             THEN l.current_shipment_status 
@@ -4849,16 +5081,32 @@ class Database {
         LEFT JOIN products p ON (
           (REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
           REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+\.[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
           REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id)
           AND o.account_code = p.account_code
         )
         LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
-        LEFT JOIN labels l ON o.order_id = l.order_id
+        LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
+        LEFT JOIN store_info s ON o.account_code = s.account_code
         WHERE c.claimed_by = ? 
         AND (c.status = 'claimed' OR c.status = 'ready_for_handover')
         AND (l.is_manifest IS NULL OR l.is_manifest = 0)
+        AND (
+          (COALESCE(s.shipping_partner, '') = 'Shiprocket' AND o.is_in_new_order = 1)
+          OR 
+          (COALESCE(s.shipping_partner, '') != 'Shiprocket' AND (o.is_in_new_order = 1 OR c.label_downloaded = 1))
+        )
         ORDER BY o.order_date DESC, o.order_id
       `, [warehouseId]);
+
+      // Debug logging for orders with is_in_new_order = 0
+      const problematicOrders = rows.filter(r => r.is_in_new_order === 0);
+      if (problematicOrders.length > 0) {
+        console.log('⚠️ DEBUG: Found orders with is_in_new_order = 0 in My Orders:');
+        problematicOrders.forEach(order => {
+          console.log(`  - Order ID: ${order.order_id}, Account: ${order.account_code}, Shipping Partner: ${order.shipping_partner || 'NULL'}, is_in_new_order: ${order.is_in_new_order}, label_downloaded: ${order.label_downloaded}`);
+        });
+      }
 
       return rows;
     } catch (error) {
@@ -4910,6 +5158,7 @@ class Database {
         LEFT JOIN products p ON (
           (REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
           REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+\.[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
           REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id)
           AND o.account_code = p.account_code
         )
@@ -4973,6 +5222,7 @@ class Database {
         LEFT JOIN products p ON (
           (REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
           REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+\.[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
           REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id)
           AND o.account_code = p.account_code
         )
@@ -5022,7 +5272,7 @@ class Database {
         'order_id', 'customer_name', 'order_date',
         'product_name', 'product_code', 'selling_price', 'order_total',
         'payment_type', 'is_partial_paid', 'prepaid_amount', 'order_total_ratio', 'order_total_split',
-        'collectable_amount', 'pincode', 'is_in_new_order'
+        'collectable_amount', 'pincode', 'is_in_new_order', 'shipment_id', 'channel_id', 'partner_order_id'
       ];
 
       // Claims table fields
@@ -5147,20 +5397,44 @@ class Database {
       throw new Error('MySQL connection not available');
     }
 
-    try {
-      const updatedOrders = [];
+    if (!Array.isArray(updates) || updates.length === 0) {
+      return [];
+    }
 
+    // Get a connection from the pool for transaction support
+    const db = this.mysqlPool || this.mysqlConnection;
+    const connection = await db.getConnection();
+
+    try {
+      // Use transaction for batch operations
+      await connection.beginTransaction();
+
+      const updatedOrders = [];
       for (const update of updates) {
-        const updatedOrder = await this.updateOrder(update.unique_id, update.updateData);
-        if (updatedOrder) {
-          updatedOrders.push(updatedOrder);
+        try {
+          // Note: updateOrder uses this.mysqlConnection (pool), which is fine for reads
+          // But we're in a transaction, so we should use the connection for consistency
+          // However, updateOrder is complex and uses pool internally, so we'll keep it as is
+          // The transaction will still work because we're committing/rolling back the connection
+          const updatedOrder = await this.updateOrder(update.unique_id, update.updateData);
+          if (updatedOrder) {
+            updatedOrders.push(updatedOrder);
+          }
+        } catch (error) {
+          // Log but continue with other updates
+          console.error(`Error updating order ${update.unique_id}:`, error.message);
         }
       }
 
+      await connection.commit();
       return updatedOrders;
     } catch (error) {
+      await connection.rollback();
       console.error('Error bulk updating orders:', error);
       throw new Error('Failed to bulk update orders');
+    } finally {
+      // Release the connection back to the pool
+      connection.release();
     }
   }
 
@@ -5203,6 +5477,7 @@ class Database {
          LEFT JOIN products p ON (
           (REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
           REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+\.[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
           REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id)
           AND o.account_code = p.account_code
         )
@@ -5412,6 +5687,143 @@ class Database {
     } catch (error) {
       console.error('Error creating/updating label:', error);
       throw new Error('Failed to save label to database');
+    }
+  }
+
+  /**
+   * Batch upsert labels (optimized for multiple updates)
+   * @param {Array} labelDataArray - Array of label data objects
+   * @returns {Promise<Array>} Array of updated labels
+   */
+  async batchUpsertLabels(labelDataArray) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    if (!Array.isArray(labelDataArray) || labelDataArray.length === 0) {
+      return [];
+    }
+
+    // Get a connection from the pool for transaction support
+    const db = this.mysqlPool || this.mysqlConnection;
+    const connection = await db.getConnection();
+
+    try {
+      // Use a transaction for batch operations
+      await connection.beginTransaction();
+
+      const results = [];
+      for (const labelData of labelDataArray) {
+        if (!labelData.account_code) {
+          throw new Error('account_code is required for creating/updating label');
+        }
+
+        const updateFields = [];
+        const updateValues = [];
+
+        if (labelData.hasOwnProperty('label_url')) {
+          updateFields.push('label_url = ?');
+          updateValues.push(labelData.label_url);
+        }
+        if (labelData.hasOwnProperty('awb')) {
+          updateFields.push('awb = ?');
+          updateValues.push(labelData.awb || null);
+        }
+        if (labelData.hasOwnProperty('carrier_id')) {
+          updateFields.push('carrier_id = ?');
+          updateValues.push(labelData.carrier_id || null);
+        }
+        if (labelData.hasOwnProperty('carrier_name')) {
+          updateFields.push('carrier_name = ?');
+          updateValues.push(labelData.carrier_name || null);
+        }
+        if (labelData.hasOwnProperty('priority_carrier')) {
+          updateFields.push('priority_carrier = ?');
+          updateValues.push(labelData.priority_carrier || null);
+        }
+        if (labelData.hasOwnProperty('is_manifest')) {
+          updateFields.push('is_manifest = ?');
+          updateValues.push(labelData.is_manifest || 0);
+        }
+        if (labelData.hasOwnProperty('manifest_id')) {
+          updateFields.push('manifest_id = ?');
+          updateValues.push(labelData.manifest_id || null);
+        }
+
+        updateFields.push('updated_at = CURRENT_TIMESTAMP');
+        const updateClause = updateFields.join(', ');
+
+        await connection.execute(
+          `INSERT INTO labels (order_id, label_url, awb, carrier_id, carrier_name, priority_carrier, is_manifest, manifest_id, account_code) 
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) 
+           ON DUPLICATE KEY UPDATE ${updateClause}`,
+          [
+            labelData.order_id,
+            labelData.label_url || null,
+            labelData.awb || null,
+            labelData.carrier_id || null,
+            labelData.carrier_name || null,
+            labelData.priority_carrier || null,
+            labelData.is_manifest || 0,
+            labelData.manifest_id || null,
+            labelData.account_code,
+            ...updateValues
+          ]
+        );
+
+        // Get the updated label (using pool connection for read)
+        const label = await this.getLabelByOrderId(labelData.order_id, labelData.account_code);
+        if (label) results.push(label);
+      }
+
+      await connection.commit();
+      return results;
+    } catch (error) {
+      await connection.rollback();
+      console.error('Error batch upserting labels:', error);
+      throw new Error('Failed to batch update labels');
+    } finally {
+      // Release the connection back to the pool
+      connection.release();
+    }
+  }
+
+  /**
+   * Get next Shiprocket manifest ID by finding max manifest_id with MANIFEST- prefix
+   * Format: MANIFEST-0001, MANIFEST-0002, etc.
+   * @returns {Promise<string>} Next manifest ID (e.g., "MANIFEST-0001")
+   */
+  async getNextShiprocketManifestId() {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      // Get max manifest_id that starts with 'MANIFEST-'
+      const [rows] = await this.mysqlConnection.execute(`
+        SELECT manifest_id 
+        FROM labels 
+        WHERE manifest_id LIKE 'MANIFEST-%'
+        ORDER BY CAST(SUBSTRING(manifest_id, 10) AS UNSIGNED) DESC
+        LIMIT 1
+      `);
+
+      let nextNumber = 1;
+      if (rows.length > 0 && rows[0].manifest_id) {
+        // Extract number from MANIFEST-0001 format
+        const match = rows[0].manifest_id.match(/MANIFEST-(\d+)/);
+        if (match) {
+          nextNumber = parseInt(match[1], 10) + 1;
+        }
+      }
+
+      // Format as MANIFEST-0001 (4 digits, zero-padded)
+      const manifestId = `MANIFEST-${String(nextNumber).padStart(4, '0')}`;
+      console.log(`✅ Generated next Shiprocket manifest ID: ${manifestId}`);
+      return manifestId;
+    } catch (error) {
+      console.error('Error getting next Shiprocket manifest ID:', error);
+      throw new Error('Failed to generate manifest ID');
     }
   }
 
@@ -5706,13 +6118,19 @@ class Database {
 
     try {
       const [rows] = await this.mysqlConnection.execute(`
-        SELECT DISTINCT c.order_id, o.account_code, l.awb
+        SELECT DISTINCT 
+          c.order_id, 
+          o.account_code, 
+          l.awb,
+          s.shipping_partner
         FROM claims c
         INNER JOIN orders o ON c.order_id = o.order_id AND c.account_code = o.account_code
         LEFT JOIN labels l ON c.order_id = l.order_id AND c.account_code = l.account_code
+        LEFT JOIN store_info s ON o.account_code = s.account_code
         WHERE c.label_downloaded = 1 
         AND c.order_id IS NOT NULL
         AND o.account_code IS NOT NULL
+        AND s.shipping_partner IN ('Shipway', 'Shiprocket')
         ORDER BY c.order_id
       `);
       return rows;
@@ -6287,6 +6705,27 @@ class Database {
       } catch (migrationError) {
         console.error('⚠️ Error adding return_warehouse_id column (may already exist):', migrationError.message);
       }
+
+      // Add pickup_location column if it doesn't exist (migration for Shiprocket support)
+      try {
+        const [columns] = await this.mysqlConnection.execute(`
+          SELECT COLUMN_NAME 
+          FROM INFORMATION_SCHEMA.COLUMNS 
+          WHERE TABLE_SCHEMA = DATABASE() 
+          AND TABLE_NAME = 'wh_mapping' 
+          AND COLUMN_NAME = 'pickup_location'
+        `);
+
+        if (columns.length === 0) {
+          await this.mysqlConnection.execute(`
+            ALTER TABLE wh_mapping 
+            ADD COLUMN pickup_location VARCHAR(255) AFTER return_warehouse_id
+          `);
+          console.log('✅ Added pickup_location column to wh_mapping table');
+        }
+      } catch (migrationError) {
+        console.error('⚠️ Error adding pickup_location column (may already exist):', migrationError.message);
+      }
     } catch (error) {
       console.error('❌ Error creating wh_mapping table:', error.message);
     }
@@ -6691,10 +7130,11 @@ class Database {
   }
 
   /**
-   * Get warehouse mapping details (vendor_wh_id and return_warehouse_id) by claimio warehouse ID and account code
+   * Get warehouse mapping details (vendor_wh_id, return_warehouse_id, pickup_location)
+   * by claimio warehouse ID and account code
    * @param {string} claimioWhId - The claimio warehouse ID (from users.warehouseId)
    * @param {string} accountCode - The account code (store identifier)
-   * @returns {Promise<Object|null>} Object with vendor_wh_id and return_warehouse_id, or null if not found
+   * @returns {Promise<Object|null>} Object with vendor_wh_id, return_warehouse_id, pickup_location, or null if not found
    */
   async getWhMappingByClaimioWhIdAndAccountCode(claimioWhId, accountCode) {
     if (!this.mysqlConnection) {
@@ -6703,10 +7143,16 @@ class Database {
 
     try {
       const [rows] = await this.mysqlConnection.execute(
-        'SELECT vendor_wh_id, return_warehouse_id FROM wh_mapping WHERE claimio_wh_id = ? AND account_code = ? AND is_active = TRUE LIMIT 1',
+        'SELECT vendor_wh_id, return_warehouse_id, pickup_location FROM wh_mapping WHERE claimio_wh_id = ? AND account_code = ? AND is_active = TRUE LIMIT 1',
         [claimioWhId, accountCode]
       );
-      return rows.length > 0 ? { vendor_wh_id: rows[0].vendor_wh_id, return_warehouse_id: rows[0].return_warehouse_id } : null;
+      return rows.length > 0
+        ? {
+            vendor_wh_id: rows[0].vendor_wh_id,
+            return_warehouse_id: rows[0].return_warehouse_id,
+            pickup_location: rows[0].pickup_location,
+          }
+        : null;
     } catch (error) {
       console.error('Error getting warehouse mapping:', error);
       throw new Error('Failed to get warehouse mapping from database');
@@ -6764,6 +7210,7 @@ class Database {
           wm.vendor_wh_id,
           wm.account_code,
           wm.return_warehouse_id,
+          wm.pickup_location,
           wm.is_active,
           wm.created_at,
           wm.modified_at,
@@ -6806,6 +7253,7 @@ class Database {
           wm.vendor_wh_id,
           wm.account_code,
           wm.return_warehouse_id,
+          wm.pickup_location,
           wm.is_active,
           wm.created_at,
           wm.modified_at,
@@ -6868,8 +7316,8 @@ class Database {
       }
 
       const [result] = await this.mysqlConnection.execute(
-        'INSERT INTO wh_mapping (claimio_wh_id, vendor_wh_id, account_code, return_warehouse_id, is_active) VALUES (?, ?, ?, ?, TRUE)',
-        [mappingData.claimio_wh_id, mappingData.vendor_wh_id, mappingData.account_code, mappingData.return_warehouse_id || null]
+        'INSERT INTO wh_mapping (claimio_wh_id, vendor_wh_id, account_code, return_warehouse_id, pickup_location, is_active) VALUES (?, ?, ?, ?, ?, TRUE)',
+        [mappingData.claimio_wh_id, mappingData.vendor_wh_id, mappingData.account_code, mappingData.return_warehouse_id || null, mappingData.pickup_location || null]
       );
 
       return await this.getWhMappingById(result.insertId);
@@ -7241,6 +7689,7 @@ class Database {
         LEFT JOIN products p ON (
           (REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
           REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
+          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+\.[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
           REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id)
           AND o.account_code = p.account_code
         )
@@ -7476,17 +7925,42 @@ class Database {
       // 2. Joins with products table
       // 3. Uses account_code priority for product name selection when multiple matches exist
       const query = `
-        WITH rto_with_products AS (
+        WITH rto_with_base_sku AS (
           SELECT 
             ri.id,
             ri.rto_wh,
             ri.product_code,
             ri.size,
             ri.quantity,
+            -- Remove "-{size}" suffix from product_code to get base SKU
+            CASE 
+              WHEN ri.size IS NOT NULL AND ri.size != '' 
+                   AND ri.product_code LIKE CONCAT('%-', ri.size)
+              THEN LEFT(ri.product_code, LENGTH(ri.product_code) - LENGTH(CONCAT('-', ri.size)))
+              ELSE ri.product_code
+            END as base_sku
+          FROM rto_inventory ri
+          WHERE ri.quantity > 0
+        ),
+        rto_with_products AS (
+          SELECT 
+            r.id,
+            r.rto_wh,
+            r.product_code,
+            r.size,
+            r.quantity,
+            r.base_sku,
             p.name as product_name,
             p.account_code,
+            -- Priority ranking: STRI=1, DRIB=2, JERS=3, others=4
+            CASE p.account_code
+              WHEN 'STRI' THEN 1
+              WHEN 'DRIB' THEN 2
+              WHEN 'JERS' THEN 3
+              ELSE 4
+            END as priority_rank,
             ROW_NUMBER() OVER (
-              PARTITION BY ri.id 
+              PARTITION BY r.id 
               ORDER BY 
                 CASE p.account_code
                   WHEN 'STRI' THEN 1
@@ -7495,9 +7969,8 @@ class Database {
                   ELSE 4
                 END
             ) as rn
-          FROM rto_inventory ri
-          LEFT JOIN products p ON ri.product_code = p.sku_id
-          WHERE ri.quantity > 0
+          FROM rto_with_base_sku r
+          LEFT JOIN products p ON r.base_sku = p.sku_id
         )
         SELECT 
           id,
@@ -7506,7 +7979,7 @@ class Database {
           size as Size,
           CAST(quantity AS SIGNED) as Quantity,
           product_code,
-          product_code as base_sku
+          base_sku
         FROM rto_with_products
         WHERE rn = 1
         ORDER BY rto_wh, Product_Name, size
@@ -7556,18 +8029,9 @@ class Database {
       // Process each order
       for (const order of unprocessedOrders) {
         try {
-          // Strip size suffix from product_code before storing
-          // e.g. "CLU-ROM-TH-25/26-PV-XL" with size "XL" → "CLU-ROM-TH-25/26-PV"
-          let cleanProductCode = order.product_code;
-          const orderSize = order.size;
-          if (orderSize && cleanProductCode && cleanProductCode.endsWith(`-${orderSize}`)) {
-            cleanProductCode = cleanProductCode.slice(0, -(orderSize.length + 1));
-            console.log(`  🔧 Stripped size from product_code: "${order.product_code}" → "${cleanProductCode}"`);
-          }
-
           await this.upsertRTOInventory(
             order.rto_wh,
-            cleanProductCode,
+            order.product_code,
             order.size,
             order.quantity || 1
           );

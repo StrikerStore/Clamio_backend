@@ -5,6 +5,7 @@
 
 const database = require('../config/database');
 const ShipwayService = require('./shipwayService');
+const ShiprocketService = require('./shiprocketService');
 const { ShipwayCarrierService } = require('./shipwayCarrierService');
 
 class MultiStoreSyncService {
@@ -139,24 +140,43 @@ class MultiStoreSyncService {
       let carrierCount = 0;
       let productCount = 0;
       
-      // Sync orders from Shipway
+      const shippingPartner = (store.shipping_partner || '').toLowerCase();
+      
+      // Sync orders based on shipping partner
       try {
-        console.log(`   📦 Syncing orders...`);
-        const shipwayService = new ShipwayService(store.account_code);
-        const orderResult = await shipwayService.syncOrdersToMySQL();
-        orderCount = orderResult.count || 0;
+        console.log(`   📦 Syncing orders (${store.shipping_partner})...`);
+        
+        if (shippingPartner === 'shiprocket') {
+          const shiprocketService = new ShiprocketService(store.account_code);
+          const orderResult = await shiprocketService.syncOrdersToMySQL();
+          orderCount = orderResult.count || 0;
+        } else {
+          // Default to Shipway
+          const shipwayService = new ShipwayService(store.account_code);
+          const orderResult = await shipwayService.syncOrdersToMySQL();
+          orderCount = orderResult.count || 0;
+        }
+        
         console.log(`   ✅ Orders synced: ${orderCount}`);
       } catch (orderError) {
         console.error(`   ❌ Order sync failed:`, orderError.message);
         throw new Error(`Order sync failed: ${orderError.message}`);
       }
       
-      // Sync carriers from Shipway
+      // Sync carriers based on shipping partner
       try {
-        console.log(`   🚚 Syncing carriers...`);
-        const carrierService = new ShipwayCarrierService(store.account_code);
-        const carrierResult = await carrierService.syncCarriersToExcel();
-        carrierCount = carrierResult.carrierCount || 0;
+        console.log(`   🚚 Syncing carriers (${store.shipping_partner})...`);
+        
+        if (shippingPartner === 'shiprocket') {
+          const shiprocketService = new ShiprocketService(store.account_code);
+          const carrierResult = await shiprocketService.syncCarriersToMySQL();
+          carrierCount = carrierResult.carrierCount || 0;
+        } else {
+          const carrierService = new ShipwayCarrierService(store.account_code);
+          const carrierResult = await carrierService.syncCarriersToExcel();
+          carrierCount = carrierResult.carrierCount || 0;
+        }
+        
         console.log(`   ✅ Carriers synced: ${carrierCount}`);
       } catch (carrierError) {
         console.error(`   ⚠️ Carrier sync failed (non-critical):`, carrierError.message);

@@ -7,8 +7,11 @@ const database = require('../config/database');
 class CarrierServiceabilityService {
   constructor() {
     this.serviceabilityApiUrl = 'https://app.shipway.com/api/pincodeserviceable';
-    // Store credentials cache: account_code -> auth_token
+    this.shiprocketServiceabilityApiUrl = 'https://apiv2.shiprocket.in/v1/external/courier/serviceability/';
+    // Store credentials cache: account_code -> { auth_token, shipping_partner }
     this.storeCredentialsCache = new Map();
+    // Store info cache: account_code -> store object
+    this.storeInfoCache = new Map();
   }
 
   /**
@@ -49,7 +52,102 @@ class CarrierServiceabilityService {
   }
 
   /**
-   * Check serviceability for a specific pincode
+   * Get store info (shipping_partner, auth_token, etc.) for a given account_code
+   * @param {string} accountCode - The account_code
+   * @returns {Object} Store info object
+   */
+  async getStoreInfo(accountCode) {
+    if (!accountCode) {
+      throw new Error('account_code is required');
+    }
+
+    // Check cache first
+    if (this.storeInfoCache.has(accountCode)) {
+      return this.storeInfoCache.get(accountCode);
+    }
+
+    // Fetch from database
+    await database.waitForMySQLInitialization();
+    const store = await database.getStoreByAccountCode(accountCode);
+    
+    if (!store) {
+      throw new Error(`Store not found for account_code: ${accountCode}`);
+    }
+    
+    if (store.status !== 'active') {
+      throw new Error(`Store is not active: ${accountCode}`);
+    }
+
+    // Cache the store info
+    this.storeInfoCache.set(accountCode, store);
+    
+    return store;
+  }
+
+  /**
+   * Check serviceability for Shiprocket using their API
+   * @param {string} pickupPincode - Pickup/vendor pincode
+   * @param {string} deliveryPincode - Delivery/customer pincode
+   * @param {string} partnerOrderId - Shiprocket order ID (partner_order_id from orders table, which contains order.id)
+   * @param {string} accountCode - The account_code for the store
+   * @param {number} cod - 1 for COD orders, 0 for Prepaid orders
+   * @returns {Promise<Array>} Array of available courier companies from Shiprocket
+   */
+  async checkShiprocketServiceability(pickupPincode, deliveryPincode, partnerOrderId, accountCode, cod = 0) {
+    try {
+      console.log(`🔵 SHIPROCKET SERVICEABILITY: Checking for pickup=${pickupPincode}, delivery=${deliveryPincode}, order=${partnerOrderId}, cod=${cod} (store: ${accountCode})...`);
+      
+      const store = await this.getStoreInfo(accountCode);
+      
+      if (!store.auth_token) {
+        throw new Error(`Store auth_token not found for account_code: ${accountCode}`);
+      }
+
+      const response = await axios.get(this.shiprocketServiceabilityApiUrl, {
+        params: {
+          pickup_postcode: pickupPincode,
+          delivery_postcode: deliveryPincode,
+          order_id: partnerOrderId,
+          cod: cod
+        },
+        headers: {
+          'Authorization': store.auth_token, // Bearer token
+          'Content-Type': 'application/json',
+        },
+        timeout: 30000,
+      });
+
+      console.log('✅ SHIPROCKET SERVICEABILITY: API response received');
+      console.log('  - Status:', response.status);
+
+      if (response.status !== 200 || !response.data) {
+        throw new Error('Invalid response from Shiprocket serviceability API');
+      }
+
+      const availableCouriers = response.data?.data?.available_courier_companies || [];
+      console.log(`  - Available courier companies: ${availableCouriers.length}`);
+
+      return availableCouriers;
+    } catch (error) {
+      console.error('💥 SHIPROCKET SERVICEABILITY: Error:', error.message);
+      
+      if (error.response) {
+        console.error('  - Response status:', error.response.status);
+        console.error('  - Response data:', JSON.stringify(error.response.data));
+        
+        if (error.response.status === 401) {
+          throw new Error('Shiprocket authentication failed. Please check your store credentials.');
+        } else if (error.response.status === 422) {
+          throw new Error('Invalid parameters for Shiprocket serviceability check.');
+        }
+      }
+      
+      throw new Error(`Failed to check Shiprocket serviceability: ${error.message}`);
+    }
+  }
+
+  /**
+   * Check serviceability for a specific pincode (Shipway)
    * @param {string} pincode - The pincode to check
    * @param {string} accountCode - The account_code for the store (REQUIRED)
    * @returns {Promise<Array>} Array of serviceable carriers
@@ -666,8 +764,10 @@ class CarrierServiceabilityService {
   }
 
   /**
-   * Get top 3 priority carriers for a specific order based on serviceability
-   * @param {Object} order - Order object with pincode and payment_type
+   * Get top 3 priority carriers for a specific order based on serviceability.
+   * Automatically detects shipping partner (Shipway or Shiprocket) and uses the appropriate API.
+   * For Shiprocket COD orders (payment_type = C), only couriers with cod = 1 are considered.
+   * @param {Object} order - Order object with pincode, payment_type, account_code, claimed_by, partner_order_id
    * @returns {Promise<string>} JSON string of top 3 carrier IDs: "[12121, 23232, 34333]"
    */
   async getTop3PriorityCarriers(order) {
@@ -687,121 +787,273 @@ class CarrierServiceabilityService {
         throw new Error('Order must have account_code (store) to determine carrier priorities');
       }
       
-      // Get carriers from database - filter by store (account_code)
-      const allCarriers = await this.readCarriersFromDatabase();
+      // Determine the shipping partner for this store
+      const store = await this.getStoreInfo(order.account_code);
+      const shippingPartner = (store.shipping_partner || 'Shipway').toLowerCase();
+      console.log(`  - Shipping Partner: ${shippingPartner}`);
       
-      // Filter carriers by the order's store (account_code)
-      const storeCarriers = allCarriers.filter(carrier => 
-        String(carrier.account_code) === String(order.account_code)
-      );
-      
-      console.log(`  - Total carriers in database: ${allCarriers.length}`);
-      console.log(`  - Carriers for store ${order.account_code}: ${storeCarriers.length}`);
-      
-      if (storeCarriers.length === 0) {
-        throw new Error(`No carriers found for store ${order.account_code}`);
+      if (shippingPartner === 'shiprocket') {
+        return await this._getTop3ShiprocketCarriers(order, store);
+      } else {
+        return await this._getTop3ShipwayCarriers(order);
       }
-      
-      // Check serviceability for the pincode
-      console.log(`🔍 Checking serviceability for pincode: ${order.pincode} (store: ${order.account_code})`);
-      const serviceableCarriers = await this.checkServiceability(order.pincode, order.account_code);
-      
-      if (serviceableCarriers.length === 0) {
-        console.log(`⚠️ No serviceable carriers found for pincode ${order.pincode}`);
-        return JSON.stringify([]);
-      }
-      
-      console.log(`  - Found ${serviceableCarriers.length} serviceable carriers`);
-      
-      // Create a map of carrier data for quick lookup (store-specific)
-      // Use composite key (carrier_id + account_code) to handle same carrier_id in different stores
-      const carrierMap = new Map();
-      storeCarriers.forEach(carrier => {
-        const key = `${carrier.carrier_id}_${carrier.account_code}`;
-        carrierMap.set(key, carrier);
-        // Also set by carrier_id only for backward compatibility, but prefer store-specific
-        if (!carrierMap.has(carrier.carrier_id)) {
-          carrierMap.set(carrier.carrier_id, carrier);
-        }
-      });
-      
-      // Filter serviceable carriers by payment type
-      const matchingCarriers = serviceableCarriers.filter(carrier => 
-        carrier.payment_type === order.payment_type
-      );
-      
-      console.log(`  - Carriers matching payment type ${order.payment_type}: ${matchingCarriers.length}`);
-      
-      if (matchingCarriers.length === 0) {
-        console.log(`⚠️ No carriers found with payment type ${order.payment_type}`);
-        return JSON.stringify([]);
-      }
-      
-      // Find carriers that exist in our carrier data for THIS STORE and are active
-      // Only serviceable carriers are considered here (already filtered by checkServiceability)
-      const validCarriers = matchingCarriers
-        .map(carrier => {
-          // Try to find carrier in store-specific carriers
-          const storeCarrier = storeCarriers.find(sc => 
-            String(sc.carrier_id) === String(carrier.carrier_id)
-          );
-          
-          if (!storeCarrier) {
-            return null; // Carrier not configured for this store
-          }
-          
-          return {
-            carrier_id: carrier.carrier_id,
-            name: carrier.name,
-            payment_type: carrier.payment_type,
-            priority: parseInt(storeCarrier.priority) || 999,
-            status: String(storeCarrier.status || '').trim().toLowerCase(),
-            account_code: storeCarrier.account_code
-          };
-        })
-        .filter(carrier => carrier !== null && carrier.status === 'active');
-      
-      console.log(`  - Valid active carriers for store ${order.account_code}: ${validCarriers.length}`);
-      
-      // Log which store carriers are NOT serviceable (for debugging)
-      const serviceableCarrierIds = new Set(serviceableCarriers.map(c => String(c.carrier_id)));
-      const nonServiceableStoreCarriers = storeCarriers
-        .filter(sc => !serviceableCarrierIds.has(String(sc.carrier_id)))
-        .sort((a, b) => (parseInt(a.priority) || 999) - (parseInt(b.priority) || 999));
-      
-      if (nonServiceableStoreCarriers.length > 0) {
-        console.log(`  - Store carriers NOT serviceable for pincode ${order.pincode}: ${nonServiceableStoreCarriers.map(c => `${c.carrier_id} (Priority ${c.priority})`).join(', ')}`);
-      }
-      
-      if (validCarriers.length === 0) {
-        console.log(`⚠️ No valid active carriers found for store ${order.account_code}`);
-        return JSON.stringify([]);
-      }
-      
-      // Sort by priority (ascending: 1, 2, 3...) and take top 3
-      // This automatically skips non-serviceable carriers and picks the next available ones
-      const top3Carriers = validCarriers
-        .sort((a, b) => a.priority - b.priority)
-        .slice(0, 3)
-        .map(carrier => carrier.carrier_id);
-      
-      console.log(`✅ Top 3 carriers selected for store ${order.account_code}: ${JSON.stringify(top3Carriers)}`);
-      top3Carriers.forEach((carrierId, index) => {
-        const carrier = validCarriers.find(c => c.carrier_id === carrierId);
-        console.log(`  ${index + 1}. ${carrierId} - ${carrier.name} (Priority: ${carrier.priority}, Store: ${carrier.account_code})`);
-      });
-      
-      // Log if we got fewer than 3 carriers
-      if (top3Carriers.length < 3 && validCarriers.length >= 3) {
-        console.log(`  ⚠️ Only ${top3Carriers.length} carriers selected (expected 3). This may be due to serviceability or payment type filtering.`);
-      }
-      
-      return JSON.stringify(top3Carriers);
       
     } catch (error) {
       console.error('💥 GET TOP 3 CARRIERS ERROR:', error.message);
       throw error;
     }
+  }
+
+  /**
+   * Get top 3 priority carriers for Shiprocket orders.
+   * For COD orders (payment_type = C), only couriers with cod = 1 are considered.
+   * @param {Object} order - Order object
+   * @param {Object} store - Store info object
+   * @returns {Promise<string>} JSON string of top 3 carrier IDs
+   */
+  async _getTop3ShiprocketCarriers(order, store) {
+    console.log(`🚀 SHIPROCKET: Getting top 3 carriers for order ${order.order_id}...`);
+    
+    // Get vendor's pincode (pickup_postcode) from users table using claimed_by
+    if (!order.claimed_by) {
+      throw new Error('Order must have claimed_by (vendor) to check Shiprocket serviceability');
+    }
+    
+    const vendor = await database.getUserByWarehouseId(order.claimed_by);
+    if (!vendor) {
+      throw new Error(`Vendor not found for warehouseId: ${order.claimed_by}`);
+    }
+    
+    const pickupPincode = vendor.pincode;
+    if (!pickupPincode) {
+      throw new Error(`Vendor ${order.claimed_by} does not have a pincode configured`);
+    }
+    
+    const deliveryPincode = order.pincode;
+    const partnerOrderId = order.partner_order_id;
+    
+    if (!partnerOrderId) {
+      throw new Error('Order must have partner_order_id for Shiprocket serviceability check');
+    }
+    
+    // Determine cod value from payment_type: C (COD) → 1, P (Prepaid) → 0
+    const codValue = order.payment_type === 'C' ? 1 : 0;
+    
+    console.log(`  - Pickup Pincode (Vendor): ${pickupPincode}`);
+    console.log(`  - Delivery Pincode (Customer): ${deliveryPincode}`);
+    console.log(`  - Partner Order ID (order.id): ${partnerOrderId}`);
+    console.log(`  - COD: ${codValue} (payment_type: ${order.payment_type})`);
+    
+    // Get carriers from database - filter by store (account_code)
+    const allCarriers = await this.readCarriersFromDatabase();
+    const storeCarriers = allCarriers.filter(carrier => 
+      String(carrier.account_code) === String(order.account_code)
+    );
+    
+    console.log(`  - Total carriers in database: ${allCarriers.length}`);
+    console.log(`  - Carriers for store ${order.account_code}: ${storeCarriers.length}`);
+    
+    if (storeCarriers.length === 0) {
+      throw new Error(`No carriers found for store ${order.account_code}`);
+    }
+    
+    // Call Shiprocket serviceability API with cod parameter
+    // Note: API expects order_id (which is order.id, stored in partner_order_id)
+    const availableCouriers = await this.checkShiprocketServiceability(
+      pickupPincode, deliveryPincode, partnerOrderId, order.account_code, codValue
+    );
+    
+    if (availableCouriers.length === 0) {
+      console.log(`⚠️ No serviceable couriers found from Shiprocket API`);
+      return JSON.stringify([]);
+    }
+    
+    console.log(`  - Available couriers from Shiprocket API: ${availableCouriers.length}`);
+    
+    // For COD orders (payment_type = C), filter couriers that support COD (cod = 1)
+    let filteredCouriers = availableCouriers;
+    if (order.payment_type === 'C') {
+      filteredCouriers = availableCouriers.filter(courier => courier.cod === 1);
+      console.log(`  - COD order: Filtered to couriers with cod=1: ${filteredCouriers.length} (out of ${availableCouriers.length})`);
+    } else {
+      console.log(`  - Prepaid order: Using all ${availableCouriers.length} available couriers`);
+    }
+    
+    if (filteredCouriers.length === 0) {
+      console.log(`⚠️ No couriers found${order.payment_type === 'C' ? ' with COD support' : ''} for this delivery`);
+      return JSON.stringify([]);
+    }
+    
+    // Build a set of courier_company_ids from Shiprocket API response
+    const serviceableCourierIds = new Set(filteredCouriers.map(c => String(c.courier_company_id)));
+    
+    // Match with our store carriers by carrier_id and check active status
+    const validCarriers = storeCarriers
+      .filter(sc => {
+        const isServiceable = serviceableCourierIds.has(String(sc.carrier_id));
+        const isActive = String(sc.status || '').trim().toLowerCase() === 'active';
+        return isServiceable && isActive;
+      })
+      .map(sc => {
+        // Find the matching courier from API to get its name
+        const apiCourier = filteredCouriers.find(c => String(c.courier_company_id) === String(sc.carrier_id));
+        return {
+          carrier_id: sc.carrier_id,
+          name: apiCourier ? apiCourier.courier_name : sc.carrier_name,
+          priority: parseInt(sc.priority) || 999,
+          status: String(sc.status || '').trim().toLowerCase(),
+          account_code: sc.account_code,
+          cod: apiCourier ? apiCourier.cod : 0
+        };
+      });
+    
+    console.log(`  - Valid active carriers for store ${order.account_code}: ${validCarriers.length}`);
+    
+    // Log which store carriers are NOT serviceable (for debugging)
+    const nonServiceableStoreCarriers = storeCarriers
+      .filter(sc => !serviceableCourierIds.has(String(sc.carrier_id)))
+      .sort((a, b) => (parseInt(a.priority) || 999) - (parseInt(b.priority) || 999));
+    
+    if (nonServiceableStoreCarriers.length > 0) {
+      console.log(`  - Store carriers NOT serviceable: ${nonServiceableStoreCarriers.map(c => `${c.carrier_id} (Priority ${c.priority})`).join(', ')}`);
+    }
+    
+    if (validCarriers.length === 0) {
+      console.log(`⚠️ No valid active carriers found for store ${order.account_code}`);
+      return JSON.stringify([]);
+    }
+    
+    // Sort by priority (ascending: 1, 2, 3...) and take top 3
+    const top3Carriers = validCarriers
+      .sort((a, b) => a.priority - b.priority)
+      .slice(0, 3)
+      .map(carrier => carrier.carrier_id);
+    
+    console.log(`✅ Top 3 Shiprocket carriers selected for store ${order.account_code}: ${JSON.stringify(top3Carriers)}`);
+    top3Carriers.forEach((carrierId, index) => {
+      const carrier = validCarriers.find(c => c.carrier_id === carrierId);
+      console.log(`  ${index + 1}. ${carrierId} - ${carrier.name} (Priority: ${carrier.priority}, COD: ${carrier.cod})`);
+    });
+    
+    if (top3Carriers.length < 3) {
+      console.log(`  ⚠️ Only ${top3Carriers.length} carriers selected (less than 3).`);
+    }
+    
+    return JSON.stringify(top3Carriers);
+  }
+
+  /**
+   * Get top 3 priority carriers for Shipway orders (existing logic).
+   * @param {Object} order - Order object
+   * @returns {Promise<string>} JSON string of top 3 carrier IDs
+   */
+  async _getTop3ShipwayCarriers(order) {
+    console.log(`📦 SHIPWAY: Getting top 3 carriers for order ${order.order_id}...`);
+    
+    // Get carriers from database - filter by store (account_code)
+    const allCarriers = await this.readCarriersFromDatabase();
+    
+    // Filter carriers by the order's store (account_code)
+    const storeCarriers = allCarriers.filter(carrier => 
+      String(carrier.account_code) === String(order.account_code)
+    );
+    
+    console.log(`  - Total carriers in database: ${allCarriers.length}`);
+    console.log(`  - Carriers for store ${order.account_code}: ${storeCarriers.length}`);
+    
+    if (storeCarriers.length === 0) {
+      throw new Error(`No carriers found for store ${order.account_code}`);
+    }
+    
+    // Check serviceability for the pincode (Shipway API)
+    console.log(`🔍 Checking serviceability for pincode: ${order.pincode} (store: ${order.account_code})`);
+    const serviceableCarriers = await this.checkServiceability(order.pincode, order.account_code);
+    
+    if (serviceableCarriers.length === 0) {
+      console.log(`⚠️ No serviceable carriers found for pincode ${order.pincode}`);
+      return JSON.stringify([]);
+    }
+    
+    console.log(`  - Found ${serviceableCarriers.length} serviceable carriers`);
+    
+    // Create a map of carrier data for quick lookup (store-specific)
+    const carrierMap = new Map();
+    storeCarriers.forEach(carrier => {
+      const key = `${carrier.carrier_id}_${carrier.account_code}`;
+      carrierMap.set(key, carrier);
+      if (!carrierMap.has(carrier.carrier_id)) {
+        carrierMap.set(carrier.carrier_id, carrier);
+      }
+    });
+    
+    // Filter serviceable carriers by payment type
+    const matchingCarriers = serviceableCarriers.filter(carrier => 
+      carrier.payment_type === order.payment_type
+    );
+    
+    console.log(`  - Carriers matching payment type ${order.payment_type}: ${matchingCarriers.length}`);
+    
+    if (matchingCarriers.length === 0) {
+      console.log(`⚠️ No carriers found with payment type ${order.payment_type}`);
+      return JSON.stringify([]);
+    }
+    
+    // Find carriers that exist in our carrier data for THIS STORE and are active
+    const validCarriers = matchingCarriers
+      .map(carrier => {
+        const storeCarrier = storeCarriers.find(sc => 
+          String(sc.carrier_id) === String(carrier.carrier_id)
+        );
+        
+        if (!storeCarrier) {
+          return null;
+        }
+        
+        return {
+          carrier_id: carrier.carrier_id,
+          name: carrier.name,
+          payment_type: carrier.payment_type,
+          priority: parseInt(storeCarrier.priority) || 999,
+          status: String(storeCarrier.status || '').trim().toLowerCase(),
+          account_code: storeCarrier.account_code
+        };
+      })
+      .filter(carrier => carrier !== null && carrier.status === 'active');
+    
+    console.log(`  - Valid active carriers for store ${order.account_code}: ${validCarriers.length}`);
+    
+    // Log which store carriers are NOT serviceable (for debugging)
+    const serviceableCarrierIds = new Set(serviceableCarriers.map(c => String(c.carrier_id)));
+    const nonServiceableStoreCarriers = storeCarriers
+      .filter(sc => !serviceableCarrierIds.has(String(sc.carrier_id)))
+      .sort((a, b) => (parseInt(a.priority) || 999) - (parseInt(b.priority) || 999));
+    
+    if (nonServiceableStoreCarriers.length > 0) {
+      console.log(`  - Store carriers NOT serviceable for pincode ${order.pincode}: ${nonServiceableStoreCarriers.map(c => `${c.carrier_id} (Priority ${c.priority})`).join(', ')}`);
+    }
+    
+    if (validCarriers.length === 0) {
+      console.log(`⚠️ No valid active carriers found for store ${order.account_code}`);
+      return JSON.stringify([]);
+    }
+    
+    // Sort by priority (ascending: 1, 2, 3...) and take top 3
+    const top3Carriers = validCarriers
+      .sort((a, b) => a.priority - b.priority)
+      .slice(0, 3)
+      .map(carrier => carrier.carrier_id);
+    
+    console.log(`✅ Top 3 Shipway carriers selected for store ${order.account_code}: ${JSON.stringify(top3Carriers)}`);
+    top3Carriers.forEach((carrierId, index) => {
+      const carrier = validCarriers.find(c => c.carrier_id === carrierId);
+      console.log(`  ${index + 1}. ${carrierId} - ${carrier.name} (Priority: ${carrier.priority}, Store: ${carrier.account_code})`);
+    });
+    
+    if (top3Carriers.length < 3 && validCarriers.length >= 3) {
+      console.log(`  ⚠️ Only ${top3Carriers.length} carriers selected (expected 3). This may be due to serviceability or payment type filtering.`);
+    }
+    
+    return JSON.stringify(top3Carriers);
   }
 
   /**
