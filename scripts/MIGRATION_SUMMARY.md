@@ -92,7 +92,7 @@ Check if any routes in `backend/routes/orders.js` need updates for the new param
 - [ ] Monitor performance
 
 ## Rollback Plan
-If issues arises:
+If issues arise:
 1. Restore database from backup
 2. Revert all code changes
 3. Restart services
