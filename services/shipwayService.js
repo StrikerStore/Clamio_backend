@@ -10,13 +10,12 @@ const database = require('../config/database');
  * Now includes account_code so rows from different stores never collide.
  * @param {string} orderId - Order ID
  * @param {string} productCode - Product code
- * @param {number} itemIndex - Item index in order (for duplicate products in same order)
  * @param {string} accountCode - Store account code
  * @returns {string} Stable unique_id
  */
-function generateStableUniqueId(orderId, productCode, itemIndex = 0, accountCode = '') {
+function generateStableUniqueId(orderId, productCode, accountCode = '') {
   const storePart = accountCode || 'GLOBAL';
-  const id = `${storePart}_${orderId}_${productCode}_${itemIndex}`;
+  const id = `${storePart}_${orderId}_${productCode}`;
   return crypto.createHash('md5').update(id).digest('hex').substring(0, 12).toUpperCase();
 }
 
@@ -460,13 +459,13 @@ class ShipwayService {
     let uniqueIdCounter = maxUniqueId + 1;
 
     // Function to generate stable unique_id (store-aware)
-    function generateStableUniqueIdWithStore(orderId, productCode, itemIndex = 0, accountCode = '') {
+    function generateStableUniqueIdWithStore(orderId, productCode, accountCode = '') {
       const crypto = require('crypto');
       const storePart = accountCode || 'GLOBAL';
-      const id = `${storePart}_${orderId}_${productCode}_${itemIndex}`;
+      const id = `${storePart}_${orderId}_${productCode}`;
       return crypto.createHash('md5').update(id).digest('hex').substring(0, 12).toUpperCase();
     }
-    
+
     for (const order of shipwayOrders) {
       if (!Array.isArray(order.products)) continue;
       
@@ -515,9 +514,9 @@ class ShipwayService {
       
       for (let i = 0; i < order.products.length; i++) {
         const product = order.products[i];
-        const key = `${order.order_id}|${product.product_code}`;
+        const key = `${this.accountCode}|${order.order_id}|${product.product_code}`;
         const existingClaim = existingClaimData.get(key);
-        
+
                           // Get selling price from product data and convert to number
          const sellingPrice = parseFloat(product.price) || 0;
          
@@ -540,7 +539,7 @@ class ShipwayService {
            : parseFloat((orderTotalSplit - prepaidAmount).toFixed(2));
          
          // Generate stable unique_id first
-         const stableUniqueId = existingClaim ? existingClaim.unique_id : generateStableUniqueIdWithStore(order.order_id, product.product_code, i, this.accountCode);
+         const stableUniqueId = existingClaim ? existingClaim.unique_id : generateStableUniqueIdWithStore(order.order_id, product.product_code, this.accountCode);
          
          const orderRow = {
           id: stableUniqueId, // Use unique_id as id (stable, not timestamp-based)
@@ -886,10 +885,10 @@ class ShipwayService {
     let uniqueIdCounter = maxUniqueId + 1;
 
     // Function to generate stable unique_id (store-aware)
-    const generateStableUniqueIdWithStore = (orderId, productCode, itemIndex = 0, accountCode = '') => {
+    const generateStableUniqueIdWithStore = (orderId, productCode, accountCode = '') => {
       const crypto = require('crypto');
       const storePart = accountCode || 'GLOBAL';
-      const id = `${storePart}_${orderId}_${productCode}_${itemIndex}`;
+      const id = `${storePart}_${orderId}_${productCode}`;
       return crypto.createHash('md5').update(id).digest('hex').substring(0, 12).toUpperCase();
     };
 
@@ -976,7 +975,7 @@ class ShipwayService {
 
       for (let i = 0; i < order.products.length; i++) {
         const product = order.products[i];
-        const key = `${order.order_id}|${product.product_code}`;
+        const key = `${this.accountCode}|${order.order_id}|${product.product_code}`;
         const existingClaim = existingClaimData.get(key);
 
         // Get selling price from product data and convert to number
@@ -1009,7 +1008,7 @@ class ShipwayService {
         }
 
         // Generate stable unique_id first
-        const stableUniqueId = existingClaim ? existingClaim.unique_id : generateStableUniqueIdWithStore(order.order_id, product.product_code, i, this.accountCode);
+        const stableUniqueId = existingClaim ? existingClaim.unique_id : generateStableUniqueIdWithStore(order.order_id, product.product_code, this.accountCode);
 
         const orderRow = {
           id: stableUniqueId, // Use unique_id as id (stable, not timestamp-based)
