@@ -10,6 +10,9 @@
  *   - claims.order_unique_id
  */
 
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
+
 const crypto = require('crypto');
 const database = require('../config/database');
 
@@ -20,12 +23,13 @@ function newUniqueId(accountCode, orderId, productCode) {
 }
 
 async function migrate() {
-  await database.initialize();
+  await database.waitForMySQLInitialization();
 
-  const db = database.mysqlPool || database.mysqlConnection;
-  if (!db) {
+  if (!database.isMySQLAvailable()) {
     throw new Error('MySQL connection not available');
   }
+
+  const db = database.mysqlPool || database.mysqlConnection;
 
   console.log('🔍 Fetching all rows from orders table...');
   const [rows] = await db.execute(
