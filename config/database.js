@@ -574,7 +574,9 @@ class Database {
           INDEX idx_pincode (pincode),
           INDEX idx_order_date (order_date),
           INDEX idx_size (size),
-          INDEX idx_account_code (account_code)
+          INDEX idx_account_code (account_code),
+          created_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `;
 
@@ -589,6 +591,36 @@ class Database {
 
       // Add account_code column if it doesn't exist (for existing tables)
       await this.addAccountCodeToOrdersIfNotExists();
+
+      // Add created_timestamp column to orders if it doesn't exist
+      try {
+        await this.mysqlConnection.execute(`
+          ALTER TABLE orders
+          ADD COLUMN created_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        `);
+        console.log('✅ Added created_timestamp column to orders table');
+      } catch (error) {
+        if (error.code === 'ER_DUP_FIELDNAME') {
+          console.log('ℹ️ created_timestamp column already exists in orders table');
+        } else {
+          console.error('❌ Error adding created_timestamp column to orders table:', error.message);
+        }
+      }
+
+      // Add updated_timestamp column to orders if it doesn't exist
+      try {
+        await this.mysqlConnection.execute(`
+          ALTER TABLE orders
+          ADD COLUMN updated_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        `);
+        console.log('✅ Added updated_timestamp column to orders table');
+      } catch (error) {
+        if (error.code === 'ER_DUP_FIELDNAME') {
+          console.log('ℹ️ updated_timestamp column already exists in orders table');
+        } else {
+          console.error('❌ Error adding updated_timestamp column to orders table:', error.message);
+        }
+      }
 
       // Create labels table for caching label URLs
       await this.createLabelsTable();
