@@ -473,6 +473,20 @@ app.listen(PORT, async () => {
   // Log database initialization
   console.log('📁 Database initialized successfully');
 
+  // Run criticality update on startup
+  try {
+    const autoReversalServiceStartup = require('./services/autoReversalService');
+    console.log('[Claims Criticality] Running criticality update on startup...');
+    const critResult = await autoReversalServiceStartup.updateClaimsCriticality();
+    if (critResult.success) {
+      console.log(`[Claims Criticality] Startup update done. ${critResult.data.affected_rows} orders marked critical.`);
+    } else {
+      console.log(`[Claims Criticality] Startup update failed: ${critResult.message}`);
+    }
+  } catch (error) {
+    console.error('[Claims Criticality] Startup error:', error.message);
+  }
+
   // Start periodic database health check (every 15 minutes)
   setInterval(async () => {
     try {
