@@ -26,6 +26,7 @@ const { fetchAndSaveShopifyProducts } = require('./services/shopifyProductFetche
 const cron = require('node-cron');
 const { runMultiStoreMigration } = require('./utils/migrationRunner');
 const { runCarriersMigration } = require('./scripts/migrate-carriers-table');
+const { runUniqueIdMigration } = require('./scripts/migrate-unique-id-remove-index');
 
 // Import vendor error tracking middleware
 const { trackVendorErrors, handleVendorErrors } = require('./middleware/vendorErrorTracking');
@@ -506,6 +507,13 @@ app.listen(PORT, async () => {
     }
   } else {
     console.log('⚠️ Automatic migrations disabled (RUN_MIGRATIONS=false)');
+  }
+
+  // Run unique_id migration (remove itemIndex from hash formula)
+  try {
+    await runUniqueIdMigration(database);
+  } catch (error) {
+    console.error('⚠️ Unique_id migration warning (server will continue):', error.message);
   }
 
   // Start periodic database health check (every 15 minutes)

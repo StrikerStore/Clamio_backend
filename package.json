@@ -10,7 +10,7 @@
     "migrate:collectable": "node scripts/recalculate-collectable-amounts.js",
     "migrate:handover": "node scripts/migrate-handover-status.js",
     "migrate:unique-id": "node scripts/migrate-unique-id-remove-index.js",
-    "deploy": "npm run migrate:handover && npm run migrate:collectable && npm run migrate:unique-id && npm run start"
+    "deploy": "npm run migrate:handover && npm run migrate:collectable && npm run start"
   },
   "dependencies": {
     "axios": "^1.6.2",
