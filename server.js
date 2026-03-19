@@ -24,9 +24,7 @@ const tasksRoutes = require('./routes/tasks');
 const database = require('./config/database');
 const { fetchAndSaveShopifyProducts } = require('./services/shopifyProductFetcher');
 const cron = require('node-cron');
-const { runMultiStoreMigration } = require('./utils/migrationRunner');
-const { runCarriersMigration } = require('./scripts/migrate-carriers-table');
-const { runUniqueIdMigration } = require('./scripts/migrate-unique-id-remove-index');
+
 
 // Import vendor error tracking middleware
 const { trackVendorErrors, handleVendorErrors } = require('./middleware/vendorErrorTracking');
@@ -475,47 +473,6 @@ app.listen(PORT, async () => {
   // Log database initialization
   console.log('📁 Database initialized successfully');
 
-  // Run carriers table migration (if enabled)
-  // This migrates carriers table structure and fetches carriers from all active stores
-  // Set RUN_PROD_MIGRATION=false in .env to disable
-  const runProdMigration = process.env.RUN_PROD_MIGRATION !== 'false';
-  if (runProdMigration) {
-    try {
-      console.log('\n🔄 Running carriers table migration...');
-      const migrationSuccess = await runCarriersMigration();
-      if (migrationSuccess) {
-        console.log('✅ Carriers migration completed successfully\n');
-      } else {
-        console.error('❌ Carriers migration failed, but server will continue\n');
-      }
-    } catch (error) {
-      console.error('⚠️ Carriers migration error (server will continue):', error.message);
-    }
-  } else {
-    console.log('⚠️ Carriers migration disabled (RUN_PROD_MIGRATION=false)\n');
-  }
-
-  // Run database migrations on startup (if enabled)
-  // This is idempotent and safe to run on every server start
-  // Set RUN_MIGRATIONS=false in .env to disable automatic migrations
-  const runMigrations = process.env.RUN_MIGRATIONS !== 'false';
-  if (runMigrations) {
-    try {
-      await runMultiStoreMigration();
-    } catch (error) {
-      console.error('⚠️ Migration warning (server will continue):', error.message);
-    }
-  } else {
-    console.log('⚠️ Automatic migrations disabled (RUN_MIGRATIONS=false)');
-  }
-
-  // Run unique_id migration (remove itemIndex from hash formula)
-  try {
-    await runUniqueIdMigration(database);
-  } catch (error) {
-    console.error('⚠️ Unique_id migration warning (server will continue):', error.message);
-  }
-
   // Start periodic database health check (every 15 minutes)
   setInterval(async () => {
     try {
@@ -780,42 +737,6 @@ app.listen(PORT, async () => {
       console.error('[Daily Maintenance] Scheduled run failed:', err.message);
     }
   });
-
-  // Run one-time migration to update rto_wh from latest activity location
-  (async () => {
-    try {
-      const rtoWarehouseMigration = require('./migrations/updateRtoWarehouse');
-      console.log('[Migration] Running RTO warehouse migration...');
-      const result = await rtoWarehouseMigration.run();
-      if (result.skipped) {
-        console.log('[Migration] RTO warehouse migration already completed, skipped.');
-      } else if (result.success) {
-        console.log(`[Migration] RTO warehouse migration completed. Updated: ${result.updatedCount}/${result.processedCount}`);
-      } else {
-        console.log(`[Migration] RTO warehouse migration failed: ${result.message}`);
-      }
-    } catch (err) {
-      console.error('[Migration] RTO warehouse migration error:', err.message);
-    }
-  })();
-
-  // Run one-time migration to fix product_code in rto_inventory (strip size suffix)
-  (async () => {
-    try {
-      const fixRtoProductCodes = require('./migrations/fixRtoInventoryProductCodes');
-      console.log('[Migration] Running RTO inventory product code fix...');
-      const result = await fixRtoProductCodes.run();
-      if (result.skipped) {
-        console.log('[Migration] RTO product code fix already completed, skipped.');
-      } else if (result.success) {
-        console.log(`[Migration] RTO product code fix completed. Updated: ${result.updatedCount}, Merged: ${result.mergedCount}`);
-      } else {
-        console.log(`[Migration] RTO product code fix failed: ${result.message}`);
-      }
-    } catch (err) {
-      console.error('[Migration] RTO product code fix error:', err.message);
-    }
-  })();
 
   // Run active orders tracking once immediately on startup, then process RTO inventory
   (async () => {
