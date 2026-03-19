@@ -138,6 +138,51 @@ class AutoReversalService {
   }
 
   /**
+   * Update is_critical flag on claims based on the 15-day rule:
+   *  - Critical (1): unclaimed orders with order_date older than 15 days
+   *  - Normal (0): everything else (claimed, or newer than 15 days)
+   * @returns {Promise<Object>} Result of the criticality update
+   */
+  async updateClaimsCriticality() {
+    try {
+      await database.waitForMySQLInitialization();
+
+      if (!database.isMySQLAvailable()) {
+        throw new Error('Database connection not available');
+      }
+
+      const db = database.mysqlPool || database.mysqlConnection;
+
+      // Reset all to non-critical first
+      await db.execute(`UPDATE claims SET is_critical = 0 WHERE is_critical = 1`);
+
+      // Mark unclaimed orders older than 15 days as critical
+      const [result] = await db.execute(`
+        UPDATE claims c
+        JOIN orders o ON c.order_unique_id = o.unique_id
+        SET c.is_critical = 1
+        WHERE c.status = 'unclaimed'
+          AND c.label_downloaded = 0
+          AND o.order_date < DATE_SUB(NOW(), INTERVAL 15 DAY)
+      `);
+
+      return {
+        success: true,
+        message: `Criticality update complete. ${result.affectedRows} orders marked critical.`,
+        data: { affected_rows: result.affectedRows }
+      };
+
+    } catch (error) {
+      console.error('❌ Criticality update error:', error.message);
+      return {
+        success: false,
+        message: error.message,
+        data: { affected_rows: 0 }
+      };
+    }
+  }
+
+  /**
    * Get service statistics
    * @returns {Object} Service statistics
    */
