@@ -7265,8 +7265,24 @@ class Database {
     }
 
     try {
+      // Get date filter from utility table
+      let numberOfDays = 60; // default
+      try {
+        const daysValue = await this.getUtilityParameter('number_of_day_of_order_include');
+        if (daysValue) {
+          numberOfDays = parseInt(daysValue, 10);
+        }
+      } catch (err) {
+        console.log(`⚠️ Could not fetch utility parameter for critical orders, using default: ${numberOfDays} days`);
+      }
+
+      const cutoffDate = new Date();
+      cutoffDate.setDate(cutoffDate.getDate() - numberOfDays);
+      cutoffDate.setHours(0, 0, 0, 0);
+      const mysqlCutoffDate = cutoffDate.toISOString().slice(0, 19).replace('T', ' ');
+
       let query = `
-        SELECT 
+        SELECT
           o.order_id,
           o.unique_id,
           o.customer_name,
@@ -7286,13 +7302,13 @@ class Database {
           s.store_name,
           u.name as vendor_name,
           p.image as product_image,
-          CASE 
-            WHEN l.current_shipment_status IS NOT NULL AND l.current_shipment_status != '' 
-            THEN l.current_shipment_status 
-            ELSE c.status 
+          CASE
+            WHEN l.current_shipment_status IS NOT NULL AND l.current_shipment_status != ''
+            THEN l.current_shipment_status
+            ELSE c.status
           END as status,
           CASE
-            WHEN ci.billing_firstname IS NOT NULL AND ci.billing_firstname != '' 
+            WHEN ci.billing_firstname IS NOT NULL AND ci.billing_firstname != ''
             THEN TRIM(CONCAT(COALESCE(ci.billing_firstname, ''), ' ', COALESCE(ci.billing_lastname, '')))
             WHEN ci.shipping_firstname IS NOT NULL AND ci.shipping_firstname != ''
             THEN TRIM(CONCAT(COALESCE(ci.shipping_firstname, ''), ' ', COALESCE(ci.shipping_lastname, '')))
@@ -7313,8 +7329,11 @@ class Database {
         LEFT JOIN users u ON c.claimed_by = u.warehouseId
         LEFT JOIN customer_info ci ON o.order_id = ci.order_id AND o.account_code = ci.account_code
         WHERE c.is_critical = 1
+          AND o.is_in_new_order = 1
+          AND c.label_downloaded = 0
+          AND o.order_date >= ?
       `;
-      const params = [];
+      const params = [mysqlCutoffDate];
 
       if (accountCode) {
         query += ` AND o.account_code = ?`;

@@ -153,18 +153,33 @@ class AutoReversalService {
 
       const db = database.mysqlPool || database.mysqlConnection;
 
+      // Get date filter from utility table
+      let numberOfDays = 60; // default
+      try {
+        const daysValue = await database.getUtilityParameter('number_of_day_of_order_include');
+        if (daysValue) {
+          numberOfDays = parseInt(daysValue, 10);
+        }
+      } catch (err) {
+        console.log(`⚠️ Could not fetch utility parameter for criticality, using default: ${numberOfDays} days`);
+      }
+
       // Reset all to non-critical first
       await db.execute(`UPDATE claims SET is_critical = 0 WHERE is_critical = 1`);
 
       // Mark unclaimed orders older than 15 days as critical
+      // Only consider visible orders (is_in_new_order=1 OR label_downloaded=1)
+      // and within the number_of_day_of_order_include window
       const [result] = await db.execute(`
         UPDATE claims c
         JOIN orders o ON c.order_unique_id = o.unique_id
         SET c.is_critical = 1
         WHERE c.status = 'unclaimed'
           AND c.label_downloaded = 0
+          AND o.is_in_new_order = 1
+          AND o.order_date >= DATE_SUB(NOW(), INTERVAL ? DAY)
           AND o.order_date < DATE_SUB(NOW(), INTERVAL 15 DAY)
-      `);
+      `, [numberOfDays]);
 
       return {
         success: true,
