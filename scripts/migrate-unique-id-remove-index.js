@@ -14,7 +14,15 @@ const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
 const crypto = require('crypto');
-const database = require('../config/database');
+const mysql = require('mysql2/promise');
+
+const DB_CONFIG = {
+  host: process.env.DB_HOST,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME || 'clamio_db',
+  charset: 'utf8mb4'
+};
 
 function newUniqueId(accountCode, orderId, productCode) {
   const storePart = accountCode || 'GLOBAL';
@@ -23,72 +31,77 @@ function newUniqueId(accountCode, orderId, productCode) {
 }
 
 async function migrate() {
-  await database.waitForMySQLInitialization();
+  let connection;
 
-  if (!database.isMySQLAvailable()) {
-    throw new Error('MySQL connection not available');
-  }
+  try {
+    console.log('🚀 Starting migration: Remove itemIndex from unique_id');
+    connection = await mysql.createConnection(DB_CONFIG);
+    console.log('✅ Connected to database');
 
-  const db = database.mysqlPool || database.mysqlConnection;
+    console.log('\n🔍 Fetching all rows from orders table...');
+    const [rows] = await connection.execute(
+      'SELECT id, unique_id, order_id, product_code, account_code FROM orders'
+    );
+    console.log(`   Found ${rows.length} rows.\n`);
 
-  console.log('🔍 Fetching all rows from orders table...');
-  const [rows] = await db.execute(
-    'SELECT id, unique_id, order_id, product_code, account_code FROM orders'
-  );
-  console.log(`   Found ${rows.length} rows.\n`);
+    let updated = 0;
+    let skipped = 0;
+    let collisions = 0;
 
-  let updated = 0;
-  let skipped = 0;
-  let collisions = 0;
+    for (const row of rows) {
+      const calculated = newUniqueId(row.account_code, row.order_id, row.product_code);
 
-  for (const row of rows) {
-    const calculated = newUniqueId(row.account_code, row.order_id, row.product_code);
+      if (row.unique_id === calculated) {
+        skipped++;
+        continue; // already on new formula
+      }
 
-    if (row.unique_id === calculated) {
-      skipped++;
-      continue; // already on new formula
-    }
+      console.log(`📝 ${row.unique_id}  →  ${calculated}  (${row.account_code}|${row.order_id}|${row.product_code})`);
 
-    console.log(`📝 ${row.unique_id}  →  ${calculated}  (${row.account_code}|${row.order_id}|${row.product_code})`);
+      try {
+        // Update claims first (FK child) before changing orders (FK parent)
+        await connection.execute(
+          'UPDATE claims SET order_unique_id = ? WHERE order_unique_id = ?',
+          [calculated, row.unique_id]
+        );
 
-    try {
-      // Update claims first (FK child) before changing orders (FK parent)
-      await db.execute(
-        'UPDATE claims SET order_unique_id = ? WHERE order_unique_id = ?',
-        [calculated, row.unique_id]
-      );
+        // Update orders table (both id and unique_id)
+        await connection.execute(
+          'UPDATE orders SET id = ?, unique_id = ? WHERE unique_id = ?',
+          [calculated, calculated, row.unique_id]
+        );
 
-      // Update orders table (both id and unique_id)
-      await db.execute(
-        'UPDATE orders SET id = ?, unique_id = ? WHERE unique_id = ?',
-        [calculated, calculated, row.unique_id]
-      );
-
-      updated++;
-    } catch (err) {
-      if (err.code === 'ER_DUP_ENTRY') {
-        console.warn(`   ⚠️  COLLISION — new unique_id ${calculated} already exists. Skipping row ${row.unique_id}.`);
-        collisions++;
-      } else {
-        throw err;
+        updated++;
+      } catch (err) {
+        if (err.code === 'ER_DUP_ENTRY') {
+          console.warn(`   ⚠️  COLLISION — new unique_id ${calculated} already exists. Skipping row ${row.unique_id}.`);
+          collisions++;
+        } else {
+          throw err;
+        }
       }
     }
-  }
 
-  console.log('\n✅ Migration complete.');
-  console.log(`   Updated  : ${updated}`);
-  console.log(`   Already OK: ${skipped}`);
-  console.log(`   Collisions: ${collisions}`);
+    console.log('\n✅ Migration complete.');
+    console.log(`   Updated  : ${updated}`);
+    console.log(`   Already OK: ${skipped}`);
+    console.log(`   Collisions: ${collisions}`);
 
-  if (collisions > 0) {
-    console.warn('\n⚠️  Collisions mean two rows in the same order share the same product_code.');
-    console.warn('   Those rows were left unchanged. Review them manually.');
+    if (collisions > 0) {
+      console.warn('\n⚠️  Collisions mean two rows in the same order share the same product_code.');
+      console.warn('   Those rows were left unchanged. Review them manually.');
+    }
+  } catch (error) {
+    console.error('\n❌ Migration failed:', error.message);
+    process.exit(1);
+  } finally {
+    if (connection) {
+      await connection.end();
+      console.log('\n🔌 Database connection closed');
+    }
   }
 
   process.exit(0);
 }
 
-migrate().catch(err => {
-  console.error('❌ Migration failed:', err);
-  process.exit(1);
-});
+migrate();
