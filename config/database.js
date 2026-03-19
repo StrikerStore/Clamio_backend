@@ -7331,6 +7331,7 @@ class Database {
         WHERE c.is_critical = 1
           AND o.is_in_new_order = 1
           AND c.label_downloaded = 0
+          AND s.status = 'active'
           AND o.order_date >= ?
       `;
       const params = [mysqlCutoffDate];
