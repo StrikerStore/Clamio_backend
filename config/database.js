@@ -1431,12 +1431,44 @@ class Database {
           INDEX idx_claimed_by (claimed_by),
           INDEX idx_status (status),
           INDEX idx_account_code (account_code),
-          INDEX idx_is_critical (is_critical)
+          INDEX idx_is_critical (is_critical),
+          created_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `;
 
       await this.mysqlConnection.execute(createClaimsTableQuery);
       console.log('✅ Claims table created/verified');
+
+      // Add created_timestamp column to claims if it doesn't exist
+      try {
+        await this.mysqlConnection.execute(`
+          ALTER TABLE claims
+          ADD COLUMN created_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        `);
+        console.log('✅ Added created_timestamp column to claims table');
+      } catch (error) {
+        if (error.code === 'ER_DUP_FIELDNAME') {
+          console.log('ℹ️ created_timestamp column already exists in claims table');
+        } else {
+          console.error('❌ Error adding created_timestamp column to claims table:', error.message);
+        }
+      }
+
+      // Add updated_timestamp column to claims if it doesn't exist
+      try {
+        await this.mysqlConnection.execute(`
+          ALTER TABLE claims
+          ADD COLUMN updated_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        `);
+        console.log('✅ Added updated_timestamp column to claims table');
+      } catch (error) {
+        if (error.code === 'ER_DUP_FIELDNAME') {
+          console.log('ℹ️ updated_timestamp column already exists in claims table');
+        } else {
+          console.error('❌ Error adding updated_timestamp column to claims table:', error.message);
+        }
+      }
 
       // Add priority_carrier column if it doesn't exist (migration for existing tables)
       await this.addPriorityCarrierColumnToClaims();
