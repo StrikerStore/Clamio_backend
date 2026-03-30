@@ -2649,8 +2649,28 @@ router.post('/download-label', async (req, res) => {
     // Get orders from MySQL
     const orders = await database.getAllOrders();
 
-    // Get all products for this order_id
-    const orderProducts = orders.filter(order => order.order_id === order_id);
+    // First identify vendor-claimed products for this order, then isolate to that account_code.
+    const vendorClaimedRows = orders.filter(order =>
+      order.order_id === order_id &&
+      order.claimed_by === vendor.warehouseId &&
+      (order.is_handover !== 1 && order.is_handover !== '1')
+    );
+
+    const claimedAccountCodes = [...new Set(
+      vendorClaimedRows
+        .map(order => order.account_code)
+        .filter(Boolean)
+    )];
+
+    if (claimedAccountCodes.length > 1) {
+      throw new Error(`Multiple account_code values found for vendor claims on order ${order_id}. Please contact admin.`);
+    }
+
+    const resolvedAccountCode = claimedAccountCodes[0] || null;
+    const orderProducts = orders.filter(order =>
+      order.order_id === order_id &&
+      (!resolvedAccountCode || order.account_code === resolvedAccountCode)
+    );
     const claimedProducts = orderProducts.filter(order =>
       order.claimed_by === vendor.warehouseId &&
       (order.is_handover !== 1 && order.is_handover !== '1')  // Allow download until handed over
@@ -2684,7 +2704,7 @@ router.post('/download-label', async (req, res) => {
       console.log(`  - Order ID: ${order_id}`);
       console.log(`  - Checking labels table for cached URL...`);
 
-      const cachedLabel = await database.getLabelByOrderId(order_id);
+      const cachedLabel = await database.getLabelByOrderId(order_id, resolvedAccountCode);
 
       if (cachedLabel) {
         console.log('✅ CACHED LABEL FOUND: Returning cached label URL');
@@ -2968,8 +2988,12 @@ async function generateLabelForOrder(orderId, products, vendor, format = 'therma
 
     // Get customer info from database (use pre-fetched data if available)
     const database = require('../config/database');
-    const customerInfo = dataMaps?.customerInfoMap?.get(orderId) ||
-      await database.getCustomerInfoByOrderId(orderId);
+    const productAccountCode = products[0]?.account_code || null;
+    const compositeKey = productAccountCode ? `${orderId}|${productAccountCode}` : null;
+    const customerInfo =
+      (compositeKey && dataMaps?.customerInfoMap?.get(compositeKey)) ||
+      (dataMaps?.customerInfoMap?.get(orderId)) || // backward-compat if caller still keyed by order_id
+      await database.getCustomerInfoByOrderId(orderId, productAccountCode);
 
     if (!customerInfo) {
       throw new Error(`Customer info not found for order ID: ${orderId}. Please sync orders from Shipway first.`);
@@ -3820,7 +3844,7 @@ async function prepareInputData(originalOrderId, claimedProducts, allOrderProduc
 
   // Get customer info from database
   const database = require('../config/database');
-  const customerInfo = await database.getCustomerInfoByOrderId(originalOrderId);
+  const customerInfo = await database.getCustomerInfoByOrderId(originalOrderId, accountCode);
 
   if (!customerInfo) {
     throw new Error(`Customer info not found for order ID: ${originalOrderId}. Please sync orders from Shipway first.`);
@@ -3906,18 +3930,28 @@ async function generateUniqueCloneId(originalOrderId, forceCloneSuffix = null, a
     return forcedCloneOrderId;
   }
 
-  // Get ALL orders from database (no filters) for clone ID checking
+  // Get orders from the same account_code for clone ID checking
   let allOrders;
   try {
-    const [rows] = await database.mysqlConnection.execute(
-      'SELECT order_id FROM orders'
-    );
+    let rows;
+    if (accountCode) {
+      [rows] = await database.mysqlConnection.execute(
+        'SELECT order_id FROM orders WHERE account_code = ?',
+        [accountCode]
+      );
+    } else {
+      [rows] = await database.mysqlConnection.execute(
+        'SELECT order_id FROM orders'
+      );
+    }
     allOrders = rows;
   } catch (dbError) {
     console.log('⚠️ Direct query failed, falling back to getAllOrders method');
-    // Fallback: use getAllOrders but understand it might be filtered
+    // Fallback: use getAllOrders and narrow to account_code if available
     const orders = await database.getAllOrders();
-    allOrders = orders;
+    allOrders = accountCode
+      ? orders.filter(order => order.account_code === accountCode)
+      : orders;
   }
 
   let cloneOrderId = `${originalOrderId}_1`;
@@ -4718,7 +4752,8 @@ router.post('/bulk-download-labels', async (req, res) => {
     // This reduces cache check time from 10-50 seconds to 0.1-0.5 seconds
     console.log(`📦 [${batchId}] Fetching cached labels for ${order_ids.length} orders...`);
     const allLabels = await database.getLabelsByOrderIds(order_ids);
-    const labelsMap = new Map(allLabels.map(l => [l.order_id, l]));
+    // Key labels by composite key to avoid cross-account collisions
+    const labelsMap = new Map(allLabels.map(l => [`${l.order_id}|${l.account_code || ''}`, l]));
     console.log(`✅ [${batchId}] Found ${allLabels.length} cached labels (out of ${order_ids.length} orders)`);
 
     // OPTIMIZATION: Pre-fetch all data needed for label generation
@@ -4727,7 +4762,8 @@ router.post('/bulk-download-labels', async (req, res) => {
 
     // 1. Bulk fetch all customer info
     const allCustomerInfo = await database.getCustomerInfoByOrderIds(order_ids);
-    const customerInfoMap = new Map(allCustomerInfo.map(c => [c.order_id, c]));
+    // Key customer info by composite key to avoid cross-account collisions
+    const customerInfoMap = new Map(allCustomerInfo.map(c => [`${c.order_id}|${c.account_code || ''}`, c]));
     console.log(`✅ [${batchId}] Fetched ${allCustomerInfo.length} customer info records`);
 
     // 2. Extract unique account codes from orders and customer info
@@ -4787,7 +4823,20 @@ router.post('/bulk-download-labels', async (req, res) => {
         console.log(`🔄 [${batchId}] Processing order: ${orderId}`);
 
         // Get all products for this order_id
-        const orderProducts = orders.filter(order => order.order_id === orderId);
+        const orderProductsAll = orders.filter(order => order.order_id === orderId);
+        // Resolve account_code from vendor-claimed rows for this order
+        const vendorClaimedRows = orderProductsAll.filter(order =>
+          order.claimed_by === vendor.warehouseId &&
+          (order.is_handover !== 1 && order.is_handover !== '1')
+        );
+        const claimedAccountCodes = [...new Set(vendorClaimedRows.map(o => o.account_code).filter(Boolean))];
+        if (claimedAccountCodes.length > 1) {
+          throw new Error(`Multiple account_code values found for vendor claims on order ${orderId}.`);
+        }
+        const resolvedAccountCode = claimedAccountCodes[0] || null;
+        const orderProducts = orderProductsAll.filter(order =>
+          !resolvedAccountCode ? order.order_id === orderId : (order.order_id === orderId && order.account_code === resolvedAccountCode)
+        );
         const claimedProducts = orderProducts.filter(order =>
           order.claimed_by === vendor.warehouseId &&
           (order.is_handover !== 1 && order.is_handover !== '1')  // Allow download until handed over
@@ -4806,8 +4855,8 @@ router.post('/bulk-download-labels', async (req, res) => {
         if (firstClaimedProduct.label_downloaded === 1) {
           console.log(`⚡ BULK: Label already downloaded for ${orderId}, fetching from cache...`);
 
-          // Get existing label from pre-fetched map (O(1) lookup, no database query)
-          const existingLabel = labelsMap.get(orderId);
+          // Get existing label from pre-fetched map using composite key (O(1) lookup)
+          const existingLabel = labelsMap.get(`${orderId}|${resolvedAccountCode || ''}`);
           if (existingLabel && existingLabel.label_url) {
             console.log(`✅ BULK: Found cached label for ${orderId}`);
             return {
@@ -5576,23 +5625,19 @@ router.post('/mark-ready', async (req, res) => {
       });
     }
 
-    // Check if label is downloaded for all claimed products
-    const productsWithoutLabel = claimedProducts.filter(product => product.label_downloaded !== 1);
-    if (productsWithoutLabel.length > 0) {
-      console.log(`❌ Label not downloaded for order: ${order_id}`);
-      return res.status(400).json({
-        success: false,
-        message: `Label is not yet downloaded for order id - ${order_id}`
-      });
-    }
+    const isLabelDownloaded = (v) => v === 1 || v === '1' || v === true;
 
-    console.log('✅ Order verification passed');
-    console.log('  - Total products in order:', orderProducts.length);
-    console.log('  - Products claimed by vendor:', claimedProducts.length);
+    // Group claimed products by account_code so we never mix stores for the same order_id.
+    const claimedByAccountCode = claimedProducts.reduce((acc, p) => {
+      const cc = p.account_code;
+      if (!cc) return acc;
+      if (!acc[cc]) acc[cc] = [];
+      acc[cc].push(p);
+      return acc;
+    }, {});
 
-    // Get account_code from the first claimed product (REQUIRED)
-    const accountCode = claimedProducts[0]?.account_code;
-    if (!accountCode) {
+    const accountCodes = Object.keys(claimedByAccountCode);
+    if (accountCodes.length === 0) {
       console.log('❌ ACCOUNT_CODE NOT FOUND for order:', order_id);
       return res.status(400).json({
         success: false,
@@ -5600,52 +5645,52 @@ router.post('/mark-ready', async (req, res) => {
       });
     }
 
-    console.log('✅ Account code found:', accountCode);
-
-    // Call Shipway Create Manifest API with account_code
-    console.log('🔄 Calling Shipway Create Manifest API...');
-    const manifestResponse = await callShipwayCreateManifestAPI(order_id, accountCode);
-
-    if (!manifestResponse.success) {
-      console.log('❌ Shipway manifest API failed:', manifestResponse.message);
-      return res.status(500).json({
-        success: false,
-        message: 'Failed to create manifest: ' + manifestResponse.message
-      });
+    // Validate label downloaded per account_code before calling Shipway (avoid partial manifest creation).
+    for (const accountCode of accountCodes) {
+      const groupProducts = claimedByAccountCode[accountCode];
+      const productsWithoutLabel = groupProducts.filter(p => !isLabelDownloaded(p.label_downloaded));
+      if (productsWithoutLabel.length > 0) {
+        console.log(`❌ Label not downloaded for order ${order_id} account_code=${accountCode}`);
+        return res.status(400).json({
+          success: false,
+          message: `Label is not yet downloaded for order id - ${order_id} (account_code: ${accountCode})`
+        });
+      }
     }
 
-    console.log('✅ Shipway manifest API successful');
+    console.log('✅ Order verification passed (account_code isolated)');
 
-    // Set is_manifest = 1 and manifest_id in labels table
-    console.log('🔄 Setting is_manifest = 1 and manifest_id in labels table...');
-    const labelData = {
-      order_id: order_id,
-      account_code: accountCode,
-      is_manifest: 1,
-      manifest_id: manifestResponse.manifest_id
-    };
+    // For each account_code, create manifest + upsert label + update product statuses only for that store.
+    const manifestIds = [];
+    for (const accountCode of accountCodes) {
+      console.log(`🔄 Calling Shipway Create Manifest API for order ${order_id} (${accountCode})...`);
+      const manifestResponse = await callShipwayCreateManifestAPI(order_id, accountCode);
 
-    await database.upsertLabel(labelData);
-    console.log(`  ✅ Set is_manifest = 1 for order ${order_id}`);
-    console.log(`  ✅ Set manifest_id = ${manifestResponse.manifest_id} for order ${order_id}`);
+      if (!manifestResponse.success) {
+        console.log('❌ Shipway manifest API failed:', manifestResponse.message);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to create manifest: ' + manifestResponse.message
+        });
+      }
 
-    // Update order status to ready_for_handover after setting is_manifest
-    console.log('🔄 Updating order status to ready_for_handover...');
-    const now = new Date().toISOString().replace('T', ' ').substring(0, 19);
+      manifestIds.push(manifestResponse.manifest_id);
 
-    for (const product of claimedProducts) {
-      await database.updateOrder(product.unique_id, {
-        status: 'ready_for_handover'
+      console.log('🔄 Setting is_manifest = 1 and manifest_id in labels table...');
+      await database.upsertLabel({
+        order_id: order_id,
+        account_code: accountCode,
+        is_manifest: 1,
+        manifest_id: manifestResponse.manifest_id
       });
-      console.log(`  ✅ Updated product ${product.unique_id} status to ready_for_handover`);
+
+      console.log(`🔄 Updating claimed products to ready_for_handover for account_code=${accountCode}...`);
+      for (const product of claimedByAccountCode[accountCode]) {
+        await database.updateOrder(product.unique_id, { status: 'ready_for_handover' });
+      }
     }
 
-    console.log('🟢 MARK READY SUCCESS');
-    console.log(`  - Order ${order_id} marked as ready for handover`);
-    console.log(`  - Manifest created successfully`);
-    console.log(`  - is_manifest flag set to 1`);
-    console.log(`  - manifest_id: ${manifestResponse.manifest_id}`);
-
+    console.log('🟢 MARK READY SUCCESS (account_code isolated)');
     return res.json({
       success: true,
       message: 'Order marked as ready for handover successfully',
@@ -5654,7 +5699,8 @@ router.post('/mark-ready', async (req, res) => {
         status: 'ready_for_handover',
         manifest_created: true,
         is_manifest: 1,
-        manifest_id: manifestResponse.manifest_id
+        manifest_id: manifestIds[0], // backwards-compatible single manifest field
+        manifest_ids: manifestIds
       }
     });
 
@@ -5717,7 +5763,14 @@ router.post('/bulk-mark-ready', async (req, res) => {
     const successfulOrders = [];
     const failedOrders = [];
     const validOrderIds = [];
+    const successfulOrderIdSet = new Set();
+    const failedOrderIdSet = new Set();
+    // For each validated order_id, keep the (account_code, payment_type) pairs that are eligible.
+    // This prevents cross-account interaction when the same order_id exists under multiple stores.
+    const accountCodeGroupsByOrderId = {};
     const manifestIds = []; // Array to store created manifest IDs
+
+    const isLabelDownloaded = (v) => v === 1 || v === '1' || v === true;
 
     // First, validate all orders
     for (const order_id of order_ids) {
@@ -5731,33 +5784,79 @@ router.post('/bulk-mark-ready', async (req, res) => {
 
         if (claimedProducts.length === 0) {
           console.log(`❌ No products claimed by this vendor for order: ${order_id}`);
-          failedOrders.push({
-            order_id: order_id,
-            reason: 'No products claimed by this vendor for this order'
-          });
+          if (!failedOrderIdSet.has(order_id)) {
+            failedOrderIdSet.add(order_id);
+            failedOrders.push({
+              order_id: order_id,
+              reason: 'No products claimed by this vendor for this order'
+            });
+          }
           continue;
         }
 
-        // Check if label is downloaded for all claimed products
-        const productsWithoutLabel = claimedProducts.filter(product => product.label_downloaded !== 1);
-        if (productsWithoutLabel.length > 0) {
-          console.log(`❌ Label not downloaded for order: ${order_id}`);
-          failedOrders.push({
-            order_id: order_id,
-            reason: `Label is not yet downloaded for order id - ${order_id}`
-          });
+        // Validate label downloaded per account_code (never mix stores for same order_id).
+        const claimedByAccountCode = claimedProducts.reduce((acc, p) => {
+          const cc = p.account_code;
+          if (!cc) return acc;
+          if (!acc[cc]) acc[cc] = [];
+          acc[cc].push(p);
+          return acc;
+        }, {});
+
+        const accountCodes = Object.keys(claimedByAccountCode);
+        if (accountCodes.length === 0) {
+          console.log(`❌ ACCOUNT_CODE NOT FOUND for order: ${order_id}`);
+          if (!failedOrderIdSet.has(order_id)) {
+            failedOrderIdSet.add(order_id);
+            failedOrders.push({
+              order_id: order_id,
+              reason: `Store information not found for order id - ${order_id}`
+            });
+          }
           continue;
         }
 
-        console.log(`✅ Order validation passed for ${order_id}`);
-        validOrderIds.push(order_id);
+        let orderValid = true;
+        for (const accountCode of accountCodes) {
+          const groupProducts = claimedByAccountCode[accountCode] || [];
+          const productsWithoutLabel = groupProducts.filter(p => !isLabelDownloaded(p.label_downloaded));
+          if (productsWithoutLabel.length > 0) {
+            console.log(`❌ Label not downloaded for order: ${order_id} account_code=${accountCode}`);
+            if (!failedOrderIdSet.has(order_id)) {
+              failedOrderIdSet.add(order_id);
+              failedOrders.push({
+                order_id: order_id,
+                reason: `Label is not yet downloaded for order id - ${order_id} (account_code: ${accountCode})`
+              });
+            }
+            orderValid = false;
+            break;
+          }
+        }
+
+        if (orderValid) {
+          // Store eligible (account_code, payment_type) pairs for later manifest creation.
+          accountCodeGroupsByOrderId[order_id] = accountCodes.map(accountCode => {
+            const groupProducts = claimedByAccountCode[accountCode] || [];
+            return {
+              accountCode,
+              paymentType: groupProducts[0]?.payment_type
+            };
+          });
+
+          console.log(`✅ Order validation passed for ${order_id}`);
+          validOrderIds.push(order_id);
+        }
 
       } catch (error) {
         console.error(`❌ Error validating order ${order_id}:`, error);
-        failedOrders.push({
-          order_id: order_id,
-          reason: error.message
-        });
+        if (!failedOrderIdSet.has(order_id)) {
+          failedOrderIdSet.add(order_id);
+          failedOrders.push({
+            order_id: order_id,
+            reason: error.message
+          });
+        }
       }
     }
 
@@ -5770,34 +5869,21 @@ router.post('/bulk-mark-ready', async (req, res) => {
       const orderGroups = {};
 
       for (const order_id of validOrderIds) {
-        const orderProducts = orders.filter(order => order.order_id === order_id);
-        const claimedProducts = orderProducts.filter(order =>
-          order.claimed_by === vendor.warehouseId && order.claims_status === 'claimed'
-        );
+        const accountGroups = accountCodeGroupsByOrderId[order_id] || [];
+        for (const { accountCode, paymentType } of accountGroups) {
+          if (!accountCode || !paymentType) continue;
 
-        // Get payment_type and account_code from first claimed product
-        const paymentType = claimedProducts[0]?.payment_type;
-        const accountCode = claimedProducts[0]?.account_code;
-
-        if (!accountCode) {
-          console.error(`❌ ACCOUNT_CODE NOT FOUND for order ${order_id}`);
-          failedOrders.push({
-            order_id: order_id,
-            reason: 'Store information not found for this order'
-          });
-          continue;
+          // Create group key: payment_type-account_code
+          const groupKey = `${paymentType}-${accountCode}`;
+          if (!orderGroups[groupKey]) {
+            orderGroups[groupKey] = {
+              paymentType,
+              accountCode,
+              orderIds: []
+            };
+          }
+          orderGroups[groupKey].orderIds.push(order_id);
         }
-
-        // Create group key: payment_type-account_code
-        const groupKey = `${paymentType}-${accountCode}`;
-        if (!orderGroups[groupKey]) {
-          orderGroups[groupKey] = {
-            paymentType: paymentType,
-            accountCode: accountCode,
-            orderIds: []
-          };
-        }
-        orderGroups[groupKey].orderIds.push(order_id);
       }
 
       console.log(`📊 Orders grouped by payment type and account_code:`);
@@ -5816,10 +5902,13 @@ router.post('/bulk-mark-ready', async (req, res) => {
         if (!manifestResponse.success) {
           console.log(`❌ ${paymentTypeName} manifest creation failed for ${accountCode}:`, manifestResponse.message);
           orderIds.forEach(order_id => {
-            failedOrders.push({
-              order_id: order_id,
-              reason: `Failed to create ${paymentTypeName} manifest for ${accountCode}: ${manifestResponse.message}`
-            });
+            if (!failedOrderIdSet.has(order_id)) {
+              failedOrderIdSet.add(order_id);
+              failedOrders.push({
+                order_id: order_id,
+                reason: `Failed to create ${paymentTypeName} manifest for ${accountCode}: ${manifestResponse.message}`
+              });
+            }
           });
         } else {
           console.log(`✅ ${paymentTypeName} Manifest created successfully for ${accountCode}`);
@@ -5829,7 +5918,10 @@ router.post('/bulk-mark-ready', async (req, res) => {
           // Process each order in this group
           for (const order_id of orderIds) {
             try {
-              const orderProducts = orders.filter(order => order.order_id === order_id);
+              // Scope to this (order_id, account_code) pair so we never mix stores.
+              const orderProducts = orders.filter(order =>
+                order.order_id === order_id && order.account_code === accountCode
+              );
               const claimedProducts = orderProducts.filter(order =>
                 order.claimed_by === vendor.warehouseId && order.claims_status === 'claimed'
               );
@@ -5853,22 +5945,28 @@ router.post('/bulk-mark-ready', async (req, res) => {
                 });
               }
 
-              successfulOrders.push({
-                order_id: order_id,
-                status: 'ready_for_handover',
-                manifest_created: true,
-                is_manifest: 1,
-                manifest_id: manifestResponse.manifest_id,
-                payment_type: paymentTypeName,
-                account_code: accountCode
-              });
+              if (!successfulOrderIdSet.has(order_id) && !failedOrderIdSet.has(order_id)) {
+                successfulOrderIdSet.add(order_id);
+                successfulOrders.push({
+                  order_id: order_id,
+                  status: 'ready_for_handover',
+                  manifest_created: true,
+                  is_manifest: 1,
+                  manifest_id: manifestResponse.manifest_id,
+                  payment_type: paymentTypeName,
+                  account_code: accountCode
+                });
+              }
 
             } catch (error) {
               console.error(`❌ Error updating ${paymentTypeName} order ${order_id}:`, error);
-              failedOrders.push({
-                order_id: order_id,
-                reason: error.message
-              });
+              if (!failedOrderIdSet.has(order_id)) {
+                failedOrderIdSet.add(order_id);
+                failedOrders.push({
+                  order_id: order_id,
+                  reason: error.message
+                });
+              }
             }
           }
         }

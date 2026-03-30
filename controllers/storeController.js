@@ -27,15 +27,15 @@ class StoreController {
         }
         
         return {
-          id: store.id,
-          account_code: store.account_code,
-          store_name: store.store_name,
-          username: store.username,
-          status: store.status,
-          created_at: store.created_at,
-          updated_at: store.updated_at,
-          created_by: store.created_by,
-          last_synced_at: store.last_synced_at,
+        id: store.id,
+        account_code: store.account_code,
+        store_name: store.store_name,
+        username: store.username,
+        status: store.status,
+        created_at: store.created_at,
+        updated_at: store.updated_at,
+        created_by: store.created_by,
+        last_synced_at: store.last_synced_at,
           has_credentials: true,
           shopify_brands: shopifyConnections.map(conn => ({
             id: conn.id,
@@ -163,7 +163,7 @@ class StoreController {
         store_name,
         shipping_partner,
         username, 
-        password,
+        password, 
         shopify_brands, // Array of { brand_name, store_code, shopify_store_url, shopify_token }
         status
       } = req.body;
@@ -205,7 +205,7 @@ class StoreController {
           return res.status(400).json({
             success: false,
             message: `Shopify brand #${i + 1}: Brand name, Store URL and Token are required`
-          });
+        });
         }
         if (!brand.store_code) {
           return res.status(400).json({
@@ -221,10 +221,10 @@ class StoreController {
           message: 'Status must be either "active" or "inactive"'
         });
       }
-
+      
       // Encrypt password
       const encryptedPassword = encryptionService.encrypt(password);
-
+      
       // Generate Basic Auth token (stored as `Basic <base64>` in DB)
       const authToken = Buffer.from(`${username}:${password}`).toString('base64');
       const fullAuthToken = `Basic ${authToken}`;
@@ -246,18 +246,18 @@ class StoreController {
         console.log(`✅ Generated account code: ${accountCode} for store: ${store_name}`);
 
         // Create store (without Shopify fields — those go in store_shopify_connections)
-        await database.createStore({
-          account_code: accountCode,
-          store_name: store_name,
-          shipping_partner: shipping_partner,
-          username: username,
-          password_encrypted: encryptedPassword,
+      await database.createStore({
+        account_code: accountCode,
+        store_name: store_name,
+        shipping_partner: shipping_partner,
+        username: username,
+        password_encrypted: encryptedPassword,
           auth_token: fullAuthToken,
-          status: status,
-          created_by: req.user.id
-        });
-
-        console.log(`✅ Store created: ${store_name} (${accountCode})`);
+        status: status,
+        created_by: req.user.id
+      });
+      
+      console.log(`✅ Store created: ${store_name} (${accountCode})`);
       } else {
         console.log(`ℹ️ Reusing existing Shipway account_code: ${accountCode} for store_name="${store_name}"`);
 
@@ -299,8 +299,8 @@ class StoreController {
       try {
         if (isNewStore) {
           console.log(`🚀 Triggering initial sync (Shipway + Shopify) for new store: ${accountCode}`);
-          syncResult = await multiStoreSyncService.syncStore(accountCode);
-          console.log(`✅ Initial sync completed for new store: ${accountCode}`);
+        syncResult = await multiStoreSyncService.syncStore(accountCode);
+        console.log(`✅ Initial sync completed for new store: ${accountCode}`);
         } else {
           console.log(`🛍️ Store already exists. Skipping Shipway sync for ${accountCode} and syncing products only...`);
           const ShopifyProductFetcher = require('../services/shopifyProductFetcher');
@@ -352,7 +352,7 @@ class StoreController {
       const { 
         store_name, 
         username, 
-        password,
+        password, 
         shopify_brands, // Array of { id?, brand_name, store_code, shopify_store_url, shopify_token }
         status
       } = req.body;
@@ -405,7 +405,7 @@ class StoreController {
       
       // Update store_info fields
       if (Object.keys(updateData).length > 0) {
-        await database.updateStore(accountCode, updateData);
+      await database.updateStore(accountCode, updateData);
         console.log(`✅ Store info updated: ${accountCode}`);
       }
       

@@ -490,7 +490,7 @@ class ShopifyProductFetcher {
 
     // Get store info from database (to verify it exists and is active)
     const store = await database.getStoreByAccountCode(this.accountCode);
-
+    
     if (!store) {
       throw new Error(`Store not found for account code: ${this.accountCode}`);
     }
@@ -534,13 +534,13 @@ class ShopifyProductFetcher {
 
         const shopifyGraphqlUrl = this._buildGraphqlUrl(connection.shopify_store_url);
 
-        const headers = {
+    const headers = {
           'X-Shopify-Access-Token': connection.shopify_token,
-          'Content-Type': 'application/json'
-        };
+      'Content-Type': 'application/json'
+    };
 
-        const result = await fetchAndSaveShopifyProducts(shopifyGraphqlUrl, headers, false);
-
+    const result = await fetchAndSaveShopifyProducts(shopifyGraphqlUrl, headers, false);
+    
         const productCount = result.productsCount || 0;
         totalProducts += productCount;
 
@@ -554,9 +554,9 @@ class ShopifyProductFetcher {
         brandResults.push({
           brand_name: connection.brand_name,
           store_code: connection.store_code,
-          success: result.success,
+      success: result.success,
           productCount,
-          message: result.message
+      message: result.message
         });
 
         console.log(`[Shopify] ✅ Brand "${connection.brand_name}": ${productCount} products synced`);

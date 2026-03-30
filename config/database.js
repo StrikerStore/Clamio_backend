@@ -5629,16 +5629,21 @@ class Database {
    * @param {string} orderId - Order ID
    * @returns {Object|null} Customer info or null if not found
    */
-  async getCustomerInfoByOrderId(orderId) {
+  async getCustomerInfoByOrderId(orderId, accountCode = null) {
     if (!this.mysqlConnection) {
       throw new Error('MySQL connection not available');
     }
 
     try {
-      const [rows] = await this.mysqlConnection.execute(
-        'SELECT * FROM customer_info WHERE order_id = ?',
-        [orderId]
-      );
+      let query = 'SELECT * FROM customer_info WHERE order_id = ?';
+      const params = [orderId];
+
+      if (accountCode) {
+        query += ' AND account_code = ?';
+        params.push(accountCode);
+      }
+
+      const [rows] = await this.mysqlConnection.execute(query, params);
       return rows.length > 0 ? rows[0] : null;
     } catch (error) {
       console.error('Error getting customer info by order ID:', error);
@@ -5906,21 +5911,26 @@ class Database {
    * @param {string} orderType - 'active' or 'inactive'
    * @param {Array} trackingEvents - Array of tracking events from Shipway API
    */
-  async storeOrderTracking(orderId, orderType, trackingEvents) {
+  async storeOrderTracking(orderId, orderType, trackingEvents, accountCode = null) {
     if (!this.mysqlConnection) {
       throw new Error('MySQL connection not available');
     }
 
     try {
-      // Get account_code from orders table
-      const [orderData] = await this.mysqlConnection.execute(
-        'SELECT account_code FROM orders WHERE order_id = ? LIMIT 1',
-        [orderId]
-      );
-      if (orderData.length === 0 || !orderData[0].account_code) {
-        throw new Error(`Order ${orderId} not found or missing account_code`);
+      // Get account_code from orders table unless provided explicitly.
+      // IMPORTANT: order_id can exist across multiple account_codes, so we must NOT
+      // derive account_code by order_id alone when it is already known by caller.
+      let resolvedAccountCode = accountCode;
+      if (!resolvedAccountCode) {
+        const [orderData] = await this.mysqlConnection.execute(
+          'SELECT account_code FROM orders WHERE order_id = ? LIMIT 1',
+          [orderId]
+        );
+        if (orderData.length === 0 || !orderData[0].account_code) {
+          throw new Error(`Order ${orderId} not found or missing account_code`);
+        }
+        resolvedAccountCode = orderData[0].account_code;
       }
-      const accountCode = orderData[0].account_code;
 
       // Get the latest/newest status from tracking events (should be only one now)
       const latestEvent = trackingEvents[trackingEvents.length - 1];
@@ -5938,7 +5948,7 @@ class Database {
         WHERE order_id = ? AND account_code = ?
         ORDER BY timestamp DESC, id DESC
         LIMIT 1
-      `, [orderId, accountCode]);
+      `, [orderId, resolvedAccountCode]);
 
       if (existingTracking.length > 0) {
         const latestExistingStatus = existingTracking[0].shipment_status;
@@ -5967,7 +5977,7 @@ class Database {
         newStatus,
         newTimestamp,
         latestEvent.ndr_reason || null,
-        accountCode
+        resolvedAccountCode
       ]);
 
       console.log(`✅ Stored new tracking event (status: ${newStatus}) for order ${orderId}`);

@@ -452,7 +452,7 @@ class OrderTrackingService {
 
       // Store tracking data with normalized statuses
       const database = require('../config/database');
-      await database.storeOrderTracking(orderId, actualOrderType, normalizedTrackingEvents);
+      await database.storeOrderTracking(orderId, actualOrderType, normalizedTrackingEvents, accountCode);
 
       // Normalize latest status for labels table
       const normalizedLatestStatus = await this.normalizeShipmentStatus(latestStatus.name);
@@ -600,7 +600,7 @@ class OrderTrackingService {
 
       // Store tracking data with normalized statuses
       const database = require('../config/database');
-      await database.storeOrderTracking(orderId, actualOrderType, normalizedTrackingEvents);
+      await database.storeOrderTracking(orderId, actualOrderType, normalizedTrackingEvents, accountCode);
 
       console.log(`✅ [Tracking] Stored ${normalizedTrackingEvents.length} tracking events for order ${orderId}`);
 
