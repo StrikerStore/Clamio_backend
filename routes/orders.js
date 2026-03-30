@@ -931,14 +931,18 @@ router.get('/handover', async (req, res) => {
 
     console.log('📦 Handover Orders loaded:', handoverOrders.length);
 
-    // Group orders by order_id (exact same logic as original Excel flow)
+    // Group orders by (account_code + order_id) to prevent cross-store merging
     const groupedOrders = {};
 
     handoverOrders.forEach(order => {
       const orderId = order.order_id;
+      const accountCode = order.account_code || '';
+      const groupKey = `${accountCode}|${orderId}`;
 
-      if (!groupedOrders[orderId]) {
-        groupedOrders[orderId] = {
+      if (!groupedOrders[groupKey]) {
+        groupedOrders[groupKey] = {
+          group_key: groupKey,
+          account_code: accountCode,
           order_id: orderId,
           customer_name: order.customer_name,
           customer_phone: order.customer_phone,
@@ -958,7 +962,7 @@ router.get('/handover', async (req, res) => {
       const productValue = parseFloat(order.product_price) || 0;
       const productQuantity = parseInt(order.quantity) || 1;
 
-      groupedOrders[orderId].products.push({
+      groupedOrders[groupKey].products.push({
         unique_id: order.unique_id,
         product_name: order.product_name,
         product_code: order.product_code,
@@ -975,9 +979,9 @@ router.get('/handover', async (req, res) => {
         is_handover: order.is_handover
       });
 
-      groupedOrders[orderId].total_value += productValue;
-      groupedOrders[orderId].total_products += 1;
-      groupedOrders[orderId].total_quantity += productQuantity;
+      groupedOrders[groupKey].total_value += productValue;
+      groupedOrders[groupKey].total_products += 1;
+      groupedOrders[groupKey].total_quantity += productQuantity;
     });
 
     const groupedOrdersArray = Object.values(groupedOrders).sort((a, b) => {
@@ -1081,14 +1085,18 @@ router.get('/order-tracking', async (req, res) => {
 
     console.log('📦 Order Tracking Orders loaded:', trackingOrders.length);
 
-    // Group orders by order_id (exact same logic as original Excel flow)
+    // Group orders by (account_code + order_id) to prevent cross-store merging
     const groupedOrders = {};
 
     trackingOrders.forEach(order => {
       const orderId = order.order_id;
+      const accountCode = order.account_code || '';
+      const groupKey = `${accountCode}|${orderId}`;
 
-      if (!groupedOrders[orderId]) {
-        groupedOrders[orderId] = {
+      if (!groupedOrders[groupKey]) {
+        groupedOrders[groupKey] = {
+          group_key: groupKey,
+          account_code: accountCode,
           order_id: orderId,
           customer_name: order.customer_name,
           customer_phone: order.customer_phone,
@@ -1109,7 +1117,7 @@ router.get('/order-tracking', async (req, res) => {
       const productValue = parseFloat(order.product_price) || 0;
       const productQuantity = parseInt(order.quantity) || 1;
 
-      groupedOrders[orderId].products.push({
+      groupedOrders[groupKey].products.push({
         unique_id: order.unique_id,
         product_name: order.product_name,
         product_code: order.product_code,
@@ -1127,9 +1135,9 @@ router.get('/order-tracking', async (req, res) => {
         handover_at: order.handover_at
       });
 
-      groupedOrders[orderId].total_value += productValue;
-      groupedOrders[orderId].total_products += 1;
-      groupedOrders[orderId].total_quantity += productQuantity;
+      groupedOrders[groupKey].total_value += productValue;
+      groupedOrders[groupKey].total_products += 1;
+      groupedOrders[groupKey].total_quantity += productQuantity;
     });
 
     const groupedOrdersArray = Object.values(groupedOrders).sort((a, b) => {
@@ -1410,14 +1418,18 @@ router.get('/grouped', async (req, res) => {
 
     console.log('📦 Vendor orders loaded:', vendorOrders.length);
 
-    // Group orders by order_id (exact same logic as original Excel flow)
+    // Group orders by (account_code + order_id) to prevent cross-store merging
     const groupedOrders = {};
 
     vendorOrders.forEach(order => {
       const orderId = order.order_id;
+      const accountCode = order.account_code || '';
+      const groupKey = `${accountCode}|${orderId}`;
 
-      if (!groupedOrders[orderId]) {
-        groupedOrders[orderId] = {
+      if (!groupedOrders[groupKey]) {
+        groupedOrders[groupKey] = {
+          group_key: groupKey,
+          account_code: accountCode,
           order_id: orderId, // Always use the actual order_id (clone ID if cloned)
           status: order.status,
           order_date: order.order_date || order.created_at,
@@ -1434,7 +1446,7 @@ router.get('/grouped', async (req, res) => {
       }
 
       // Add product to the group (exact same structure as original Excel flow)
-      groupedOrders[orderId].products.push({
+      groupedOrders[groupKey].products.push({
         unique_id: order.unique_id,
         product_name: order.product_name || order.product,
         product_code: order.product_code,
@@ -1446,9 +1458,9 @@ router.get('/grouped', async (req, res) => {
       // Update totals
       const productValue = parseFloat(order.value || order.price || 0);
       const productQuantity = parseInt(order.quantity || 1);
-      groupedOrders[orderId].total_value += productValue;
-      groupedOrders[orderId].total_products += 1;
-      groupedOrders[orderId].total_quantity += productQuantity;
+      groupedOrders[groupKey].total_value += productValue;
+      groupedOrders[groupKey].total_products += 1;
+      groupedOrders[groupKey].total_quantity += productQuantity;
     });
 
     // Convert to array and sort by order_date (exact same logic as original Excel flow)
