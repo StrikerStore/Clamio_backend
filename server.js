@@ -473,6 +473,18 @@ app.listen(PORT, async () => {
   // Log database initialization
   console.log('📁 Database initialized successfully');
 
+  // Run Shopify Connections migration (idempotent, safe to run every startup)
+  if (process.env.RUN_MIGRATIONS !== 'false') {
+    try {
+      const { runShopifyConnectionsMigration } = require('./utils/migrationRunner');
+      await runShopifyConnectionsMigration();
+    } catch (migrationError) {
+      console.error('⚠️ Shopify connections migration failed (non-fatal):', migrationError.message);
+    }
+  } else {
+    console.log('ℹ️ Migrations disabled (RUN_MIGRATIONS=false)');
+  }
+
   // Run criticality update on startup
   try {
     const autoReversalServiceStartup = require('./services/autoReversalService');

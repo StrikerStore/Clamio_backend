@@ -163,22 +163,25 @@ class MultiStoreSyncService {
         // Don't fail the whole sync if carrier sync fails
       }
       
-      // Sync products from Shopify (if configured)
-      if (store.shopify_token && store.shopify_store_url) {
-        try {
-          console.log(`   🛍️ Syncing products from Shopify...`);
+      // Sync products from all Shopify brands (via store_shopify_connections)
+      try {
+        const shopifyConnections = await database.getActiveShopifyConnections(store.account_code);
+        if (shopifyConnections && shopifyConnections.length > 0) {
+          console.log(`   🛍️ Syncing products from ${shopifyConnections.length} Shopify brand(s)...`);
           const ShopifyProductFetcher = require('./shopifyProductFetcher');
           const productFetcher = new ShopifyProductFetcher(store.account_code);
           const productResult = await productFetcher.syncProducts();
           productCount = productResult.productCount || 0;
           console.log(`   ✅ Products synced: ${productCount}`);
           
-          // Update Shopify sync timestamp
+          // Update Shopify sync timestamps
           await database.updateStoreShopifySync(store.account_code);
-        } catch (productError) {
-          console.error(`   ⚠️ Product sync failed (non-critical):`, productError.message);
-          // Don't fail the whole sync if product sync fails
+        } else {
+          console.log(`   ⚠️ No Shopify brands configured for ${store.account_code}, skipping product sync`);
         }
+      } catch (productError) {
+        console.error(`   ⚠️ Product sync failed (non-critical):`, productError.message);
+        // Don't fail the whole sync if product sync fails
       }
       
       // Update last sync timestamp

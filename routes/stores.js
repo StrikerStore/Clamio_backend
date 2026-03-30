@@ -41,17 +41,17 @@ router.get('/:accountCode', storeController.getStoreByCode);
 
 /**
  * @route   POST /api/stores
- * @desc    Create new store
+ * @desc    Create new store with Shopify brands
  * @access  Superadmin
- * @body    { store_name, shipping_partner, username, password, shopify_store_url, shopify_token, status }
+ * @body    { store_name, shipping_partner, username, password, shopify_brands: [{ brand_name, store_code, shopify_store_url, shopify_token }], status }
  */
 router.post('/', storeController.createStore);
 
 /**
  * @route   PUT /api/stores/:accountCode
- * @desc    Update store
+ * @desc    Update store with Shopify brands
  * @access  Superadmin
- * @body    { store_name?, username?, password?, shopify_store_url?, shopify_token?, status? }
+ * @body    { store_name?, username?, password?, shopify_brands?: [{ id?, brand_name, store_code, shopify_store_url, shopify_token }], status? }
  */
 router.put('/:accountCode', storeController.updateStore);
 

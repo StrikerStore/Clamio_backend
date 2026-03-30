@@ -11,26 +11,41 @@ const multiStoreSyncService = require('../services/multiStoreSyncService');
 
 class StoreController {
   /**
-   * Get all stores
+   * Get all stores (with their Shopify connections)
    */
   async getAllStores(req, res) {
     try {
       const stores = await database.getAllStores();
       
-      // Remove sensitive data before sending to frontend
-      const sanitizedStores = stores.map(store => ({
-        id: store.id,
-        account_code: store.account_code,
-        store_name: store.store_name,
-        username: store.username,
-        shopify_store_url: store.shopify_store_url,
-        status: store.status,
-        created_at: store.created_at,
-        updated_at: store.updated_at,
-        created_by: store.created_by,
-        last_synced_at: store.last_synced_at,
-        last_shopify_sync_at: store.last_shopify_sync_at,
-        has_credentials: true // Indicate credentials exist without exposing them
+      // Fetch Shopify connections for each store
+      const sanitizedStores = await Promise.all(stores.map(async (store) => {
+        let shopifyConnections = [];
+        try {
+          shopifyConnections = await database.getShopifyConnectionsByAccountCode(store.account_code);
+        } catch (err) {
+          console.error(`Error fetching shopify connections for ${store.account_code}:`, err.message);
+        }
+        
+        return {
+          id: store.id,
+          account_code: store.account_code,
+          store_name: store.store_name,
+          username: store.username,
+          status: store.status,
+          created_at: store.created_at,
+          updated_at: store.updated_at,
+          created_by: store.created_by,
+          last_synced_at: store.last_synced_at,
+          has_credentials: true,
+          shopify_brands: shopifyConnections.map(conn => ({
+            id: conn.id,
+            brand_name: conn.brand_name,
+            store_code: conn.store_code,
+            shopify_store_url: conn.shopify_store_url,
+            status: conn.status,
+            last_synced_at: conn.last_synced_at
+          }))
+        };
       }));
       
       res.json({
@@ -49,7 +64,7 @@ class StoreController {
   }
 
   /**
-   * Get store by account code
+   * Get store by account code (with Shopify connections)
    */
   async getStoreByCode(req, res) {
     try {
@@ -64,20 +79,34 @@ class StoreController {
         });
       }
       
+      // Fetch Shopify connections
+      let shopifyConnections = [];
+      try {
+        shopifyConnections = await database.getShopifyConnectionsByAccountCode(accountCode);
+      } catch (err) {
+        console.error(`Error fetching shopify connections for ${accountCode}:`, err.message);
+      }
+      
       // Remove sensitive data
       const sanitizedStore = {
         id: store.id,
         account_code: store.account_code,
         store_name: store.store_name,
         username: store.username,
-        shopify_store_url: store.shopify_store_url,
         status: store.status,
         created_at: store.created_at,
         updated_at: store.updated_at,
         created_by: store.created_by,
         last_synced_at: store.last_synced_at,
-        last_shopify_sync_at: store.last_shopify_sync_at,
-        has_credentials: true
+        has_credentials: true,
+        shopify_brands: shopifyConnections.map(conn => ({
+          id: conn.id,
+          brand_name: conn.brand_name,
+          store_code: conn.store_code,
+          shopify_store_url: conn.shopify_store_url,
+          status: conn.status,
+          last_synced_at: conn.last_synced_at
+        }))
       };
       
       res.json({
@@ -126,7 +155,7 @@ class StoreController {
   }
 
   /**
-   * Create new store
+   * Create new store (with multiple Shopify brands)
    */
   async createStore(req, res) {
     try {
@@ -134,9 +163,8 @@ class StoreController {
         store_name,
         shipping_partner,
         username, 
-        password, 
-        shopify_store_url, 
-        shopify_token,
+        password,
+        shopify_brands, // Array of { brand_name, store_code, shopify_store_url, shopify_token }
         status
       } = req.body;
       
@@ -162,11 +190,29 @@ class StoreController {
         });
       }
       
-      if (!shopify_store_url || !shopify_token) {
+      // Validate Shopify brands array
+      if (!shopify_brands || !Array.isArray(shopify_brands) || shopify_brands.length === 0) {
         return res.status(400).json({
           success: false,
-          message: 'Shopify store URL and token are required'
+          message: 'At least one Shopify brand is required'
         });
+      }
+      
+      // Validate each brand
+      for (let i = 0; i < shopify_brands.length; i++) {
+        const brand = shopify_brands[i];
+        if (!brand.brand_name || !brand.shopify_store_url || !brand.shopify_token) {
+          return res.status(400).json({
+            success: false,
+            message: `Shopify brand #${i + 1}: Brand name, Store URL and Token are required`
+          });
+        }
+        if (!brand.store_code) {
+          return res.status(400).json({
+            success: false,
+            message: `Shopify brand #${i + 1}: Store code is required`
+          });
+        }
       }
       
       if (!status || !['active', 'inactive'].includes(status)) {
@@ -175,42 +221,100 @@ class StoreController {
           message: 'Status must be either "active" or "inactive"'
         });
       }
-      
-      // Generate unique account_code from store_name
-      const accountCode = await generateUniqueAccountCode(store_name, database);
-      console.log(`✅ Generated account code: ${accountCode} for store: ${store_name}`);
-      
+
       // Encrypt password
       const encryptedPassword = encryptionService.encrypt(password);
-      
-      // Generate Basic Auth token
+
+      // Generate Basic Auth token (stored as `Basic <base64>` in DB)
       const authToken = Buffer.from(`${username}:${password}`).toString('base64');
-      
-      // Create store
-      await database.createStore({
-        account_code: accountCode,
-        store_name: store_name,
-        shipping_partner: shipping_partner,
-        username: username,
-        password_encrypted: encryptedPassword,
-        auth_token: `Basic ${authToken}`,
-        shopify_store_url: shopify_store_url,
-        shopify_token: shopify_token,
-        status: status,
-        created_by: req.user.id
+      const fullAuthToken = `Basic ${authToken}`;
+
+      // Idempotency: if Shipway credentials already exist, reuse the existing account_code
+      // (prevents Shipway orders/carriers from running twice when adding multiple Shopify brands).
+      const existingStore = await database.getStoreByShipwayCredentials({
+        shipping_partner,
+        username,
+        auth_token: fullAuthToken
       });
+
+      const isNewStore = !existingStore;
+      const accountCode = isNewStore
+        ? await generateUniqueAccountCode(store_name, database)
+        : existingStore.account_code;
+
+      if (isNewStore) {
+        console.log(`✅ Generated account code: ${accountCode} for store: ${store_name}`);
+
+        // Create store (without Shopify fields — those go in store_shopify_connections)
+        await database.createStore({
+          account_code: accountCode,
+          store_name: store_name,
+          shipping_partner: shipping_partner,
+          username: username,
+          password_encrypted: encryptedPassword,
+          auth_token: fullAuthToken,
+          status: status,
+          created_by: req.user.id
+        });
+
+        console.log(`✅ Store created: ${store_name} (${accountCode})`);
+      } else {
+        console.log(`ℹ️ Reusing existing Shipway account_code: ${accountCode} for store_name="${store_name}"`);
+
+        // Update store fields/credentials to keep them current (do NOT run Shipway sync again).
+        await database.updateStore(accountCode, {
+          store_name: store_name,
+          username: username,
+          password_encrypted: encryptedPassword,
+          auth_token: fullAuthToken,
+          status
+        });
+      }
       
-      console.log(`✅ Store created: ${store_name} (${accountCode})`);
+      // Create Shopify connections for each brand
+      const createdBrands = [];
+      for (const brand of shopify_brands) {
+        try {
+          const result = await database.createShopifyConnection({
+            account_code: accountCode,
+            brand_name: brand.brand_name,
+            store_code: brand.store_code,
+            shopify_store_url: brand.shopify_store_url,
+            shopify_token: brand.shopify_token,
+            status: 'active'
+          });
+          createdBrands.push({
+            id: result.insertId,
+            brand_name: brand.brand_name,
+            store_code: brand.store_code
+          });
+          console.log(`   ✅ Shopify brand added: ${brand.brand_name} (store_code: ${brand.store_code})`);
+        } catch (brandError) {
+          console.error(`   ❌ Failed to add brand ${brand.brand_name}:`, brandError.message);
+        }
+      }
 
       // Immediately sync this new store (orders, carriers, products) using multi-store sync service
       let syncResult = null;
       try {
-        console.log(`🚀 Triggering initial sync for new store: ${accountCode}`);
-        syncResult = await multiStoreSyncService.syncStore(accountCode);
-        console.log(`✅ Initial sync completed for new store: ${accountCode}`);
+        if (isNewStore) {
+          console.log(`🚀 Triggering initial sync (Shipway + Shopify) for new store: ${accountCode}`);
+          syncResult = await multiStoreSyncService.syncStore(accountCode);
+          console.log(`✅ Initial sync completed for new store: ${accountCode}`);
+        } else {
+          console.log(`🛍️ Store already exists. Skipping Shipway sync for ${accountCode} and syncing products only...`);
+          const ShopifyProductFetcher = require('../services/shopifyProductFetcher');
+          const productFetcher = new ShopifyProductFetcher(accountCode);
+          const productRes = await productFetcher.syncProducts();
+
+          syncResult = {
+            success: true,
+            productCount: productRes?.productCount ?? 0,
+            message: productRes?.message ?? 'Product sync completed'
+          };
+        }
       } catch (syncError) {
         console.error(`⚠️ Initial sync failed for new store ${accountCode}:`, syncError.message);
-        // Don't fail store creation if sync fails – just report it in response
         syncResult = {
           success: false,
           error: syncError.message
@@ -224,6 +328,7 @@ class StoreController {
           account_code: accountCode,
           store_name: store_name,
           status: status,
+          shopify_brands: createdBrands,
           sync_result: syncResult
         }
       });
@@ -239,7 +344,7 @@ class StoreController {
   }
 
   /**
-   * Update store
+   * Update store (with Shopify brands management)
    */
   async updateStore(req, res) {
     try {
@@ -247,9 +352,8 @@ class StoreController {
       const { 
         store_name, 
         username, 
-        password, 
-        shopify_store_url, 
-        shopify_token,
+        password,
+        shopify_brands, // Array of { id?, brand_name, store_code, shopify_store_url, shopify_token }
         status
       } = req.body;
       
@@ -262,7 +366,7 @@ class StoreController {
         });
       }
       
-      // Build update object
+      // Build update object for store_info
       const updateData = {};
       
       if (store_name !== undefined) {
@@ -275,31 +379,18 @@ class StoreController {
       
       // Handle password update and auth token regeneration
       if (password !== undefined && password !== '') {
-        // Encrypt new password
         updateData.password_encrypted = encryptionService.encrypt(password);
-        
-        // Regenerate auth token with new password
         const currentUsername = username !== undefined ? username : existingStore.username;
         updateData.auth_token = `Basic ${Buffer.from(`${currentUsername}:${password}`).toString('base64')}`;
       } else if (username !== undefined && username !== existingStore.username) {
-        // Username changed but password not provided - regenerate auth token with existing password
         if (existingStore.password_encrypted) {
           try {
             const existingPassword = encryptionService.decrypt(existingStore.password_encrypted);
             updateData.auth_token = `Basic ${Buffer.from(`${username}:${existingPassword}`).toString('base64')}`;
           } catch (error) {
             console.error('Error decrypting existing password for auth token regeneration:', error);
-            // Continue without regenerating auth token if decryption fails
           }
         }
-      }
-      
-      if (shopify_store_url !== undefined) {
-        updateData.shopify_store_url = shopify_store_url;
-      }
-      
-      if (shopify_token !== undefined) {
-        updateData.shopify_token = shopify_token;
       }
       
       if (status !== undefined) {
@@ -312,8 +403,52 @@ class StoreController {
         updateData.status = status;
       }
       
-      // Update store
-      await database.updateStore(accountCode, updateData);
+      // Update store_info fields
+      if (Object.keys(updateData).length > 0) {
+        await database.updateStore(accountCode, updateData);
+        console.log(`✅ Store info updated: ${accountCode}`);
+      }
+      
+      // Handle Shopify brands update if provided
+      if (shopify_brands && Array.isArray(shopify_brands)) {
+        // Get existing connections
+        const existingConnections = await database.getShopifyConnectionsByAccountCode(accountCode);
+        const existingIds = existingConnections.map(c => c.id);
+        const incomingIds = shopify_brands.filter(b => b.id).map(b => b.id);
+        
+        // Delete connections that are no longer in the list
+        for (const existingConn of existingConnections) {
+          if (!incomingIds.includes(existingConn.id)) {
+            await database.deleteShopifyConnection(existingConn.id);
+            console.log(`   🗑️ Deleted Shopify brand: ${existingConn.store_name} (id: ${existingConn.id})`);
+          }
+        }
+        
+        // Update existing or create new connections
+        for (const brand of shopify_brands) {
+          if (brand.id && existingIds.includes(brand.id)) {
+            // Update existing connection
+            await database.updateShopifyConnection(brand.id, {
+              brand_name: brand.brand_name,
+              store_code: brand.store_code,
+              shopify_store_url: brand.shopify_store_url,
+              shopify_token: brand.shopify_token
+            });
+            console.log(`   ✏️ Updated Shopify brand: ${brand.brand_name} (id: ${brand.id})`);
+          } else {
+            // Create new connection
+            await database.createShopifyConnection({
+              account_code: accountCode,
+              brand_name: brand.brand_name,
+              store_code: brand.store_code,
+              shopify_store_url: brand.shopify_store_url,
+              shopify_token: brand.shopify_token,
+              status: 'active'
+            });
+            console.log(`   ✅ Added new Shopify brand: ${brand.brand_name}`);
+          }
+        }
+      }
       
       console.log(`✅ Store updated: ${accountCode}`);
       

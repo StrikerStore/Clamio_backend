@@ -342,7 +342,7 @@ async function saveToDatabase(products, accountCode) {
       return cleanedSku;
     }
 
-    // Convert products to database format
+    // Convert products to database format and SKIP products without a valid sku_id
     const dbProducts = products.map(product => {
       const hasSku = product.variants && product.variants.length > 0 && product.variants[0].sku;
       const rawSku = hasSku ? product.variants[0].sku : null;
@@ -357,7 +357,6 @@ async function saveToDatabase(products, accountCode) {
       }
       
       return {
-        id: product.id,
         name: product.name,
         image: product.images.length > 0 ? product.images[0].src : null,
         altText: product.images.length > 0 ? product.images[0].altText : null,
@@ -365,12 +364,19 @@ async function saveToDatabase(products, accountCode) {
         sku_id: cleanedSku,
         account_code: accountCode
       };
-    });
+    }).filter(p => typeof p.sku_id === 'string' && p.sku_id.trim().length > 0);
+
+    const skippedMissingSku = products.length - dbProducts.length;
+    if (skippedMissingSku > 0) {
+      console.warn(`[Shopify] Skipped ${skippedMissingSku} product(s) due to missing/blank sku_id`);
+    }
 
     // Bulk upsert products
     const result = await database.bulkUpsertProducts(dbProducts);
     
-    console.log(`[Shopify] Products saved to database: ${result.inserted} inserted, ${result.updated} updated`);
+    console.log(
+      `[Shopify] Products saved to database: ${result.inserted} inserted, ${result.updated} updated, ${result.skipped || 0} skipped`
+    );
     return result;
   } catch (error) {
     console.error('[Shopify] Error saving to database:', error);
@@ -445,6 +451,7 @@ function parseShopifyBulkData(jsonlData) {
 /**
  * Class wrapper for Shopify Product Fetcher
  * Supports multi-store via account_code
+ * Now iterates through all Shopify brands connected to one Shipway account
  */
 class ShopifyProductFetcher {
   constructor(accountCode) {
@@ -452,7 +459,25 @@ class ShopifyProductFetcher {
   }
 
   /**
-   * Sync products from Shopify for this store
+   * Build Shopify GraphQL URL from a store URL
+   * @param {string} storeUrl - The Shopify store URL
+   * @returns {string} The full GraphQL URL
+   */
+  _buildGraphqlUrl(storeUrl) {
+    let url = storeUrl;
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      url = `https://${url}`;
+    }
+    if (!url.includes('/admin/api/')) {
+      const baseUrl = url.replace(/\/$/, '');
+      url = `${baseUrl}/admin/api/2025-07/graphql.json`;
+    }
+    return url;
+  }
+
+  /**
+   * Sync products from ALL Shopify brands for this store's account_code
+   * Products are deduplicated on (account_code, sku_id) level
    * @returns {Promise<Object>} Result with productCount
    */
   async syncProducts() {
@@ -463,9 +488,9 @@ class ShopifyProductFetcher {
     // Wait for MySQL initialization
     await database.waitForMySQLInitialization();
 
-    // Get store info from database
+    // Get store info from database (to verify it exists and is active)
     const store = await database.getStoreByAccountCode(this.accountCode);
-    
+
     if (!store) {
       throw new Error(`Store not found for account code: ${this.accountCode}`);
     }
@@ -474,37 +499,83 @@ class ShopifyProductFetcher {
       throw new Error(`Store is not active: ${this.accountCode}`);
     }
 
-    if (!store.shopify_token || !store.shopify_store_url) {
-      throw new Error(`Shopify credentials not configured for store: ${this.accountCode}`);
+    // Get all active Shopify connections for this account
+    const shopifyConnections = await database.getActiveShopifyConnections(this.accountCode);
+
+    if (!shopifyConnections || shopifyConnections.length === 0) {
+      console.log(`[Shopify] No active Shopify brands found for account: ${this.accountCode}`);
+      return {
+        productCount: 0,
+        success: true,
+        message: 'No Shopify brands configured for this account'
+      };
     }
 
-    // Construct Shopify GraphQL URL
-    let shopifyGraphqlUrl = store.shopify_store_url;
-    
-    // Add https:// protocol if missing
-    if (!shopifyGraphqlUrl.startsWith('http://') && !shopifyGraphqlUrl.startsWith('https://')) {
-      shopifyGraphqlUrl = `https://${shopifyGraphqlUrl}`;
-    }
-    
-    if (!shopifyGraphqlUrl.includes('/admin/api/')) {
-      // If URL doesn't include API path, construct it
-      const baseUrl = shopifyGraphqlUrl.replace(/\/$/, ''); // Remove trailing slash
-      shopifyGraphqlUrl = `${baseUrl}/admin/api/2025-07/graphql.json`;
+    console.log(`[Shopify] Found ${shopifyConnections.length} active Shopify brand(s) for account: ${this.accountCode}`);
+
+    let totalProducts = 0;
+    const brandResults = [];
+
+    // Iterate through each Shopify brand and sync products
+    for (const connection of shopifyConnections) {
+      try {
+        console.log(`[Shopify] Syncing brand: "${connection.brand_name}" (store_code: ${connection.store_code}, URL: ${connection.shopify_store_url})`);
+
+        if (!connection.shopify_token || !connection.shopify_store_url) {
+          console.log(`[Shopify] ⚠️ Skipping brand "${connection.brand_name}" - missing credentials`);
+          brandResults.push({
+            brand_name: connection.brand_name,
+            store_code: connection.store_code,
+            success: false,
+            message: 'Missing Shopify credentials'
+          });
+          continue;
+        }
+
+        const shopifyGraphqlUrl = this._buildGraphqlUrl(connection.shopify_store_url);
+
+        const headers = {
+          'X-Shopify-Access-Token': connection.shopify_token,
+          'Content-Type': 'application/json'
+        };
+
+        const result = await fetchAndSaveShopifyProducts(shopifyGraphqlUrl, headers, false);
+
+        const productCount = result.productsCount || 0;
+        totalProducts += productCount;
+
+        // Update last_synced_at for this connection
+        try {
+          await database.updateShopifyConnectionSyncTime(connection.id);
+        } catch (err) {
+          console.error(`[Shopify] Error updating sync time for brand "${connection.brand_name}":`, err.message);
+        }
+
+        brandResults.push({
+          brand_name: connection.brand_name,
+          store_code: connection.store_code,
+          success: result.success,
+          productCount,
+          message: result.message
+        });
+
+        console.log(`[Shopify] ✅ Brand "${connection.brand_name}": ${productCount} products synced`);
+      } catch (brandError) {
+        console.error(`[Shopify] ❌ Error syncing brand "${connection.brand_name}":`, brandError.message);
+        brandResults.push({
+          brand_name: connection.brand_name,
+          store_code: connection.store_code,
+          success: false,
+          message: brandError.message
+        });
+      }
     }
 
-    // Prepare headers
-    const headers = {
-      'X-Shopify-Access-Token': store.shopify_token,
-      'Content-Type': 'application/json'
-    };
-
-    // Fetch and save products
-    const result = await fetchAndSaveShopifyProducts(shopifyGraphqlUrl, headers, false);
-    
     return {
-      productCount: result.productsCount || 0,
-      success: result.success,
-      message: result.message
+      productCount: totalProducts,
+      success: brandResults.some(r => r.success),
+      message: `Synced ${totalProducts} products from ${shopifyConnections.length} brand(s)`,
+      brandResults
     };
   }
 }

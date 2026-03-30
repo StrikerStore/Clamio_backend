@@ -63,6 +63,7 @@ class Database {
       console.log('✅ MySQL connection pool established with IST timezone (+05:30) - 20 connections available');
       await this.createUtilityTable();
       await this.createStoreInfoTable();
+      await this.createShopifyConnectionsTable();
       await this.createCarriersTable();
       await this.createProductsTable();
       await this.createUsersTable();
@@ -323,16 +324,17 @@ class Database {
     try {
       const createTableQuery = `
         CREATE TABLE IF NOT EXISTS products (
-          id VARCHAR(50) PRIMARY KEY,
+          id INT AUTO_INCREMENT PRIMARY KEY,
           name VARCHAR(500) NOT NULL,
           image VARCHAR(500),
           altText TEXT,
           totalImages INTEGER DEFAULT 0,
-          sku_id VARCHAR(100),
+          sku_id VARCHAR(100) NOT NULL,
           account_code VARCHAR(50) NOT NULL,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
           updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-          INDEX idx_account_code (account_code)
+          INDEX idx_account_code (account_code),
+          UNIQUE KEY uq_account_sku (account_code, sku_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `;
 
@@ -2461,28 +2463,40 @@ class Database {
     }
 
     try {
-      const { id, name, image, altText, totalImages, sku_id, account_code } = productData;
+      const { name, image, altText, totalImages, sku_id, account_code } = productData;
 
       if (!account_code) {
         throw new Error('account_code is required for creating product');
       }
+      if (!sku_id || (typeof sku_id === 'string' && sku_id.trim() === '')) {
+        const skipError = new Error('sku_id is required for creating product');
+        skipError.code = 'SKU_REQUIRED';
+        throw skipError;
+      }
 
       const [result] = await this.mysqlConnection.execute(
-        'INSERT INTO products (id, name, image, altText, totalImages, sku_id, account_code) VALUES (?, ?, ?, ?, ?, ?, ?)',
-        [id, name, image || null, altText || null, totalImages || 0, sku_id || null, account_code]
+        'INSERT INTO products (name, image, altText, totalImages, sku_id, account_code) VALUES (?, ?, ?, ?, ?, ?)',
+        [name, image || null, altText || null, totalImages || 0, sku_id, account_code]
       );
 
       return {
-        id,
+        id: result.insertId,
         name,
         image,
         altText,
-        totalImages: totalImages || 0
+        totalImages: totalImages || 0,
+        sku_id,
+        account_code
       };
     } catch (error) {
-      console.error('Error creating product:', error);
+      // Keep logs concise for expected/handled data issues.
+      if (error.code === 'ER_BAD_NULL_ERROR' || error.code === 'SKU_REQUIRED') {
+        console.warn(`[Products] Skipped insert: missing sku_id for account=${productData?.account_code || 'unknown'} name="${productData?.name || 'unknown'}"`);
+        throw new Error('Skipped product insert: missing sku_id');
+      }
+      console.error(`Error creating product (${error.code || 'UNKNOWN'}): ${error.message}`);
       if (error.code === 'ER_DUP_ENTRY') {
-        throw new Error('Product with this ID already exists');
+        throw new Error('Product with this (account_code, sku_id) already exists');
       }
       throw new Error('Failed to create product in database');
     }
@@ -2571,6 +2585,7 @@ class Database {
 
   /**
    * Bulk insert/update products (for sync operations)
+   * Deduplicates on (account_code, sku_id) using INSERT ... ON DUPLICATE KEY UPDATE
    * @param {Array} products - Array of product data
    * @returns {Promise<Object>} Result with counts
    */
@@ -2582,16 +2597,77 @@ class Database {
     try {
       let inserted = 0;
       let updated = 0;
+      let skipped = 0;
+      const inputCount = Array.isArray(products) ? products.length : 0;
 
-      for (const product of products) {
-        const existing = await this.getProductById(product.id);
+      // Filter out products without sku_id (sku_id is NOT NULL)
+      const filteredProducts = (products || []).filter(
+        (p) => typeof p?.sku_id === 'string' && p.sku_id.trim().length > 0 && p?.account_code
+      );
+      const skippedMissingSku = Math.max(0, inputCount - filteredProducts.length);
 
-        if (existing) {
-          await this.updateProduct(product.id, product);
-          updated++;
-        } else {
-          await this.createProduct(product);
-          inserted++;
+      // Deduplicate in memory first — keep last occurrence per (account_code, sku_id)
+      const deduped = new Map();
+      for (const product of filteredProducts) {
+        if (product.sku_id && product.account_code) {
+          const key = `${product.account_code}::${product.sku_id}`;
+          const existing = deduped.get(key);
+          const incomingHasImage = !!(product.image && String(product.image).trim() !== '');
+          const existingHasImage = !!(existing?.image && String(existing.image).trim() !== '');
+
+          // Prefer the product variant that has an image URL.
+          // If both/no image are present, keep the latest one.
+          if (!existing || incomingHasImage || !existingHasImage) {
+            deduped.set(key, product);
+          }
+        }
+      }
+
+      // Reset skipped counter
+      skipped = 0;
+
+      for (const product of deduped.values()) {
+        try {
+          if (product.sku_id && product.account_code) {
+            // Use INSERT ... ON DUPLICATE KEY UPDATE for products with sku_id
+            const [result] = await this.mysqlConnection.execute(
+              `INSERT INTO products (name, image, altText, totalImages, sku_id, account_code) 
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON DUPLICATE KEY UPDATE 
+                 name = VALUES(name), 
+                 image = CASE
+                   WHEN VALUES(image) IS NOT NULL AND TRIM(VALUES(image)) != '' THEN VALUES(image)
+                   ELSE image
+                 END,
+                 altText = CASE
+                   WHEN VALUES(image) IS NOT NULL AND TRIM(VALUES(image)) != '' THEN VALUES(altText)
+                   ELSE altText
+                 END,
+                 totalImages = GREATEST(COALESCE(totalImages, 0), COALESCE(VALUES(totalImages), 0))`,
+              [
+                product.name,
+                product.image || null,
+                product.altText || null,
+                product.totalImages || 0,
+                product.sku_id,
+                product.account_code
+              ]
+            );
+
+            if (result.affectedRows === 1) {
+              inserted++;
+            } else if (result.affectedRows === 2) {
+              // ON DUPLICATE KEY UPDATE counts as 2 affected rows
+              updated++;
+            }
+          }
+        } catch (err) {
+          if (err?.code === 'ER_BAD_NULL_ERROR') {
+            console.warn(`[Products] Skipped upsert: missing sku_id for account=${product?.account_code || 'unknown'} name="${product?.name || 'unknown'}"`);
+          } else {
+            console.error(`Error upserting product "${product?.name || 'unknown'}" (${err.code || 'UNKNOWN'}): ${err.message}`);
+          }
+          skipped++;
         }
       }
 
@@ -2599,7 +2675,9 @@ class Database {
         success: true,
         inserted,
         updated,
-        total: products.length
+        skipped: skipped + skippedMissingSku,
+        skipped_missing_sku: skippedMissingSku,
+        total: deduped.size
       };
     } catch (error) {
       console.error('Error bulk upserting products:', error);
@@ -4365,7 +4443,7 @@ class Database {
           l.manifest_id,
           l.current_shipment_status,
           l.is_handover,
-          s.store_name,
+          COALESCE(sc.brand_name, s.store_name) as store_name,
           s.status as store_status,
           u.name as vendor_name,
           u.warehouseId as vendor_warehouse_id,
@@ -4403,10 +4481,12 @@ class Database {
             MIN(billing_firstname) as billing_firstname,
             MIN(billing_lastname) as billing_lastname,
             MIN(shipping_firstname) as shipping_firstname,
-            MIN(shipping_lastname) as shipping_lastname
+            MIN(shipping_lastname) as shipping_lastname,
+            MIN(store_code) as store_code
           FROM customer_info
           GROUP BY order_id, account_code
         ) ci ON o.order_id = ci.order_id AND o.account_code = ci.account_code
+        LEFT JOIN store_shopify_connections sc ON o.account_code = sc.account_code AND sc.store_code = COALESCE(ci.store_code, '1')
         WHERE ${whereConditions}
         ORDER BY o.order_date DESC, o.order_id, o.product_name
         LIMIT ${parseInt(limit)} OFFSET ${parseInt(offset)}` ;
@@ -6281,14 +6361,11 @@ class Database {
           username VARCHAR(255) NOT NULL,
           password_encrypted TEXT NOT NULL,
           auth_token TEXT NOT NULL,
-          shopify_store_url VARCHAR(255) NOT NULL,
-          shopify_token TEXT NOT NULL,
           status ENUM('active', 'inactive') NOT NULL DEFAULT 'active',
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
           updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
           created_by VARCHAR(50),
           last_synced_at TIMESTAMP NULL,
-          last_shopify_sync_at TIMESTAMP NULL,
           INDEX idx_status (status),
           INDEX idx_account_code (account_code),
           INDEX idx_shipping_partner (shipping_partner)
@@ -6299,6 +6376,42 @@ class Database {
       console.log('✅ store_info table created/verified');
     } catch (error) {
       console.error('❌ Error creating store_info table:', error.message);
+    }
+  }
+
+  /**
+   * Create store_shopify_connections table if it doesn't exist
+   * Each row represents one Shopify brand connected to a Shipway account (store_info)
+   */
+  async createShopifyConnectionsTable() {
+    if (!this.mysqlConnection) return;
+
+    try {
+      const createTableQuery = `
+        CREATE TABLE IF NOT EXISTS store_shopify_connections (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          account_code VARCHAR(50) NOT NULL,
+          brand_name VARCHAR(255) NOT NULL,
+          store_code VARCHAR(50) NOT NULL DEFAULT '1',
+          shopify_store_url VARCHAR(255) NOT NULL,
+          shopify_token TEXT NOT NULL,
+          status ENUM('active', 'inactive') NOT NULL DEFAULT 'active',
+          last_synced_at TIMESTAMP NULL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          UNIQUE KEY uq_account_store_code (account_code, store_code),
+          INDEX idx_account_code (account_code),
+          INDEX idx_store_code (store_code),
+          INDEX idx_status (status),
+          INDEX idx_account_store (account_code, store_code),
+          FOREIGN KEY (account_code) REFERENCES store_info(account_code) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+      `;
+
+      await this.mysqlConnection.execute(createTableQuery);
+      console.log('✅ store_shopify_connections table created/verified');
+    } catch (error) {
+      console.error('❌ Error creating store_shopify_connections table:', error.message);
     }
   }
 
@@ -6380,6 +6493,39 @@ class Database {
   }
 
   /**
+   * Find an existing store by Shipway identity (idempotency helper).
+   * Used to prevent creating duplicate account_code when multiple Shopify brands
+   * are added for the same Shipway credentials.
+   *
+   * @param {Object} data
+   * @param {string} data.shipping_partner
+   * @param {string} data.username
+   * @param {string} data.auth_token - Full auth token value stored in store_info.auth_token
+   * @returns {Promise<Object|null>} Store object or null
+   */
+  async getStoreByShipwayCredentials({ shipping_partner, username, auth_token }) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      const [rows] = await this.mysqlConnection.execute(
+        `SELECT *
+         FROM store_info
+         WHERE shipping_partner = ? AND username = ?
+         ORDER BY (auth_token = ?) DESC, updated_at DESC
+         LIMIT 1`,
+        [shipping_partner, username, auth_token]
+      );
+
+      return rows.length > 0 ? rows[0] : null;
+    } catch (error) {
+      console.error('Error getting store by Shipway credentials:', error);
+      throw error;
+    }
+  }
+
+  /**
    * Get multiple stores by account_codes (bulk fetch)
    * OPTIMIZATION: Fetches all stores in one query instead of N queries
    * @param {Array<string>} account_codes - Array of account codes
@@ -6409,104 +6555,8 @@ class Database {
     }
   }
 
-  /**
-   * Get store by Shopify URL or token
-   * @param {string} shopifyUrl - The Shopify store URL (e.g., 'seq5t1-mz.myshopify.com')
-   * @param {string} shopifyToken - The Shopify access token (optional, used as fallback)
-   * @returns {Object|null} Store object or null if not found
-   */
-  async getStoreByShopifyCredentials(shopifyUrl, shopifyToken = null) {
-    if (!this.mysqlConnection) {
-      throw new Error('MySQL connection not available');
-    }
-
-    try {
-      // Extract store domain from URL if full URL is provided
-      let storeDomain = shopifyUrl;
-      if (shopifyUrl.includes('://')) {
-        // Extract domain from full URL (e.g., 'https://seq5t1-mz.myshopify.com/admin/api/...')
-        const urlMatch = shopifyUrl.match(/https?:\/\/([^\/]+)/);
-        if (urlMatch) {
-          storeDomain = urlMatch[1];
-        }
-      }
-
-      // Remove 'admin/api' part if present and clean up
-      storeDomain = storeDomain.split('/')[0].trim();
-
-      // Remove protocol if still present
-      storeDomain = storeDomain.replace(/^https?:\/\//, '');
-
-      console.log(`🔍 [Store Lookup] Searching for store with domain: ${storeDomain}`);
-
-      // Try exact match first (ACTIVE stores only)
-      let [rows] = await this.mysqlConnection.execute(
-        'SELECT * FROM store_info WHERE shopify_store_url = ? AND status = "active"',
-        [storeDomain]
-      );
-
-      // Try with https:// prefix
-      if (rows.length === 0) {
-        [rows] = await this.mysqlConnection.execute(
-          'SELECT * FROM store_info WHERE shopify_store_url = ? AND status = "active"',
-          [`https://${storeDomain}`]
-        );
-      }
-
-      // Try with http:// prefix
-      if (rows.length === 0) {
-        [rows] = await this.mysqlConnection.execute(
-          'SELECT * FROM store_info WHERE shopify_store_url = ? AND status = "active"',
-          [`http://${storeDomain}`]
-        );
-      }
-
-      // Try partial match (LIKE)
-      if (rows.length === 0) {
-        [rows] = await this.mysqlConnection.execute(
-          'SELECT * FROM store_info WHERE shopify_store_url LIKE ? AND status = "active"',
-          [`%${storeDomain}%`]
-        );
-      }
-
-      // If still not found and token is provided, try to find by token (ACTIVE stores only)
-      if (rows.length === 0 && shopifyToken) {
-        console.log(`🔍 [Store Lookup] Trying to find store by Shopify token...`);
-        [rows] = await this.mysqlConnection.execute(
-          'SELECT * FROM store_info WHERE shopify_token = ? AND status = "active"',
-          [shopifyToken]
-        );
-      }
-
-      if (rows.length > 0) {
-        console.log(`✅ [Store Lookup] Found store: ${rows[0].store_name} (account_code: ${rows[0].account_code})`);
-        return rows[0];
-      } else {
-        // Log all available stores for debugging
-        try {
-          const [allStores] = await this.mysqlConnection.execute(
-            'SELECT account_code, store_name, shopify_store_url, status FROM store_info'
-          );
-          console.log(`❌ [Store Lookup] Store not found. Searched domain: "${storeDomain}", Token provided: ${shopifyToken ? 'Yes' : 'No'}`);
-          if (allStores.length === 0) {
-            console.log(`   ⚠️ No stores found in store_info table. Please add a store first.`);
-          } else {
-            console.log(`   Available stores in database (${allStores.length}):`);
-            allStores.forEach(store => {
-              console.log(`     - ${store.store_name} (${store.account_code}): "${store.shopify_store_url}" [${store.status}]`);
-            });
-            console.log(`   💡 Tip: Make sure shopify_store_url matches the domain "${storeDomain}" or use the Shopify token to match.`);
-          }
-        } catch (logError) {
-          console.error(`❌ [Store Lookup] Error fetching store list for debugging:`, logError.message);
-        }
-        return null;
-      }
-    } catch (error) {
-      console.error('Error getting store by Shopify credentials:', error);
-      throw error;
-    }
-  }
+  // NOTE: getStoreByShopifyCredentials has been moved to the SHOPIFY CONNECTIONS METHODS section below
+  // It now queries store_shopify_connections instead of store_info
 
   /**
    * Get all stores
@@ -6581,7 +6631,7 @@ class Database {
   }
 
   /**
-   * Update store Shopify sync timestamp
+   * Update Shopify sync timestamp for all connections of an account
    * @param {string} accountCode - The account code
    */
   async updateStoreShopifySync(accountCode) {
@@ -6591,7 +6641,7 @@ class Database {
 
     try {
       await this.mysqlConnection.execute(
-        'UPDATE store_info SET last_shopify_sync_at = NOW() WHERE account_code = ?',
+        'UPDATE store_shopify_connections SET last_synced_at = NOW() WHERE account_code = ?',
         [accountCode]
       );
     } catch (error) {
@@ -6619,11 +6669,9 @@ class Database {
           username,
           password_encrypted,
           auth_token,
-          shopify_store_url,
-          shopify_token,
           status,
           created_by
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           storeData.account_code,
           storeData.store_name,
@@ -6631,8 +6679,6 @@ class Database {
           storeData.username,
           storeData.password_encrypted,
           storeData.auth_token,
-          storeData.shopify_store_url,
-          storeData.shopify_token,
           storeData.status,
           storeData.created_by
         ]
@@ -6677,14 +6723,6 @@ class Database {
         fields.push('auth_token = ?');
         values.push(updateData.auth_token);
       }
-      if (updateData.shopify_store_url !== undefined) {
-        fields.push('shopify_store_url = ?');
-        values.push(updateData.shopify_store_url);
-      }
-      if (updateData.shopify_token !== undefined) {
-        fields.push('shopify_token = ?');
-        values.push(updateData.shopify_token);
-      }
       if (updateData.status !== undefined) {
         fields.push('status = ?');
         values.push(updateData.status);
@@ -6727,6 +6765,340 @@ class Database {
       return { success: true };
     } catch (error) {
       console.error('Error deleting store:', error);
+      throw error;
+    }
+  }
+
+  // ============================================================================
+  // SHOPIFY CONNECTIONS METHODS
+  // ============================================================================
+
+  /**
+   * Get all Shopify connections for an account
+   * @param {string} accountCode - The account code
+   * @returns {Promise<Array>} Array of Shopify connection objects
+   */
+  async getShopifyConnectionsByAccountCode(accountCode) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      const [rows] = await this.mysqlConnection.execute(
+        'SELECT * FROM store_shopify_connections WHERE account_code = ? ORDER BY created_at ASC',
+        [accountCode]
+      );
+      return rows;
+    } catch (error) {
+      console.error('Error getting Shopify connections:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get all active Shopify connections for an account
+   * @param {string} accountCode - The account code
+   * @returns {Promise<Array>} Array of active Shopify connection objects
+   */
+  async getActiveShopifyConnections(accountCode) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      const [rows] = await this.mysqlConnection.execute(
+        'SELECT * FROM store_shopify_connections WHERE account_code = ? AND status = "active" ORDER BY created_at ASC',
+        [accountCode]
+      );
+      return rows;
+    } catch (error) {
+      console.error('Error getting active Shopify connections:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get a Shopify connection by ID
+   * @param {number} id - The connection ID
+   * @returns {Promise<Object|null>} Connection object or null
+   */
+  async getShopifyConnectionById(id) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      const [rows] = await this.mysqlConnection.execute(
+        'SELECT * FROM store_shopify_connections WHERE id = ?',
+        [id]
+      );
+      return rows.length > 0 ? rows[0] : null;
+    } catch (error) {
+      console.error('Error getting Shopify connection by ID:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Create a new Shopify connection
+   * @param {Object} data - Connection data { account_code, brand_name, store_code, shopify_store_url, shopify_token, status }
+   * @returns {Promise<Object>} Result with insertId
+   */
+  async createShopifyConnection(data) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      const accountCode = data.account_code;
+      const storeCode = data.store_code || '1';
+
+      // UPSERT by UNIQUE(account_code, store_code) to avoid duplicate rows per brand/store_code.
+      await this.mysqlConnection.execute(
+        `INSERT INTO store_shopify_connections
+          (account_code, brand_name, store_code, shopify_store_url, shopify_token, status)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE
+           brand_name = VALUES(brand_name),
+           shopify_store_url = VALUES(shopify_store_url),
+           shopify_token = VALUES(shopify_token),
+           status = VALUES(status),
+           updated_at = CURRENT_TIMESTAMP`,
+        [
+          accountCode,
+          data.brand_name,
+          storeCode,
+          data.shopify_store_url,
+          data.shopify_token,
+          data.status || 'active'
+        ]
+      );
+
+      // Return the connection id (works for both insert and update)
+      const [rows] = await this.mysqlConnection.execute(
+        'SELECT id FROM store_shopify_connections WHERE account_code = ? AND store_code = ? LIMIT 1',
+        [accountCode, storeCode]
+      );
+
+      return { success: true, insertId: rows?.[0]?.id };
+    } catch (error) {
+      console.error('Error creating Shopify connection:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Update a Shopify connection
+   * @param {number} id - The connection ID
+   * @param {Object} updateData - Data to update
+   * @returns {Promise<Object>} Result
+   */
+  async updateShopifyConnection(id, updateData) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      const fields = [];
+      const values = [];
+
+      if (updateData.brand_name !== undefined) {
+        fields.push('brand_name = ?');
+        values.push(updateData.brand_name);
+      }
+      if (updateData.store_code !== undefined) {
+        fields.push('store_code = ?');
+        values.push(updateData.store_code);
+      }
+      if (updateData.shopify_store_url !== undefined) {
+        fields.push('shopify_store_url = ?');
+        values.push(updateData.shopify_store_url);
+      }
+      if (updateData.shopify_token !== undefined) {
+        fields.push('shopify_token = ?');
+        values.push(updateData.shopify_token);
+      }
+      if (updateData.status !== undefined) {
+        fields.push('status = ?');
+        values.push(updateData.status);
+      }
+
+      if (fields.length === 0) {
+        throw new Error('No fields to update');
+      }
+
+      values.push(id);
+
+      await this.mysqlConnection.execute(
+        `UPDATE store_shopify_connections SET ${fields.join(', ')} WHERE id = ?`,
+        values
+      );
+
+      return { success: true };
+    } catch (error) {
+      console.error('Error updating Shopify connection:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Delete a Shopify connection
+   * @param {number} id - The connection ID
+   * @returns {Promise<Object>} Result
+   */
+  async deleteShopifyConnection(id) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      await this.mysqlConnection.execute(
+        'DELETE FROM store_shopify_connections WHERE id = ?',
+        [id]
+      );
+      return { success: true };
+    } catch (error) {
+      console.error('Error deleting Shopify connection:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Delete all Shopify connections for an account
+   * @param {string} accountCode - The account code
+   * @returns {Promise<Object>} Result
+   */
+  async deleteShopifyConnectionsByAccountCode(accountCode) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      await this.mysqlConnection.execute(
+        'DELETE FROM store_shopify_connections WHERE account_code = ?',
+        [accountCode]
+      );
+      return { success: true };
+    } catch (error) {
+      console.error('Error deleting Shopify connections:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Update Shopify sync timestamp for a specific connection
+   * @param {number} connectionId - The connection ID
+   */
+  async updateShopifyConnectionSyncTime(connectionId) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      await this.mysqlConnection.execute(
+        'UPDATE store_shopify_connections SET last_synced_at = NOW() WHERE id = ?',
+        [connectionId]
+      );
+    } catch (error) {
+      console.error('Error updating Shopify connection sync time:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get store by Shopify URL from store_shopify_connections table
+   * Searches for a Shopify connection by URL and returns the parent store + connection info
+   * @param {string} shopifyUrl - The Shopify store URL
+   * @param {string} shopifyToken - The Shopify access token (optional fallback)
+   * @returns {Object|null} Store object with connection data or null
+   */
+  async getStoreByShopifyCredentials(shopifyUrl, shopifyToken = null) {
+    if (!this.mysqlConnection) {
+      throw new Error('MySQL connection not available');
+    }
+
+    try {
+      // Extract store domain from URL
+      let storeDomain = shopifyUrl;
+      if (shopifyUrl.includes('://')) {
+        const urlMatch = shopifyUrl.match(/https?:\/\/([^\/]+)/);
+        if (urlMatch) {
+          storeDomain = urlMatch[1];
+        }
+      }
+      storeDomain = storeDomain.split('/')[0].trim();
+      storeDomain = storeDomain.replace(/^https?:\/\//, '');
+
+      console.log(`🔍 [Store Lookup] Searching for store with domain: ${storeDomain} in store_shopify_connections`);
+
+      // Try exact match first
+      let [rows] = await this.mysqlConnection.execute(
+        `SELECT sc.*, si.store_name as parent_store_name, si.account_code, si.status as store_status
+         FROM store_shopify_connections sc
+         JOIN store_info si ON sc.account_code = si.account_code
+         WHERE sc.shopify_store_url = ? AND sc.status = 'active' AND si.status = 'active'`,
+        [storeDomain]
+      );
+
+      // Try with https:// prefix
+      if (rows.length === 0) {
+        [rows] = await this.mysqlConnection.execute(
+          `SELECT sc.*, si.store_name as parent_store_name, si.account_code, si.status as store_status
+           FROM store_shopify_connections sc
+           JOIN store_info si ON sc.account_code = si.account_code
+           WHERE sc.shopify_store_url = ? AND sc.status = 'active' AND si.status = 'active'`,
+          [`https://${storeDomain}`]
+        );
+      }
+
+      // Try partial match (LIKE)
+      if (rows.length === 0) {
+        [rows] = await this.mysqlConnection.execute(
+          `SELECT sc.*, si.store_name as parent_store_name, si.account_code, si.status as store_status
+           FROM store_shopify_connections sc
+           JOIN store_info si ON sc.account_code = si.account_code
+           WHERE sc.shopify_store_url LIKE ? AND sc.status = 'active' AND si.status = 'active'`,
+          [`%${storeDomain}%`]
+        );
+      }
+
+      // Try by token as fallback
+      if (rows.length === 0 && shopifyToken) {
+        console.log(`🔍 [Store Lookup] Trying to find store by Shopify token...`);
+        [rows] = await this.mysqlConnection.execute(
+          `SELECT sc.*, si.store_name as parent_store_name, si.account_code, si.status as store_status
+           FROM store_shopify_connections sc
+           JOIN store_info si ON sc.account_code = si.account_code
+           WHERE sc.shopify_token = ? AND sc.status = 'active' AND si.status = 'active'`,
+          [shopifyToken]
+        );
+      }
+
+      if (rows.length > 0) {
+        console.log(`✅ [Store Lookup] Found store: ${rows[0].parent_store_name} (${rows[0].account_code}), brand: ${rows[0].brand_name}`);
+        return rows[0];
+      }
+
+      // Not found - log for debugging
+      try {
+        const [allConnections] = await this.mysqlConnection.execute(
+          `SELECT sc.account_code, sc.brand_name, sc.shopify_store_url, sc.status 
+           FROM store_shopify_connections sc`
+        );
+        console.log(`❌ [Store Lookup] Store not found. Searched domain: "${storeDomain}", Token provided: ${shopifyToken ? 'Yes' : 'No'}`);
+        if (allConnections.length > 0) {
+          console.log(`   Available Shopify connections (${allConnections.length}):`);
+          allConnections.forEach(conn => {
+            console.log(`     - ${conn.brand_name} (${conn.account_code}): "${conn.shopify_store_url}" [${conn.status}]`);
+          });
+        }
+      } catch (logError) {
+        // Ignore logging errors
+      }
+
+      return null;
+    } catch (error) {
+      console.error('Error getting store by Shopify credentials:', error);
       throw error;
     }
   }

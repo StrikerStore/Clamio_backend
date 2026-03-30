@@ -2024,7 +2024,8 @@ router.post('/admin/bulk-assign', authenticateBasicAuth, requireAdminOrSuperadmi
           priority_carrier: updatedOrder.priority_carrier
         });
 
-        if (result.success) {
+        // database.updateOrder returns updated order object (or null on failure), not { success: true }.
+        if (result) {
           updatedCount += 1;
         }
       } catch (error) {
