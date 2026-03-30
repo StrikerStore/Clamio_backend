@@ -793,7 +793,7 @@ class Database {
       const createLabelsTableQuery = `
         CREATE TABLE IF NOT EXISTS labels (
           id INT AUTO_INCREMENT PRIMARY KEY,
-          order_id VARCHAR(100) UNIQUE NOT NULL,
+          order_id VARCHAR(100) NOT NULL,
           label_url VARCHAR(1000),
           awb VARCHAR(100),
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -815,7 +815,8 @@ class Database {
           INDEX idx_is_handover (is_handover),
           INDEX idx_current_shipment_status (current_shipment_status),
           INDEX idx_manifest_id (manifest_id),
-          INDEX idx_account_code (account_code)
+          INDEX idx_account_code (account_code),
+          UNIQUE KEY uq_order_account_code (order_id, account_code)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `;
 
@@ -889,6 +890,8 @@ class Database {
 
       // Add account_code column if it doesn't exist (for existing tables)
       await this.addAccountCodeToLabelsIfNotExists();
+      // Ensure labels uniqueness is store-aware (order_id + account_code), not order_id-only.
+      await this.ensureLabelsCompositeUniqueKey();
 
     } catch (error) {
       console.error('❌ Error creating labels table:', error.message);
@@ -926,6 +929,55 @@ class Database {
       }
     } catch (error) {
       console.error('❌ Error adding account_code column to labels table:', error.message);
+    }
+  }
+
+  /**
+   * Ensure labels table uses UNIQUE(order_id, account_code) instead of legacy UNIQUE(order_id)
+   * This prevents cross-store collisions when the same order_id exists in multiple accounts.
+   */
+  async ensureLabelsCompositeUniqueKey() {
+    if (!this.mysqlConnection) return;
+
+    try {
+      // Drop any legacy single-column unique index on order_id
+      const [orderIdUniqueIndexes] = await this.mysqlConnection.execute(`
+        SHOW INDEX FROM labels
+        WHERE Column_name = 'order_id' AND Non_unique = 0
+      `);
+
+      const handled = new Set();
+      for (const idx of orderIdUniqueIndexes || []) {
+        const indexName = idx.Key_name;
+        if (!indexName || indexName === 'PRIMARY' || handled.has(indexName)) continue;
+        handled.add(indexName);
+
+        const [indexCols] = await this.mysqlConnection.execute(
+          'SHOW INDEX FROM labels WHERE Key_name = ?',
+          [indexName]
+        );
+        const cols = (indexCols || []).map(c => c.Column_name);
+
+        if (cols.length === 1 && cols[0] === 'order_id') {
+          await this.mysqlConnection.execute(`ALTER TABLE labels DROP INDEX \`${indexName}\``);
+          console.log(`✅ Dropped legacy UNIQUE index on labels.order_id (${indexName})`);
+        }
+      }
+
+      // Ensure composite unique key exists
+      const [compositeIdx] = await this.mysqlConnection.execute(
+        `SHOW INDEX FROM labels WHERE Key_name = 'uq_order_account_code'`
+      );
+      if (!compositeIdx || compositeIdx.length === 0) {
+        await this.mysqlConnection.execute(
+          `ALTER TABLE labels ADD UNIQUE KEY uq_order_account_code (order_id, account_code)`
+        );
+        console.log('✅ Added UNIQUE KEY uq_order_account_code (order_id, account_code)');
+      } else {
+        console.log('ℹ️ UNIQUE KEY uq_order_account_code already exists in labels');
+      }
+    } catch (error) {
+      console.error('❌ Error ensuring labels composite unique key:', error.message);
     }
   }
 
