@@ -2688,6 +2688,19 @@ router.post('/download-label', async (req, res) => {
       (order.is_handover !== 1 && order.is_handover !== '1')  // Allow download until handed over
     );
 
+    // Ensure labels row exists for this (order_id, account_code) before any cache checks/updates.
+    // This helps recover from legacy data where a store-specific labels row may be missing.
+    if (resolvedAccountCode && claimedProducts.length > 0) {
+      try {
+        await database.upsertLabel({
+          order_id,
+          account_code: resolvedAccountCode
+        });
+      } catch (ensureLabelError) {
+        console.warn(`⚠️ Could not ensure labels row for ${order_id} (${resolvedAccountCode}): ${ensureLabelError.message}`);
+      }
+    }
+
     console.log('📊 Order Analysis:');
     console.log('  - Order ID requested:', order_id);
     console.log('  - Vendor warehouse ID:', vendor.warehouseId);
@@ -4862,6 +4875,18 @@ router.post('/bulk-download-labels', async (req, res) => {
           order.claimed_by === vendor.warehouseId &&
           (order.is_handover !== 1 && order.is_handover !== '1')  // Allow download until handed over
         );
+
+        // Ensure labels row exists for this (order_id, account_code) before cache checks/generation.
+        if (resolvedAccountCode && claimedProducts.length > 0) {
+          try {
+            await database.upsertLabel({
+              order_id: orderId,
+              account_code: resolvedAccountCode
+            });
+          } catch (ensureLabelError) {
+            console.warn(`⚠️ [${batchId}] Could not ensure labels row for ${orderId} (${resolvedAccountCode}): ${ensureLabelError.message}`);
+          }
+        }
 
         if (claimedProducts.length === 0) {
           return {
