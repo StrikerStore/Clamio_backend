@@ -4452,9 +4452,18 @@ async function callShipwayCreateManifestAPI(orderIds, accountCode) {
 
     // Extract manifest_id from response (Shipway returns it as "manifest_ids")
     // Response can be single ID "4656335" or multiple IDs "4656335,4656336"
-    const manifestIds = data.manifest_ids || null;
-    // For single payment type, it returns single ID, so we just use it
-    const manifestId = manifestIds;
+    const manifestIds = data?.manifest_ids;
+    const manifestId = typeof manifestIds === 'string' ? manifestIds.trim() : String(manifestIds || '').trim();
+
+    // CRITICAL: Never allow "manifest success" without a manifest_id.
+    // Otherwise we may set is_manifest=1 with manifest_id=null in labels.
+    // Return a clean failure payload so callers can show user-friendly popups.
+    if (!manifestId) {
+      return {
+        success: false,
+        message: 'Manifest ID missing in Shipway response'
+      };
+    }
 
     console.log('✅ Shipway Create Manifest API call successful');
     console.log('  - Manifest ID(s):', manifestId);
@@ -5670,7 +5679,7 @@ router.post('/mark-ready', async (req, res) => {
         console.log('❌ Shipway manifest API failed:', manifestResponse.message);
         return res.status(500).json({
           success: false,
-          message: 'Failed to create manifest: ' + manifestResponse.message
+          message: `Order id ${order_id} is not manifested: ${manifestResponse.message}`
         });
       }
 
@@ -5906,7 +5915,7 @@ router.post('/bulk-mark-ready', async (req, res) => {
               failedOrderIdSet.add(order_id);
               failedOrders.push({
                 order_id: order_id,
-                reason: `Failed to create ${paymentTypeName} manifest for ${accountCode}: ${manifestResponse.message}`
+                reason: `Order id ${order_id} is not manifested: ${manifestResponse.message}`
               });
             }
           });

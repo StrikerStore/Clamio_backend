@@ -310,7 +310,7 @@
       "order_total": "1234.05",
       "shipping_cost": "0.00",
       "other_charges": "0.00",
-      "discount": "64.95",
+      "discount": "0.00",
       "payment_id": "12",
       "payment_method": "PayU",
       "b_city": "Jaipur",
@@ -321,14 +321,14 @@
       "s_state": "Rajasthan",
       "s_country": "IN",
       "s_zipcode": "303007",
-      "weight": "350",
-      "box_length": "10",
-      "box_breadth": "10",
-      "box_height": "10",
+      "weight": "200",
+      "box_length": "20",
+      "box_breadth": "22",
+      "box_height": "3",
       "status": "O",
       "invoice_number": "DS1312",
       "name": null,
-      "carrier_title": null,
+      "carrier_title": "Shipway Delhivery",
       "tracking_number": null,
       "shipment_status": null,
       "shipment_status_name": null,
@@ -351,7 +351,7 @@
       "email": "etash017@gmail.com",
       "products": [
         {
-          "hsn_code": "620190",
+          "hsn_code": "",
           "product": "PSG Fourth Jersey 2025-26 Player Version - L",
           "product_code": "CLU-PSG-FOR-25/26-PV-L",
           "price": "1299.00",
@@ -370,7 +370,7 @@
       "order_total": "1349.10",
       "shipping_cost": "0.00",
       "other_charges": "0.00",
-      "discount": "149.90",
+      "discount": "0.00",
       "payment_id": "12",
       "payment_method": "PayU",
       "b_city": "Pune",
@@ -381,14 +381,14 @@
       "s_state": "Maharashtra",
       "s_country": "IN",
       "s_zipcode": "411048",
-      "weight": "350",
-      "box_length": "10",
-      "box_breadth": "10",
-      "box_height": "10",
+      "weight": "200",
+      "box_length": "20",
+      "box_breadth": "22",
+      "box_height": "3",
       "status": "O",
       "invoice_number": "256267",
       "name": null,
-      "carrier_title": null,
+      "carrier_title": "Shipway Delhivery",
       "tracking_number": null,
       "shipment_status": null,
       "shipment_status_name": null,
@@ -411,7 +411,7 @@
       "email": "anshumpadole@gmail.com",
       "products": [
         {
-          "hsn_code": "610990",
+          "hsn_code": "",
           "product": "Argentina Away FIFA WC Jersey 2026 Player Version - M",
           "product_code": "N-ARG-AW-25/26-PV-M",
           "price": "1499.00",
@@ -427,7 +427,7 @@
     },
     {
       "order_id": "DS1311",
-      "order_total": "1299.00",
+      "order_total": "1169.10",
       "shipping_cost": "0.00",
       "other_charges": "0.00",
       "discount": "0.00",
@@ -441,14 +441,14 @@
       "s_state": "West Bengal",
       "s_country": "IN",
       "s_zipcode": "700071",
-      "weight": "350",
-      "box_length": "10",
-      "box_breadth": "10",
-      "box_height": "10",
+      "weight": "200",
+      "box_length": "20",
+      "box_breadth": "22",
+      "box_height": "3",
       "status": "O",
       "invoice_number": "DS1311",
       "name": null,
-      "carrier_title": null,
+      "carrier_title": "Shipway Delhivery",
       "tracking_number": null,
       "shipment_status": null,
       "shipment_status_name": null,
@@ -471,7 +471,7 @@
       "email": "jamatialord123@gmail.com",
       "products": [
         {
-          "hsn_code": null,
+          "hsn_code": "0",
           "product": "Ajax Red Home Jersey 2025-26 Player Version - L",
           "product_code": "CLU-AJX-HM-25/26-PV-L",
           "price": "1299.00",
@@ -532,7 +532,7 @@
       "email": "aniketgeorge723@gmail.com",
       "products": [
         {
-          "hsn_code": "610990",
+          "hsn_code": "",
           "product": "Argentina Away FIFA WC Jersey 2026 Player Version - M",
           "product_code": "N-ARG-AW-25/26-PV-M",
           "price": "1499.00",
@@ -5304,7 +5304,7 @@
       "email": "adityakumthekar0101@gmail.com",
       "products": [
         {
-          "hsn_code": "620190",
+          "hsn_code": "",
           "product": "PSG Fourth Jersey 2025-26 Player Version - L",
           "product_code": "CLU-PSG-FOR-25/26-PV-L",
           "price": "1299.00",
@@ -8749,7 +8749,7 @@
       "email": "adhirajv9@gmail.com",
       "products": [
         {
-          "hsn_code": "620190",
+          "hsn_code": "",
           "product": "PSG Fourth Jersey 2025-26 Player Version - L",
           "product_code": "CLU-PSG-FOR-25/26-PV-L",
           "price": "1299.00",
@@ -8991,7 +8991,7 @@
       "email": "",
       "products": [
         {
-          "hsn_code": "620190",
+          "hsn_code": "",
           "product": "PSG Fourth Jersey 2025-26 Player Version - L",
           "product_code": "CLU-PSG-FOR-25/26-PV-L",
           "price": "1299.00",
@@ -11092,7 +11092,7 @@
           "amount": "1"
         },
         {
-          "hsn_code": "620190",
+          "hsn_code": "",
           "product": "PSG Fourth Jersey 2025-26 Player Version - L",
           "product_code": "CLU-PSG-FOR-25/26-PV-L",
           "price": "1299.00",
@@ -13131,7 +13131,7 @@
       "email": "deepbose40@gmail.com",
       "products": [
         {
-          "hsn_code": "610990",
+          "hsn_code": "",
           "product": "Argentina Away FIFA WC Jersey 2026 Player Version - M",
           "product_code": "N-ARG-AW-25/26-PV-M",
           "price": "1499.00",
@@ -14615,7 +14615,7 @@
       "email": "rishabhgulechha.ris@gmail.com",
       "products": [
         {
-          "hsn_code": "610990",
+          "hsn_code": "",
           "product": "Argentina Away FIFA WC Jersey 2026 Player Version - M",
           "product_code": "N-ARG-AW-25/26-PV-M",
           "price": "1499.00",
@@ -14742,7 +14742,7 @@
       "email": "",
       "products": [
         {
-          "hsn_code": "610990",
+          "hsn_code": "",
           "product": "Argentina Away FIFA WC Jersey 2026 Player Version - M",
           "product_code": "N-ARG-AW-25/26-PV-M",
           "price": "1499.00",
@@ -15483,7 +15483,7 @@
           "amount": "1"
         },
         {
-          "hsn_code": "610990",
+          "hsn_code": "",
           "product": "Argentina Away FIFA WC Jersey 2026 Player Version - M",
           "product_code": "N-ARG-AW-25/26-PV-M",
           "price": "1499.00",
@@ -16475,7 +16475,7 @@
       "email": "shailered@gmail.com",
       "products": [
         {
-          "hsn_code": "610990",
+          "hsn_code": "",
           "product": "Argentina Away FIFA WC Jersey 2026 Player Version - M",
           "product_code": "N-ARG-AW-25/26-PV-M",
           "price": "1499.00",
@@ -17495,7 +17495,7 @@
     },
     {
       "order_id": "256175",
-      "order_total": "1299.00",
+      "order_total": "1169.10",
       "shipping_cost": "0.00",
       "other_charges": "0.00",
       "discount": "0.00",
@@ -17509,14 +17509,14 @@
       "s_state": "West Bengal",
       "s_country": "IN",
       "s_zipcode": "700157",
-      "weight": "350",
-      "box_length": "10",
-      "box_breadth": "10",
-      "box_height": "10",
+      "weight": "200",
+      "box_length": "20",
+      "box_breadth": "22",
+      "box_height": "3",
       "status": "O",
       "invoice_number": "256175",
       "name": null,
-      "carrier_title": null,
+      "carrier_title": "Shipway Delhivery",
       "tracking_number": null,
       "shipment_status": null,
       "shipment_status_name": null,
@@ -17539,7 +17539,7 @@
       "email": "Misra.Arhaan.10@gmail.com",
       "products": [
         {
-          "hsn_code": "610990",
+          "hsn_code": "",
           "product": "Barcelona Away SE Purple Edition Jersey 2026-27 Player Version - S",
           "product_code": "CLU-BARC-AW-PE-26/27-PV-S",
           "price": "1299.00",
