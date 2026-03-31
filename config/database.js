@@ -624,12 +624,17 @@ class Database {
           pincode VARCHAR(20),
           is_in_new_order BOOLEAN DEFAULT 1,
           account_code VARCHAR(50) NOT NULL,
+          normalized_product_code VARCHAR(100) DEFAULT NULL,
           INDEX idx_unique_id (unique_id),
           INDEX idx_order_id (order_id),
           INDEX idx_pincode (pincode),
           INDEX idx_order_date (order_date),
           INDEX idx_size (size),
           INDEX idx_account_code (account_code),
+          INDEX idx_product_name (product_name(191)),
+          INDEX idx_product_code (product_code),
+          INDEX idx_customer_name (customer_name(191)),
+          INDEX idx_normalized_product_code (normalized_product_code),
           created_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
           updated_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
@@ -646,6 +651,12 @@ class Database {
 
       // Add account_code column if it doesn't exist (for existing tables)
       await this.addAccountCodeToOrdersIfNotExists();
+
+      // Add search indexes if they don't exist (for existing tables)
+      await this.addSearchIndexesIfNotExists();
+
+      // Add normalized_product_code column + index + backfill if not present (for existing tables)
+      await this.addNormalizedProductCodeIfNotExists();
 
       // Add created_timestamp column to orders if it doesn't exist
       try {
@@ -764,6 +775,49 @@ class Database {
       }
     } catch (error) {
       console.error('❌ Error adding account_code column to orders table:', error.message);
+    }
+  }
+
+  /**
+   * Add search indexes to existing orders table if they don't exist (migration)
+   * Adds indexes on product_name, product_code, customer_name to speed up LIKE searches
+   */
+  async addSearchIndexesIfNotExists() {
+    if (!this.mysqlConnection) return;
+
+    const indexesToAdd = [
+      { name: 'idx_product_name',  ddl: 'ALTER TABLE orders ADD INDEX idx_product_name (product_name(191))' },
+      { name: 'idx_product_code',  ddl: 'ALTER TABLE orders ADD INDEX idx_product_code (product_code)' },
+      { name: 'idx_customer_name', ddl: 'ALTER TABLE orders ADD INDEX idx_customer_name (customer_name(191))' },
+    ];
+
+    try {
+      // Fetch all existing index names on the orders table in one query
+      const [existingIndexes] = await this.mysqlConnection.execute(
+        `SHOW INDEX FROM orders`
+      );
+      const existingIndexNames = new Set(existingIndexes.map(r => r.Key_name));
+
+      for (const idx of indexesToAdd) {
+        if (existingIndexNames.has(idx.name)) {
+          console.log(`ℹ️ Index ${idx.name} already exists on orders table, skipping.`);
+          continue;
+        }
+        try {
+          console.log(`🔄 Adding index ${idx.name} to orders table...`);
+          await this.mysqlConnection.execute(idx.ddl);
+          console.log(`✅ Index ${idx.name} added to orders table.`);
+        } catch (error) {
+          // ER_DUP_KEYNAME means the index already exists (race condition / pre-existing)
+          if (error.code === 'ER_DUP_KEYNAME') {
+            console.log(`ℹ️ Index ${idx.name} already exists (ER_DUP_KEYNAME), skipping.`);
+          } else {
+            console.error(`❌ Error adding index ${idx.name}:`, error.message);
+          }
+        }
+      }
+    } catch (error) {
+      console.error('❌ Error in addSearchIndexesIfNotExists:', error.message);
     }
   }
 
@@ -3737,14 +3791,15 @@ class Database {
       await this.mysqlConnection.execute(
         `INSERT INTO orders (
           id, unique_id, order_id, customer_name, order_date,
-          product_name, product_code, size, quantity, selling_price, order_total, payment_type,
+          product_name, product_code, normalized_product_code, size, quantity, selling_price, order_total, payment_type,
           is_partial_paid, prepaid_amount, order_total_ratio, order_total_split, collectable_amount,
           pincode, is_in_new_order, account_code
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE
           order_date = VALUES(order_date),
           product_name = VALUES(product_name),
           product_code = VALUES(product_code),
+          normalized_product_code = VALUES(normalized_product_code),
           size = VALUES(size),
           quantity = VALUES(quantity),
           selling_price = VALUES(selling_price),
@@ -3766,6 +3821,7 @@ class Database {
           orderData.order_date || null,
           orderData.product_name || null,
           orderData.product_code || null,
+          this.normalizeProductCode(orderData.product_code),
           extractedSize || null,
           orderData.quantity || null,
           orderData.selling_price || null,
@@ -3936,6 +3992,113 @@ class Database {
   }
 
   /**
+   * Normalize a product_code into a bare SKU by stripping its size suffix.
+   * Mirrors all four REGEXP_REPLACE patterns used in the SQL JOIN, applied in
+   * descending specificity so the right pattern wins:
+   *   1. Text sizes  : [-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)
+   *   2. Range sizes : [-_][0-9]+-[0-9]+   (e.g. 28-30)   ← before single-int
+   *   3. Decimal sizes: [-_][0-9]+.[0-9]+  (e.g. 7.5)     ← before single-int
+   *   4. Single-int  : [-_][0-9]+          (e.g. 7, 32)
+   *   Then collapses consecutive [-_] into a single '-' and trims whitespace.
+   * @param {string} productCode
+   * @returns {string|null}
+   */
+  normalizeProductCode(productCode) {
+    if (!productCode) return null;
+
+    let normalized = productCode.trim();
+
+    // Pattern priority order matches the SQL OR conditions
+    const patterns = [
+      // 1. Text size suffixes (XS, S, M, L, XL, 2XL … Extra Large)
+      /[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$/i,
+      // 2. Numeric range suffixes (e.g. -28-30, _28-30) — must precede single-int
+      /[-_][0-9]+-[0-9]+$/,
+      // 3. Decimal suffixes (e.g. -7.5, _5.5) — must precede single-int
+      /[-_][0-9]+\.[0-9]+$/,
+      // 4. Single integer suffixes (e.g. -7, _32)
+      /[-_][0-9]+$/,
+    ];
+
+    for (const pattern of patterns) {
+      if (pattern.test(normalized)) {
+        normalized = normalized.replace(pattern, '');
+        break; // Only strip one suffix — same as the SQL OR semantics
+      }
+    }
+
+    // Collapse any consecutive dashes/underscores left after stripping (mirrors REGEXP_REPLACE(..., '[-_]{2,}', '-'))
+    normalized = normalized.replace(/[-_]{2,}/g, '-');
+
+    return normalized.trim() || null;
+  }
+
+  /**
+   * Add normalized_product_code column to existing orders table, create its index,
+   * and backfill all existing rows. Idempotent — safe to run on every startup.
+   */
+  async addNormalizedProductCodeIfNotExists() {
+    if (!this.mysqlConnection) return;
+
+    try {
+      // 1. Add column if missing
+      const [cols] = await this.mysqlConnection.execute(
+        `SHOW COLUMNS FROM orders LIKE 'normalized_product_code'`
+      );
+      if (cols.length === 0) {
+        console.log('🔄 Adding normalized_product_code column to orders table...');
+        await this.mysqlConnection.execute(
+          `ALTER TABLE orders ADD COLUMN normalized_product_code VARCHAR(100) DEFAULT NULL AFTER product_code`
+        );
+        console.log('✅ normalized_product_code column added.');
+      } else {
+        console.log('ℹ️ normalized_product_code column already exists, skipping ADD COLUMN.');
+      }
+
+      // 2. Add index if missing
+      const [idxRows] = await this.mysqlConnection.execute(`SHOW INDEX FROM orders WHERE Key_name = 'idx_normalized_product_code'`);
+      if (idxRows.length === 0) {
+        console.log('🔄 Adding idx_normalized_product_code index...');
+        try {
+          await this.mysqlConnection.execute(
+            `ALTER TABLE orders ADD INDEX idx_normalized_product_code (normalized_product_code)`
+          );
+          console.log('✅ idx_normalized_product_code index added.');
+        } catch (err) {
+          if (err.code !== 'ER_DUP_KEYNAME') console.error('❌ Error adding index:', err.message);
+        }
+      } else {
+        console.log('ℹ️ idx_normalized_product_code index already exists, skipping.');
+      }
+
+      // 3. Backfill rows where normalized_product_code is NULL (new column or new orders)
+      const [nullRows] = await this.mysqlConnection.execute(
+        `SELECT unique_id, product_code FROM orders WHERE normalized_product_code IS NULL AND product_code IS NOT NULL`
+      );
+
+      if (nullRows.length > 0) {
+        console.log(`🔄 Backfilling normalized_product_code for ${nullRows.length} orders...`);
+        let backfilledCount = 0;
+        for (const row of nullRows) {
+          const normalized = this.normalizeProductCode(row.product_code);
+          if (normalized) {
+            await this.mysqlConnection.execute(
+              `UPDATE orders SET normalized_product_code = ? WHERE unique_id = ?`,
+              [normalized, row.unique_id]
+            );
+            backfilledCount++;
+          }
+        }
+        console.log(`✅ Backfilled normalized_product_code for ${backfilledCount} orders.`);
+      } else {
+        console.log('ℹ️ All existing orders already have normalized_product_code, no backfill needed.');
+      }
+    } catch (error) {
+      console.error('❌ Error in addNormalizedProductCodeIfNotExists:', error.message);
+    }
+  }
+
+  /**
    * Get order by unique_id from MySQL
    * @param {string} unique_id - Order unique ID
    * @returns {Object|null} Order data or null if not found
@@ -3967,13 +4130,7 @@ class Database {
           c.priority_carrier,
           l.is_manifest
         FROM orders o
-        LEFT JOIN products p ON (
-          (REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+\\.[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id)
-          AND o.account_code = p.account_code
-        )
+        LEFT JOIN products p ON o.normalized_product_code = p.sku_id AND o.account_code = p.account_code
         LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
         LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
         WHERE o.unique_id = ?
@@ -4018,13 +4175,7 @@ class Database {
           c.priority_carrier,
           l.is_manifest
         FROM orders o
-        LEFT JOIN products p ON (
-          (REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+\\.[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id)
-          AND o.account_code = p.account_code
-        )
+        LEFT JOIN products p ON o.normalized_product_code = p.sku_id AND o.account_code = p.account_code
         LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
         LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
         WHERE o.order_id = ? 
@@ -4078,13 +4229,7 @@ class Database {
           c.priority_carrier,
           l.is_manifest
         FROM orders o
-        LEFT JOIN products p ON (
-          (REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+\\.[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id)
-          AND o.account_code = p.account_code
-        )
+        LEFT JOIN products p ON o.normalized_product_code = p.sku_id AND o.account_code = p.account_code
         LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
         LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
         WHERE o.order_id IN (${placeholders})
@@ -4137,13 +4282,7 @@ class Database {
           c.priority_carrier,
           l.is_manifest
         FROM orders o
-        LEFT JOIN products p ON (
-          (REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+\\.[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id)
-          AND o.account_code = p.account_code
-        )
+        LEFT JOIN products p ON o.normalized_product_code = p.sku_id AND o.account_code = p.account_code
         LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
         LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
         WHERE o.unique_id IN (${placeholders})
@@ -4200,13 +4339,7 @@ class Database {
             ELSE c.status 
           END as status
         FROM orders o
-        LEFT JOIN products p ON (
-          (REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+\\.[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id)
-          AND o.account_code = p.account_code
-        )
+        LEFT JOIN products p ON o.normalized_product_code = p.sku_id AND o.account_code = p.account_code
         LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
         LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
         LEFT JOIN store_info s ON o.account_code = s.account_code
@@ -4346,13 +4479,7 @@ class Database {
           SELECT sku_id, account_code, MIN(image) as image
           FROM products
           GROUP BY sku_id, account_code
-        ) p ON (
-          (REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+\\.[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id)
-          AND o.account_code = p.account_code
-        )
+        ) p ON o.normalized_product_code = p.sku_id AND o.account_code = p.account_code
         LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
         LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
         LEFT JOIN store_info s ON o.account_code = s.account_code
@@ -4585,13 +4712,7 @@ class Database {
           SELECT sku_id, account_code, MIN(image) as image
           FROM products
           GROUP BY sku_id, account_code
-        ) p ON (
-          (REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+\\.[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id)
-          AND o.account_code = p.account_code
-        )
+        ) p ON o.normalized_product_code = p.sku_id AND o.account_code = p.account_code
         LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
         LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
         LEFT JOIN store_info s ON o.account_code = s.account_code
@@ -4990,13 +5111,7 @@ class Database {
           c.priority_carrier,
           l.is_manifest
         FROM orders o
-        LEFT JOIN products p ON (
-          (REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+\\.[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id)
-          AND o.account_code = p.account_code
-        )
+        LEFT JOIN products p ON o.normalized_product_code = p.sku_id AND o.account_code = p.account_code
         LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
         LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
         WHERE c.claimed_by = ? AND (o.is_in_new_order = 1 OR c.label_downloaded = 1) 
@@ -5050,13 +5165,7 @@ class Database {
             ELSE c.status 
           END as status
         FROM orders o
-        LEFT JOIN products p ON (
-          (REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+\\.[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id)
-          AND o.account_code = p.account_code
-        )
+        LEFT JOIN products p ON o.normalized_product_code = p.sku_id AND o.account_code = p.account_code
         LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
         LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
         WHERE c.claimed_by = ? 
@@ -5112,13 +5221,7 @@ class Database {
             ELSE c.status 
           END as status
         FROM orders o
-        LEFT JOIN products p ON (
-          (REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+\\.[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id)
-          AND o.account_code = p.account_code
-        )
+        LEFT JOIN products p ON o.normalized_product_code = p.sku_id AND o.account_code = p.account_code
         LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
         LEFT JOIN labels l ON o.order_id = l.order_id
         WHERE c.claimed_by = ? 
@@ -5174,13 +5277,7 @@ class Database {
             ELSE c.status 
           END as status
         FROM orders o
-        LEFT JOIN products p ON (
-          (REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+\\.[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id)
-          AND o.account_code = p.account_code
-        )
+        LEFT JOIN products p ON o.normalized_product_code = p.sku_id AND o.account_code = p.account_code
         LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
         LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
         WHERE c.claimed_by = ? 
@@ -5238,13 +5335,7 @@ class Database {
             ELSE c.status 
           END as status
         FROM orders o
-        LEFT JOIN products p ON (
-          (REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+\\.[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id)
-          AND o.account_code = p.account_code
-        )
+        LEFT JOIN products p ON o.normalized_product_code = p.sku_id AND o.account_code = p.account_code
         LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
         LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
         WHERE c.claimed_by = ? 
@@ -5469,13 +5560,7 @@ class Database {
       const [rows] = await this.mysqlConnection.execute(
         `SELECT o.*, p.image as product_image
          FROM orders o
-         LEFT JOIN products p ON (
-          (REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+\\.[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id)
-          AND o.account_code = p.account_code
-        )
+         LEFT JOIN products p ON o.normalized_product_code = p.sku_id AND o.account_code = p.account_code
          LEFT JOIN claims c ON o.unique_id = c.order_unique_id AND o.account_code = c.account_code
          WHERE (o.order_id LIKE ? OR o.customer_name LIKE ? OR o.product_name LIKE ? 
          OR o.product_code LIKE ? OR o.pincode LIKE ?)
@@ -7826,13 +7911,7 @@ class Database {
           END as customer_name_from_info
         FROM claims c
         INNER JOIN orders o ON c.order_unique_id = o.unique_id AND c.account_code = o.account_code
-        LEFT JOIN products p ON (
-          (REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+-[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id OR
-          REGEXP_REPLACE(TRIM(REGEXP_REPLACE(o.product_code, '[-_][0-9]+\\.[0-9]+$', '')), '[-_]{2,}', '-') = p.sku_id)
-          AND o.account_code = p.account_code
-        )
+        LEFT JOIN products p ON o.normalized_product_code = p.sku_id AND o.account_code = p.account_code
         LEFT JOIN labels l ON o.order_id = l.order_id AND o.account_code = l.account_code
         LEFT JOIN store_info s ON o.account_code = s.account_code
         LEFT JOIN users u ON c.claimed_by = u.warehouseId
