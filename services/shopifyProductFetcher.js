@@ -329,6 +329,8 @@ async function saveToDatabase(products, accountCode) {
         .replace(/[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$/i, '')
         // Remove age ranges (24-26, 25-26, etc.) at the end
         .replace(/[-_][0-9]+-[0-9]+$/, '')
+        // Remove decimal numbers at the end (half shoe sizes like 7.5, 8.5, etc.) - MUST be before integer pattern
+        .replace(/[-_][0-9]+\.[0-9]+$/, '')
         // Remove single numbers at the end (size numbers like 32, 34, etc.)
         .replace(/[-_][0-9]+$/, '')
         // Clean up any double dashes or underscores (IMPORTANT: do this BEFORE trimming)

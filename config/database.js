@@ -389,6 +389,8 @@ class Database {
           console.error('❌ Error adding updated_at column to products table:', error.message);
         }
       }
+      // Clean up any sku_id values that still have decimal size suffixes (e.g. P6E-OBLBPK-LT-FG-5.5)
+      await this.cleanDecimalSizesFromProductSkuIds();
     } catch (error) {
       console.error('❌ Error creating products table:', error.message);
     }
@@ -425,6 +427,57 @@ class Database {
       }
     } catch (error) {
       console.error('❌ Error adding account_code column to products table:', error.message);
+    }
+  }
+
+  /**
+   * One-time startup cleanup: strip decimal size suffixes from dirty sku_id values in products table.
+   * Fixes products synced before the cleanSkuId decimal fix (e.g. sku_id='P6E-OBLBPK-LT-FG-5.5' → 'P6E-OBLBPK-LT-FG').
+   * Uses a utility flag so this only runs ONCE per environment, not on every restart.
+   */
+  async cleanDecimalSizesFromProductSkuIds() {
+    if (!this.mysqlConnection) return;
+
+    try {
+      // Check if this cleanup has already been run (using utility table as a flag store)
+      const [flagRows] = await this.mysqlConnection.execute(
+        `SELECT id FROM utility WHERE parameter = 'decimal_sku_cleanup_done' LIMIT 1`
+      );
+
+      if (flagRows.length > 0) {
+        console.log('ℹ️ Decimal SKU cleanup already done, skipping.');
+        return;
+      }
+
+      console.log('🔄 Cleaning decimal size suffixes from products.sku_id...');
+
+      // Count how many products have dirty sku_ids (e.g. P6E-OBLBPK-LT-FG-5.5)
+      const [affected] = await this.mysqlConnection.execute(
+        `SELECT COUNT(*) as cnt FROM products WHERE sku_id REGEXP '[-_][0-9]+\\.[0-9]+$'`
+      );
+      const count = affected[0]?.cnt || 0;
+
+      if (count > 0) {
+        // Strip the decimal size suffix from those sku_id values
+        await this.mysqlConnection.execute(`
+          UPDATE products
+          SET sku_id = REGEXP_REPLACE(sku_id, '[-_][0-9]+\\.[0-9]+$', '')
+          WHERE sku_id REGEXP '[-_][0-9]+\\.[0-9]+$'
+        `);
+        console.log(`✅ Cleaned decimal size suffixes from ${count} product sku_id(s)`);
+      } else {
+        console.log('✅ No dirty decimal sku_id values found in products table');
+      }
+
+      // Mark cleanup as done so it never runs again on future restarts
+      await this.mysqlConnection.execute(
+        `INSERT INTO utility (parameter, value, created_by) VALUES ('decimal_sku_cleanup_done', 'true', 'system')
+         ON DUPLICATE KEY UPDATE value = 'true'`
+      );
+
+    } catch (error) {
+      console.error('❌ Error cleaning decimal sizes from product sku_ids:', error.message);
+      // Non-fatal — server continues to start even if cleanup fails
     }
   }
 
@@ -3834,6 +3887,8 @@ class Database {
       .replace(/[-_](XS|S|M|L|XL|2XL|3XL|4XL|5XL|XXXL|XXL|Small|Medium|Large|Extra Large)$/i, '')
       // Remove age ranges (24-26, 25-26, etc.) at the end
       .replace(/[-_][0-9]+-[0-9]+$/, '')
+      // Remove decimal numbers at the end (half shoe sizes like 7.5, 8.5, etc.) - MUST be before integer pattern
+      .replace(/[-_][0-9]+\.[0-9]+$/, '')
       // Remove single numbers at the end (size numbers like 32, 34, etc.)
       .replace(/[-_][0-9]+$/, '')
       // Clean up any double dashes or underscores
@@ -3863,6 +3918,12 @@ class Database {
     const ageRangeMatch = skuId.match(/[-_]([0-9]+-[0-9]+)$/);
     if (ageRangeMatch) {
       return ageRangeMatch[1];
+    }
+
+    // Try to extract decimal numbers at the end (half shoe sizes like 7.5, 8.5, etc.) - MUST be before integer pattern
+    const decimalMatch = skuId.match(/[-_]([0-9]+\.[0-9]+)$/);
+    if (decimalMatch) {
+      return decimalMatch[1];
     }
 
     // Try to extract single numbers at the end (size numbers like 32, 34, etc.)
