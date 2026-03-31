@@ -51,11 +51,12 @@ class WebhookService {
         WHERE (order_id, account_code) IN (${orderAccountPairs.map(() => '(?, ?)').join(', ')})
       `, orderAccountPairs.flatMap(p => [p.order_id, p.account_code]));
 
-            // Bulk fetch customer info
+            // Bulk fetch customer info (including store_code for brand lookup)
             const [customerData] = await database.mysqlConnection.execute(`
         SELECT 
           order_id,
           account_code,
+          store_code,
           shipping_phone,
           shipping_firstname,
           shipping_lastname
@@ -78,6 +79,36 @@ class WebhookService {
             // Bulk fetch latest message status
             const messageStatusMap = await database.getLatestMessageStatusByOrders(orderAccountPairs);
 
+            // Bulk fetch brand_name from store_shopify_connections
+            // Build unique (account_code, store_code) pairs from customer data
+            const brandPairsSet = new Set();
+            const brandPairs = [];
+            customerData.forEach(c => {
+                const storeCode = c.store_code || '1';
+                const pairKey = `${c.account_code}|${storeCode}`;
+                if (!brandPairsSet.has(pairKey)) {
+                    brandPairsSet.add(pairKey);
+                    brandPairs.push({ account_code: c.account_code, store_code: storeCode });
+                }
+            });
+
+            let brandMap = new Map();
+            if (brandPairs.length > 0) {
+                const [brandData] = await database.mysqlConnection.execute(`
+          SELECT 
+            account_code,
+            store_code,
+            brand_name
+          FROM store_shopify_connections
+          WHERE (account_code, store_code) IN (${brandPairs.map(() => '(?, ?)').join(', ')})
+        `, brandPairs.flatMap(p => [p.account_code, p.store_code]));
+
+                brandData.forEach(b => {
+                    const key = `${b.account_code}|${b.store_code}`;
+                    brandMap.set(key, b.brand_name);
+                });
+            }
+
             // Create lookup maps
             const labelsMap = new Map();
             labelsData.forEach(label => {
@@ -90,6 +121,7 @@ class WebhookService {
                 const key = `${customer.order_id}|${customer.account_code}`;
                 customerMap.set(key, customer);
             });
+
 
             const orderStatsMap = new Map();
             orderStats.forEach(stats => {
@@ -105,9 +137,15 @@ class WebhookService {
                 const stats = orderStatsMap.get(key);
                 const messageStatus = messageStatusMap.get(key) || null;
 
+                // Resolve brand_name via customer's store_code
+                const storeCode = customer?.store_code || '1';
+                const brandKey = `${order.account_code}|${storeCode}`;
+                const brandName = brandMap.get(brandKey) || null;
+
                 return {
                     order_id: order.order_id,
                     account_code: order.account_code,
+                    brand_name: brandName,
                     carrier_id: label?.carrier_id || null,
                     awb: label?.awb || null,
                     current_shipment_status: order.new_status,
