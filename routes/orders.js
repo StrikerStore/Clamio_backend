@@ -1736,9 +1736,9 @@ router.get('/admin/all', requireAdminOrSuperadmin, async (req, res) => {
     const totalCount = result.totalCount;
     const totalQuantity = result.totalQuantity;
 
-    // Count unique orders in the paginated result (not rows - one order can have multiple products)
-    const uniqueOrdersReturned = new Set(paginatedOrders.map(o => o.unique_id)).size;
-    const hasMore = (offset + uniqueOrdersReturned) < totalCount;
+    // hasMore = true when backend returned a full page (rows >= limit), meaning more rows may exist.
+    // Using row count vs row limit avoids the unit mismatch (row offset vs unique-order count).
+    const hasMore = paginatedOrders.length >= limit;
 
     console.log('📊 Admin Orders pagination result:', {
       total: totalCount,
@@ -1746,7 +1746,6 @@ router.get('/admin/all', requireAdminOrSuperadmin, async (req, res) => {
       page: page,
       limit: limit,
       returned: paginatedOrders.length,
-      uniqueOrdersReturned: uniqueOrdersReturned,
       hasMore: hasMore
     });
 
