@@ -2194,6 +2194,11 @@ router.post('/admin/bulk-unassign', authenticateBasicAuth, requireAdminOrSuperad
             [order.order_id, accountCode]
           );
           console.log(`✅ LABEL DATA CLEARED for order ${order.order_id}`);
+          // Send cancel fulfillment webhook (fire-and-forget)
+          const webhookService = require('../services/webhookService');
+          webhookService.sendCancelWebhook([{ order_id: order.order_id, account_code: accountCode, awb: label.awb }])
+            .then(result => console.log('[CancelWebhook] Result:', result.message))
+            .catch(err => console.error('[CancelWebhook] Error:', err.message));
         } else {
           console.log(`🔄 CASE 1: No label downloaded for order ${order.order_id} - simple reverse`);
           // Even without label download, reset manifest fields if they exist
@@ -2384,6 +2389,11 @@ router.post('/admin/unassign', authenticateBasicAuth, requireAdminOrSuperadmin, 
         [order.order_id, accountCode]
       );
       console.log('✅ LABEL DATA CLEARED (including manifest_id)');
+      // Send cancel fulfillment webhook (fire-and-forget)
+      const webhookService = require('../services/webhookService');
+      webhookService.sendCancelWebhook([{ order_id: order.order_id, account_code: accountCode, awb: label.awb }])
+        .then(result => console.log('[CancelWebhook] Result:', result.message))
+        .catch(err => console.error('[CancelWebhook] Error:', err.message));
     } else {
       console.log('🔄 CASE 1: No label downloaded - simple reverse');
       // Even without label download, reset manifest fields if they exist (for Handover tab orders)
@@ -6403,6 +6413,11 @@ router.post('/reverse', async (req, res) => {
         [order.order_id, accountCode]
       );
       console.log('✅ LABEL DATA CLEARED (including manifest_id)');
+      // Send cancel fulfillment webhook (fire-and-forget)
+      const webhookService = require('../services/webhookService');
+      webhookService.sendCancelWebhook([{ order_id: order.order_id, account_code: accountCode, awb: label.awb }])
+        .then(result => console.log('[CancelWebhook] Result:', result.message))
+        .catch(err => console.error('[CancelWebhook] Error:', err.message));
     } else {
       console.log('🔄 CASE 1: No label downloaded - simple reverse');
       // Even without label download, reset manifest fields if they exist (for Handover tab orders)

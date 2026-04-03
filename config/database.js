@@ -119,6 +119,9 @@ class Database {
          ON DUPLICATE KEY UPDATE modified_at = modified_at`,
         `INSERT INTO utility (parameter, value, created_by)
          VALUES ('shipping_partner', 'Shipway', 'system')
+         ON DUPLICATE KEY UPDATE modified_at = modified_at`,
+        `INSERT INTO utility (parameter, value, created_by)
+         VALUES ('CancelWebhookUrl', 'https://orderstatus-production-cf58.up.railway.app/cancel', 'system')
          ON DUPLICATE KEY UPDATE modified_at = modified_at`
       ];
 
