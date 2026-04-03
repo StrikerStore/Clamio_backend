@@ -19,7 +19,27 @@ setInterval(() => {
   }
 }, 10 * 60 * 1000);
 
-// Apply authentication to all order routes
+// Temp-download must be registered BEFORE the auth middleware because
+// window.location.href (Android navigation) cannot send an Authorization header.
+// Security is provided by the UUID token itself (single-use, 5-min expiry).
+router.get('/temp-download/:token', (req, res) => {
+  const entry = androidDownloadStore.get(req.params.token);
+
+  if (!entry || entry.expires < Date.now()) {
+    androidDownloadStore.delete(req.params.token);
+    return res.status(404).json({ success: false, message: 'Download link expired or not found' });
+  }
+
+  // Single-use: remove immediately so the token cannot be reused
+  androidDownloadStore.delete(req.params.token);
+
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="${entry.filename}"`);
+  res.setHeader('Content-Length', entry.buffer.byteLength);
+  res.send(entry.buffer);
+});
+
+// Apply authentication to all other order routes
 router.use(authenticateBasicAuth);
 
 /**
@@ -7765,29 +7785,6 @@ router.post('/prepare-android-download', async (req, res) => {
     console.error('❌ prepare-android-download error:', error);
     return res.status(500).json({ success: false, message: 'Failed to prepare download' });
   }
-});
-
-/**
- * @route   GET /api/orders/temp-download/:token
- * @desc    Serves a previously prepared PDF as an attachment (one-time use, 5-min expiry).
- *          Used by Android to trigger a real browser-navigation download.
- * @access  Public (token is the secret — UUID, unguessable, single-use)
- */
-router.get('/temp-download/:token', (req, res) => {
-  const entry = androidDownloadStore.get(req.params.token);
-
-  if (!entry || entry.expires < Date.now()) {
-    androidDownloadStore.delete(req.params.token);
-    return res.status(404).json({ success: false, message: 'Download link expired or not found' });
-  }
-
-  // Single-use: remove immediately so the token can't be reused
-  androidDownloadStore.delete(req.params.token);
-
-  res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `attachment; filename="${entry.filename}"`);
-  res.setHeader('Content-Length', entry.buffer.byteLength);
-  res.send(entry.buffer);
 });
 
 module.exports = router;
