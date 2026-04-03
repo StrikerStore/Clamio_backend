@@ -6,6 +6,18 @@ const fetch = require('node-fetch');
 const { authenticateBasicAuth, requireAdminOrSuperadmin, requireAnyUser } = require('../middleware/auth');
 const carrierServiceabilityService = require('../services/carrierServiceabilityService');
 const taskStore = require('../services/taskStore');
+const crypto = require('crypto');
+
+// In-memory store for Android one-time download tokens.
+// Each entry: { buffer: Buffer, filename: string, expires: number }
+// Cleaned up every 10 minutes; each token is single-use and expires in 5 minutes.
+const androidDownloadStore = new Map();
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, value] of androidDownloadStore.entries()) {
+    if (value.expires < now) androidDownloadStore.delete(key);
+  }
+}, 10 * 60 * 1000);
 
 // Apply authentication to all order routes
 router.use(authenticateBasicAuth);
@@ -7726,4 +7738,56 @@ router.post('/trigger-webhook', requireAdminOrSuperadmin, async (req, res) => {
   }
 });
 
-module.exports = router; 
+/**
+ * @route   POST /api/orders/prepare-android-download
+ * @desc    Android-only: accepts a base64 PDF payload, stores it temporarily,
+ *          returns a one-time GET URL that Android can navigate to for a real download.
+ * @access  Vendor (token required via global middleware)
+ */
+router.post('/prepare-android-download', async (req, res) => {
+  const { pdf_base64, filename } = req.body;
+
+  if (!pdf_base64 || !filename) {
+    return res.status(400).json({ success: false, message: 'pdf_base64 and filename are required' });
+  }
+
+  try {
+    const buffer = Buffer.from(pdf_base64, 'base64');
+    const token = crypto.randomUUID();
+    androidDownloadStore.set(token, {
+      buffer,
+      filename,
+      expires: Date.now() + 5 * 60 * 1000 // 5 minutes
+    });
+
+    return res.json({ success: true, token });
+  } catch (error) {
+    console.error('❌ prepare-android-download error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to prepare download' });
+  }
+});
+
+/**
+ * @route   GET /api/orders/temp-download/:token
+ * @desc    Serves a previously prepared PDF as an attachment (one-time use, 5-min expiry).
+ *          Used by Android to trigger a real browser-navigation download.
+ * @access  Public (token is the secret — UUID, unguessable, single-use)
+ */
+router.get('/temp-download/:token', (req, res) => {
+  const entry = androidDownloadStore.get(req.params.token);
+
+  if (!entry || entry.expires < Date.now()) {
+    androidDownloadStore.delete(req.params.token);
+    return res.status(404).json({ success: false, message: 'Download link expired or not found' });
+  }
+
+  // Single-use: remove immediately so the token can't be reused
+  androidDownloadStore.delete(req.params.token);
+
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="${entry.filename}"`);
+  res.setHeader('Content-Length', entry.buffer.byteLength);
+  res.send(entry.buffer);
+});
+
+module.exports = router;
