@@ -6,7 +6,7 @@
       "order_total": "1259.10",
       "shipping_cost": "0.00",
       "other_charges": "0.00",
-      "discount": "139.90",
+      "discount": "0.00",
       "payment_id": "12",
       "payment_method": "PayU",
       "b_city": "Pune",
@@ -17,14 +17,14 @@
       "s_state": "Maharashtra",
       "s_country": "IN",
       "s_zipcode": "411047",
-      "weight": "350",
-      "box_length": "10",
-      "box_breadth": "10",
-      "box_height": "10",
+      "weight": "200",
+      "box_length": "20",
+      "box_breadth": "22",
+      "box_height": "3",
       "status": "O",
       "invoice_number": "256324",
       "name": null,
-      "carrier_title": null,
+      "carrier_title": "Shipway Delhivery",
       "tracking_number": null,
       "shipment_status": null,
       "shipment_status_name": null,
@@ -47,7 +47,7 @@
       "email": "yashodipavhad2004@gmail.com",
       "products": [
         {
-          "hsn_code": "610990",
+          "hsn_code": "",
           "product": "Spain Away FIFA World Cup Jersey 2026 Player Version - XL",
           "product_code": "N-SPN-AW-26-PV-XL",
           "price": "1399.00",
@@ -1054,6 +1054,68 @@
         "low",
         "SR_STANDARD",
         "Standard",
+        "bot.space"
+      ]
+    },
+    {
+      "order_id": "256305",
+      "order_total": "1281.64",
+      "shipping_cost": "0.00",
+      "other_charges": "0.00",
+      "discount": "0.00",
+      "payment_id": "6",
+      "payment_method": "PayU",
+      "b_city": "Bangalore",
+      "b_country": "IN",
+      "b_state": "Karnataka",
+      "b_zipcode": "560076",
+      "s_city": "Bangalore",
+      "s_state": "Karnataka",
+      "s_country": "IN",
+      "s_zipcode": "560076",
+      "weight": "200",
+      "box_length": "20",
+      "box_breadth": "22",
+      "box_height": "3",
+      "status": "O",
+      "invoice_number": "256305",
+      "name": null,
+      "carrier_title": "Shipway Delhivery",
+      "tracking_number": null,
+      "shipment_status": null,
+      "shipment_status_name": null,
+      "pickup_address": null,
+      "return_address": null,
+      "order_date": "2026-04-02 14:23:49",
+      "ezyslip_order_id": "85134466",
+      "carrier_id": null,
+      "store_code": "1",
+      "b_firstname": "Somnath",
+      "b_lastname": "Roychoudhury",
+      "b_address": "Shri Lakshmi Srinivas PG, Room no 205 2nd Main Rd, Sarvabhoumanagar, Sundar Ram Shetty Nagar, Bilekahalli, Bengaluru,",
+      "b_address_2": "Karnataka 560076",
+      "b_phone": "9903144020",
+      "s_firstname": "Somnath",
+      "s_lastname": "Roychoudhury",
+      "s_address": "Shri Lakshmi Srinivas PG, Room no 205 2nd Main Rd, Sarvabhoumanagar, Sundar Ram Shetty Nagar, Bilekahalli, Bengaluru,",
+      "s_address_2": "Karnataka 560076",
+      "s_phone": "9903144020",
+      "email": "somnath.roychoudhury2000@gmail.com",
+      "products": [
+        {
+          "hsn_code": "",
+          "product": "Argentina Away FIFA WC Jersey 2026 Player Version - XL",
+          "product_code": "N-ARG-AW-25/26-PV-XL",
+          "price": "1499.00",
+          "amount": "1"
+        }
+      ],
+      "order_tags": [
+        "fastrr",
+        "low",
+        "PPCOD",
+        "Rush",
+        "SR_RUSH",
         "bot.space"
       ]
     },
@@ -2648,7 +2710,7 @@
       "email": "hmzashkk@gmail.com",
       "products": [
         {
-          "hsn_code": "610990",
+          "hsn_code": "",
           "product": "Spain Away FIFA World Cup Jersey 2026 Player Version - XL",
           "product_code": "N-SPN-AW-26-PV-XL",
           "price": "1399.00",
@@ -2950,7 +3012,7 @@
       "email": "rohtashsingh333@gmail.com",
       "products": [
         {
-          "hsn_code": "610990",
+          "hsn_code": "",
           "product": "Spain Away FIFA World Cup Jersey 2026 Player Version - XL",
           "product_code": "N-SPN-AW-26-PV-XL",
           "price": "1399.00",
@@ -3072,7 +3134,7 @@
       "email": "nukshiimti3@gmail.com",
       "products": [
         {
-          "hsn_code": "610990",
+          "hsn_code": "",
           "product": "Spain Away FIFA World Cup Jersey 2026 Player Version - XL",
           "product_code": "N-SPN-AW-26-PV-XL",
           "price": "1399.00",
@@ -9003,7 +9065,7 @@
       "email": "armaanshaikhps@gmail.com",
       "products": [
         {
-          "hsn_code": "610990",
+          "hsn_code": "",
           "product": "Spain Away FIFA World Cup Jersey 2026 Player Version - XL",
           "product_code": "N-SPN-AW-26-PV-XL",
           "price": "1399.00",
@@ -9665,7 +9727,7 @@
       "email": "kanishk7sharma@gmail.com",
       "products": [
         {
-          "hsn_code": "610990",
+          "hsn_code": "",
           "product": "Spain Away FIFA World Cup Jersey 2026 Player Version - XL",
           "product_code": "N-SPN-AW-26-PV-XL",
           "price": "1399.00",
@@ -9725,7 +9787,7 @@
       "email": "",
       "products": [
         {
-          "hsn_code": "610990",
+          "hsn_code": "",
           "product": "Spain Away FIFA World Cup Jersey 2026 Player Version - XL",
           "product_code": "N-SPN-AW-26-PV-XL",
           "price": "1399.00",

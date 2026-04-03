@@ -1800,7 +1800,8 @@ router.get('/admin/all', requireAdminOrSuperadmin, async (req, res) => {
       store_name: order.store_name || null,
       store_status: order.store_status || 'active',
       account_code: order.account_code || null,
-      awb: order.awb || null
+      awb: order.awb || null,
+      payment_type: order.payment_type
     }));
 
     console.log('✅ ADMIN ORDERS SUCCESS');
