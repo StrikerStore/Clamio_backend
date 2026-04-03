@@ -768,10 +768,6 @@ class OrderTrackingService {
       throw new Error(`Store not found for account_code: ${accountCode}`);
     }
 
-    if (store.status !== 'active') {
-      throw new Error(`Store is not active: ${accountCode}`);
-    }
-
     if (!store.auth_token) {
       throw new Error(`Store auth_token not found for account_code: ${accountCode}`);
     }
