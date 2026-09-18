@@ -1048,7 +1048,12 @@ router.get('/handover', async (req, res) => {
           total_count: totalCount,
           limit: limit,
           has_next: endIndex < totalCount,
-          has_prev: page > 1
+          has_prev: page > 1,
+          // camelCase keys read by the vendor dashboard on first load (same shape as other tabs)
+          page: page,
+          total: totalCount,
+          hasMore: endIndex < totalCount,
+          totalQuantity: totalQuantityAcrossAllOrders
         },
         summary: {
           total_orders: totalCount,
