@@ -562,9 +562,11 @@ class StoreController {
       // Generate auth token
       const authToken = Buffer.from(`${username}:${password}`).toString('base64');
       
-      // Test connection by calling Shipway API
+      // Test connection by calling Shipway API (today's IST date range only)
+      const ShipwayService = require('../services/shipwayService');
+      const todayIST = ShipwayService.getISTDateString(0);
       const response = await axios.get('https://app.shipway.com/api/getorders', {
-        params: { status: 'O', page: 1 },
+        params: { status: 'O', date_from: todayIST, date_to: todayIST },
         headers: {
           'Authorization': `Basic ${authToken}`,
           'Content-Type': 'application/json'

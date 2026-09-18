@@ -285,6 +285,166 @@ class ShipwayService {
   }
 
   /**
+   * Get a date in IST as YYYY-MM-DD
+   * @param {number} offsetDays - Days to add to today's IST date (negative for past dates)
+   * @returns {string} Date string in YYYY-MM-DD format
+   */
+  static getISTDateString(offsetDays = 0) {
+    // en-CA formats as YYYY-MM-DD
+    const todayIST = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
+    const [year, month, day] = todayIST.split('-').map(Number);
+    // Use UTC noon so the day arithmetic is unaffected by server timezone
+    const date = new Date(Date.UTC(year, month - 1, day, 12));
+    date.setUTCDate(date.getUTCDate() + offsetDays);
+    return date.toISOString().slice(0, 10);
+  }
+
+  /**
+   * Build the date range used for Shipway getorders API
+   * date_to = today (IST), date_from = today (IST) - number_of_day_of_order_include
+   * @returns {Promise<{date_from: string, date_to: string, numberOfDays: number}>}
+   */
+  async getOrderDateRange() {
+    let numberOfDays = 60; // default
+    try {
+      const daysValue = await database.getUtilityParameter('number_of_day_of_order_include');
+      const parsedDays = parseInt(daysValue, 10);
+      if (!isNaN(parsedDays) && parsedDays > 0) {
+        numberOfDays = parsedDays;
+        console.log(`📅 Using ${numberOfDays} days from utility configuration`);
+      } else {
+        console.log(`⚠️ Utility parameter not found, using default: ${numberOfDays} days`);
+      }
+    } catch (dbError) {
+      console.log(`⚠️ Could not fetch utility parameter, using default: ${numberOfDays} days`, dbError.message);
+    }
+
+    return {
+      date_from: ShipwayService.getISTDateString(-numberOfDays),
+      date_to: ShipwayService.getISTDateString(0),
+      numberOfDays
+    };
+  }
+
+  /**
+   * Parse orders array out of a Shipway getorders response
+   * @param {*} data - response.data from Shipway getorders API
+   * @returns {Array} Orders in the response (empty if none)
+   */
+  parseOrdersResponse(data) {
+    if (Array.isArray(data)) {
+      return data;
+    } else if (Array.isArray(data.orders)) {
+      return data.orders;
+    } else if (typeof data === 'object' && Array.isArray(data.message) && data.success === 1) {
+      return data.message;
+    } else if (typeof data === 'object' && data.order_id) {
+      return [data];
+    } else if (typeof data === 'object' && typeof data.message === 'string' && /^no orders? found$/i.test(data.message.trim())) {
+      // Shipway returns "No order found" when there are no (more) orders
+      return [];
+    } else if (typeof data === 'object' && !data.order_id && !Array.isArray(data.orders) && !Array.isArray(data.message)) {
+      // Handle empty/unexpected response - treat as no orders instead of erroring
+      this.logApiActivity({ type: 'shipway-empty-or-unexpected-format', data });
+      console.log(`  ⚠️ Empty or unexpected response, treating as no orders`);
+      return [];
+    }
+    this.logApiActivity({ type: 'shipway-unexpected-format', data });
+    throw new Error('Unexpected Shipway API response format');
+  }
+
+  /**
+   * Fetch all open orders within the configured date range from Shipway getorders API.
+   * Shipway returns max 100 orders per call, so pages are fetched until a page has < 100 orders.
+   * @param {Object} options
+   * @param {number} options.timeout - Per-page request timeout in ms
+   * @param {string} options.logType - Log type for each page request
+   * @param {number} options.maxPages - Safety limit on number of pages
+   * @returns {Promise<{allOrders: Array, date_from: string, date_to: string, numberOfDays: number}>}
+   */
+  async fetchOrdersInDateRange({ timeout = 60000, logType = 'shipway-request', maxPages = 100 } = {}) {
+    const url = `${this.baseURL}/getorders`;
+    const PAGE_SIZE = 100;
+    const { date_from, date_to, numberOfDays } = await this.getOrderDateRange();
+
+    console.log(`📆 Shipway date range: ${date_from} to ${date_to}`);
+
+    const allOrders = [];
+    const seenOrderIds = new Set();
+    let page = 1;
+
+    while (true) {
+      const params = { status: 'O', date_from, date_to, page };
+
+      this.logApiActivity({
+        type: logType,
+        url,
+        params,
+        headers: { Authorization: '***' }
+      });
+
+      console.log(`📄 Fetching page ${page}...`);
+
+      const response = await axios.get(url, {
+        params,
+        headers: {
+          'Authorization': this.basicAuthHeader,
+          'Content-Type': 'application/json',
+        },
+        timeout,
+      });
+
+      if (response.status !== 200 || !response.data) {
+        throw new Error('Invalid response from Shipway API');
+      }
+
+      const pageOrders = this.parseOrdersResponse(response.data);
+
+      // De-duplicate across pages (orders can shift between pages if new ones arrive mid-fetch)
+      let newInPage = 0;
+      for (const order of pageOrders) {
+        if (order && order.order_id && seenOrderIds.has(order.order_id)) continue;
+        if (order && order.order_id) seenOrderIds.add(order.order_id);
+        allOrders.push(order);
+        newInPage++;
+      }
+
+      console.log(`  ✅ Page ${page}: ${pageOrders.length} orders (${newInPage} new)`);
+
+      this.logApiActivity({
+        type: 'shipway-page-fetched',
+        page,
+        ordersInPage: pageOrders.length,
+        totalOrdersSoFar: allOrders.length
+      });
+
+      if (pageOrders.length < PAGE_SIZE) {
+        console.log(`  🏁 Last page reached (${pageOrders.length} < ${PAGE_SIZE} orders)`);
+        break;
+      }
+
+      if (newInPage === 0) {
+        // API returned a full page with nothing new - it is likely ignoring the page param
+        console.log(`  ⚠️ Page ${page} returned no new orders, stopping pagination`);
+        this.logApiActivity({ type: 'shipway-pagination-no-new-orders', page, totalOrders: allOrders.length });
+        break;
+      }
+
+      if (page >= maxPages) {
+        console.log(`⚠️ Safety limit reached (${maxPages} pages), stopping pagination`);
+        this.logApiActivity({ type: 'shipway-pagination-limit-reached', totalOrders: allOrders.length });
+        break;
+      }
+
+      page++;
+    }
+
+    console.log(`🎉 Pagination complete! Total orders fetched: ${allOrders.length}`);
+
+    return { allOrders, date_from, date_to, numberOfDays };
+  }
+
+  /**
    * @deprecated - Use syncOrdersToMySQL() instead
    * Old Excel-based sync method - kept for reference but not used
    */
@@ -677,116 +837,16 @@ class ShipwayService {
     let rawApiResponse = null;
 
     try {
-      // Fetch all orders using Shipway's page-based pagination
-      let allOrders = [];
-      let page = 1;
-      let hasMorePages = true;
+      // Fetch all orders in the configured date range (date_from = today IST - N days, date_to = today IST)
+      console.log(`🔄 Starting fetch from Shipway API${this.accountCode ? ` (${this.accountCode})` : ''}...`);
+      const { allOrders, date_from, numberOfDays } = await this.fetchOrdersInDateRange({
+        timeout: 60000, // 60 seconds per page to handle slower API responses
+        logType: 'shipway-request'
+      });
 
-      console.log(`🔄 Starting paginated fetch from Shipway API${this.accountCode ? ` (${this.accountCode})` : ''}...`);
-
-      while (hasMorePages) {
-        const currentParams = {
-          status: 'O',
-          page: page
-        };
-
-        this.logApiActivity({
-          type: 'shipway-request',
-          url,
-          params: currentParams,
-          headers: { Authorization: '***' },
-          page: page
-        });
-
-        console.log(`📄 Fetching page ${page}...`);
-
-        const response = await axios.get(url, {
-          params: currentParams,
-          headers: {
-            'Authorization': this.basicAuthHeader,
-            'Content-Type': 'application/json',
-          },
-          timeout: 60000, // Increased to 60 seconds to handle slower API responses
-        });
-
-        if (response.status !== 200 || !response.data) {
-          throw new Error('Invalid response from Shipway API');
-        }
-
-        let currentPageOrders = [];
-        if (Array.isArray(response.data)) {
-          currentPageOrders = response.data;
-        } else if (Array.isArray(response.data.orders)) {
-          currentPageOrders = response.data.orders;
-        } else if (typeof response.data === 'object' && Array.isArray(response.data.message) && response.data.success === 1) {
-          currentPageOrders = response.data.message;
-        } else if (typeof response.data === 'object' && response.data.order_id) {
-          currentPageOrders = [response.data];
-        } else if (typeof response.data === 'object' && response.data.message === 'No orders found') {
-          // Handle "No orders found" response gracefully
-          currentPageOrders = [];
-          console.log(`  ℹ️ Page ${page}: No orders found, stopping pagination`);
-        } else if (typeof response.data === 'object' && !response.data.order_id && !Array.isArray(response.data.orders) && !Array.isArray(response.data.message)) {
-          // Handle empty/unexpected response - treat as no orders instead of erroring
-          this.logApiActivity({ type: 'shipway-empty-or-unexpected-format', data: response.data });
-          currentPageOrders = [];
-          console.log(`  ⚠️ Page ${page}: Empty or unexpected response, treating as no orders - stopping pagination`);
-        } else {
-          this.logApiActivity({ type: 'shipway-unexpected-format', data: response.data });
-          throw new Error('Unexpected Shipway API response format');
-        }
-
-        console.log(`  ✅ Page ${page}: ${currentPageOrders.length} orders`);
-
-        // Add orders from this page to our collection
-        allOrders = allOrders.concat(currentPageOrders);
-
-        // If we got 0 orders or fewer than 100 orders, we've reached the last page
-        if (currentPageOrders.length === 0) {
-          hasMorePages = false;
-          console.log(`  🏁 Last page reached (0 orders found, no more data)`);
-        } else if (currentPageOrders.length < 100) {
-          hasMorePages = false;
-          console.log(`  🏁 Last page reached (${currentPageOrders.length} < 100 orders)`);
-        } else {
-          console.log(`  ➡️ More pages available (${currentPageOrders.length} = 100 orders)`);
-        }
-
-        this.logApiActivity({
-          type: 'shipway-page-fetched',
-          page: page,
-          ordersInPage: currentPageOrders.length,
-          totalOrdersSoFar: allOrders.length
-        });
-
-        page++;
-
-        // Safety check to prevent infinite loops
-        if (page > 20) {
-          console.log('⚠️ Safety limit reached (20 pages), stopping pagination');
-          this.logApiActivity({ type: 'shipway-pagination-limit-reached', totalOrders: allOrders.length });
-          break;
-        }
-      }
-
-      console.log(`🎉 Pagination complete! Total orders fetched: ${allOrders.length}`);
-
-      // Filter orders to only include last N days (configurable from utility table)
-      let numberOfDays = 60; // default
-      try {
-        const daysValue = await database.getUtilityParameter('number_of_day_of_order_include');
-        if (daysValue) {
-          numberOfDays = parseInt(daysValue, 10);
-          console.log(`📅 Using ${numberOfDays} days from utility configuration`);
-        } else {
-          console.log(`⚠️ Utility parameter not found, using default: ${numberOfDays} days`);
-        }
-      } catch (dbError) {
-        console.log(`⚠️ Could not fetch utility parameter, using default: ${numberOfDays} days`, dbError.message);
-      }
-
-      const cutoffDate = new Date();
-      cutoffDate.setDate(cutoffDate.getDate() - numberOfDays);
+      // Safety net: filter orders to only include those on/after date_from
+      // (order_date and cutoff are both parsed as local time, so they compare consistently)
+      const cutoffDate = new Date(`${date_from}T00:00:00`);
 
       const filteredOrders = allOrders.filter(order => {
         if (!order.order_date) return false;
@@ -1317,96 +1377,17 @@ class ShipwayService {
 
   /**
    * Fetch orders from Shipway API (for clone ID verification)
-   * Uses pagination to get all orders
+   * Uses the configured date range (date_from/date_to) with pagination to get all orders
    * @returns {Promise<Array>} Array of orders from Shipway
    */
   async fetchOrdersFromShipway() {
-    const url = `${this.baseURL}/getorders`;
-
     try {
-      // Fetch all orders using Shipway's page-based pagination
-      let allOrders = [];
-      let page = 1;
-      let hasMorePages = true;
+      console.log('🔄 Starting fetch from Shipway API (for clone verification)...');
 
-      console.log('🔄 Starting paginated fetch from Shipway API (for clone verification)...');
-
-      while (hasMorePages) {
-        const currentParams = {
-          status: 'O',
-          page: page
-        };
-
-        this.logApiActivity({
-          type: 'shipway-fetch-orders',
-          url,
-          params: currentParams,
-          page: page
-        });
-
-        console.log(`📄 Fetching page ${page} for clone verification...`);
-
-        const response = await axios.get(url, {
-          params: currentParams,
-          headers: {
-            'Authorization': this.basicAuthHeader,
-            'Content-Type': 'application/json',
-          },
-          timeout: 10000, // Shorter timeout for clone verification
-        });
-
-        if (response.status !== 200 || !response.data) {
-          throw new Error('Invalid response from Shipway API');
-        }
-
-        let currentPageOrders = [];
-        if (Array.isArray(response.data)) {
-          currentPageOrders = response.data;
-        } else if (Array.isArray(response.data.orders)) {
-          currentPageOrders = response.data.orders;
-        } else if (typeof response.data === 'object' && Array.isArray(response.data.message) && response.data.success === 1) {
-          currentPageOrders = response.data.message;
-        } else if (typeof response.data === 'object' && response.data.order_id) {
-          currentPageOrders = [response.data];
-        } else if (typeof response.data === 'object' && response.data.message === 'No orders found') {
-          // Handle "No orders found" response gracefully
-          currentPageOrders = [];
-          console.log(`  ℹ️ Page ${page}: No orders found, stopping pagination`);
-        } else if (typeof response.data === 'object' && !response.data.order_id && !Array.isArray(response.data.orders) && !Array.isArray(response.data.message)) {
-          // Handle empty/unexpected response - treat as no orders instead of erroring
-          this.logApiActivity({ type: 'shipway-empty-or-unexpected-format', data: response.data });
-          currentPageOrders = [];
-          console.log(`  ⚠️ Page ${page}: Empty or unexpected response, treating as no orders - stopping pagination`);
-        } else {
-          throw new Error('Unexpected Shipway API response format');
-        }
-
-        console.log(`  ✅ Page ${page}: ${currentPageOrders.length} orders`);
-
-        // Add orders from this page to our collection
-        allOrders = allOrders.concat(currentPageOrders);
-
-        // If we got 0 orders or fewer than 100 orders, we've reached the last page
-        if (currentPageOrders.length === 0) {
-          hasMorePages = false;
-          console.log(`  🏁 Last page reached (0 orders found, no more data)`);
-        } else if (currentPageOrders.length < 100) {
-          hasMorePages = false;
-          console.log(`  🏁 Last page reached (${currentPageOrders.length} < 100 orders)`);
-        } else {
-          console.log(`  ➡️ More pages available (${currentPageOrders.length} = 100 orders)`);
-        }
-
-        page++;
-
-        // Safety check to prevent infinite loops (lower limit for clone verification)
-        if (page > 10) {
-          console.log('⚠️ Safety limit reached (10 pages), stopping pagination for clone verification');
-          break;
-        }
-      }
-
-      console.log(`🎉 Clone verification pagination complete! Total orders fetched: ${allOrders.length}`);
+      const { allOrders } = await this.fetchOrdersInDateRange({
+        timeout: 10000, // Shorter per-page timeout for clone verification
+        logType: 'shipway-fetch-orders'
+      });
 
       return allOrders;
     } catch (error) {
